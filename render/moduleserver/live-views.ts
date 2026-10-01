@@ -33,6 +33,8 @@ import { orderScene } from "../demos/scene-order.ts";
 import { applyVrPreset, setLook3D, setVolumeRenderingOn, volumeRenderingOn } from "../demos/tf-editor.ts";
 import { applyLook, colorizeCostMB, currentLook, forgetLooks, LOOKS } from "../demos/looks.ts";
 import { currentFrames } from "../../logic/sequences.ts";
+import { GEAR_SVG } from "../demos/gear-icon.ts";
+import { nearestRayHit } from "../demos/probe-extras.ts";
 import { CARDIAC_VIEWS, type CardiacAxes, type CardiacView, cardiacAxes, cardiacPlane, findCardiacLabels, planeToSliceToRAS } from "../../logic/cardiac-axes.ts";
 import { lineAxes, lineFieldOfView, lineOrientation, linePlane, lineRange, type LineView, LINE_VIEWS, parseLineOrientation } from "../../logic/line-axes.ts";
 import { decodedCacheReport, fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
@@ -160,13 +162,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
    * loaded scene should do.
    */
   const view3dOpts: { box?: boolean; labels?: boolean; marker?: boolean; shade?: [number, number, number, number]; drawing?: boolean } = {};
-  /** The ⋮ panel's controls re-read view3dOpts through these when a node changes them from outside. */
+  /** The 3D view's gear panel's controls re-read view3dOpts through these when a node changes them from outside. */
   const panelRepaints: (() => void)[] = [];
   // THE DRAWING LOOK, remembered per machine: matte surfaces, outlines, shadow in the crevices
   // (scene-renderer.ts). On by default -- Ron, 2026-09-19, on the mockup: "let's do the drawing
   // look" -- and a switch here because a plain-lit picture is sometimes what a figure needs.
   // Settings › 3D view decides how a new window starts (`[View3D] drawing`, `lighting` in
-  // settings.ini, read here through cfg.startup); the switch in the ⋮ panel changes this window
+  // settings.ini, read here through cfg.startup); the switch in the 3D view's gear panel changes this window
   // only. Before 2026-09-20 the switch itself was remembered in localStorage; that value is
   // honored once more as the fallback, so nobody's choice is lost on the day of the change.
   const startup = cfg.startup?.() ?? {};
@@ -219,6 +221,40 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     scene?.syncUniforms?.();
   };
   const AXIS_LABELS: [Vec3, string][] = [[[1, 0, 0], "R"], [[-1, 0, 0], "L"], [[0, 1, 0], "A"], [[0, -1, 0], "P"], [[0, 0, 1], "S"], [[0, 0, -1], "I"]];
+  /**
+   * LABELS THAT WOULD COVER WHAT IS DRAWN (Ron, 2026-10-01: "axis labels should not be visible when they obstruct the
+   * view. Take the behavior in slicer as a guidance"). Slicer's labels are 3D text the anatomy hides by depth; ours are
+   * drawn flat over the picture, so a label can sit on the tracts or the organs. Once the camera has been still for a
+   * moment, every label's disc is tested against the picture (the 3D pick at its center and four points on its rim:
+   * surfaces, then the ray march's fields) and a label that lands on anything drawn is left out until the camera moves
+   * again. While it moves, the last answer holds.
+   */
+  let labelsCovering = new Set<string>(), labelCheckKey = "", labelCheckTimer: ReturnType<typeof setTimeout> | undefined, labelCheckRunning = false;
+  /** Bumped when what the 3D view draws changes (a field set or removed), so the check runs again without a camera
+   *  move; and when the pointer moves over the view, so the probe's picks go first (critic, 2026-10-01, 9 and 10). */
+  let fields3dGen = 0, labelCheckGen = 0;
+  const checkLabels = (key: string, spots: { label: string; x: number; y: number; r: number }[], w: number, h: number) => {
+    if (labelCheckTimer) clearTimeout(labelCheckTimer);
+    labelCheckTimer = setTimeout(async () => {
+      if (!scene || labelCheckRunning) return;
+      labelCheckRunning = true;
+      try {
+        const covering = new Set<string>(), gen = labelCheckGen;
+        for (const sp of spots) {
+          if (gen !== labelCheckGen) return;                                   // the pointer moved: the probe goes first
+          for (const [dx, dy] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const u = (sp.x + dx * sp.r) / w, v = (sp.y + dy * sp.r) / h;
+            if (u < 0 || v < 0 || u > 1 || v > 1) continue;
+            const hit = (await scene.pickMeshSurface(u, v)) ?? (await scene.pick(u, v));
+            if (hit) { covering.add(sp.label); break; }
+          }
+        }
+        labelsCovering = covering; labelCheckKey = key;
+        drawThreeOverlay();
+      } catch { /* a failed check leaves the labels as they were */ }
+      finally { labelCheckRunning = false; if (labelCheckKey !== key) { labelCheckKey = ""; } }
+    }, 200);
+  };
   /** vtkMRMLViewDisplayableManager chrome: the scene bounding box, R/A/S/L/P/I labels, orientation marker. */
   const drawThreeOverlay = () => {
     const ov = threeOverlay, g = ov.getContext("2d")!;
@@ -257,6 +293,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const c: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
       const half: Vec3 = [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2];
       g.font = `bold ${13 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "middle";
+      const camKey = [...camera.position, ...camera.focalPoint, ...camera.viewUp, ...lo, ...hi, w, h].map((x) => x.toFixed(2)).join(",") + `|${fields3dGen}`;
+      const spots: { label: string; x: number; y: number; r: number }[] = [];
       for (const [d, label] of AXIS_LABELS) {
         const at: Vec3 = [c[0] + d[0] * half[0] * 1.08, c[1] + d[1] * half[1] * 1.08, c[2] + d[2] * half[2] * 1.08];
         // HIDE THE LABEL THAT WOULD LAND ON THE ANATOMY -- Slicer's answer, and the reason to copy it.
@@ -268,12 +306,20 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         // The far face's center projects INSIDE the silhouette: perspective pulls it toward the
         // vanishing point, and this overlay carries no depth, so it draws over the organs instead of
         // behind them. The near and side faces project outside, where a label belongs.
-        if (labelFacesAway(d, camera.directionOfProjection)) continue;
+        // SLICER'S RULE (vtkMRMLViewDisplayableManager::UpdateAxisLabelVisibility) hides the label whose face points
+        // TOWARD the camera within 45 degrees -- the one in front of the object -- and leaves the far one to depth.
+        // Ours have no depth, so the far one goes by angle too (60 degrees, labelFacesAway). (Critic, 2026-10-01,
+        // finding 9: this said "Slicer's" of the far rule alone.)
+        const toward: Vec3 = [-d[0], -d[1], -d[2]];
+        if (labelFacesAway(toward, camera.directionOfProjection, Math.SQRT1_2) || labelFacesAway(d, camera.directionOfProjection)) continue;
         const p = proj(at);
         if (p.depth <= 0) continue;
+        spots.push({ label, x: p.x, y: p.y, r: 10 * dpr });
+        if (labelsCovering.has(label)) continue;
         g.fillStyle = cssToken("--sl-scrim-strong", "rgba(0,0,0,.55)"); g.beginPath(); g.arc(p.x, p.y, 10 * dpr, 0, Math.PI * 2); g.fill();
         g.fillStyle = VIEW_INK; g.fillText(label, p.x, p.y);
       }
+      if (camKey !== labelCheckKey) checkLabels(camKey, spots, w, h);
     }
     if (wantMarker) drawOrientationMarker(g, w, h, (p: Vec3) => { const q = camera.worldToDisplay([camera.focalPoint[0] + p[0], camera.focalPoint[1] + p[1], camera.focalPoint[2] + p[2]], w, h); const f = camera.worldToDisplay(camera.focalPoint, w, h); return { dx: q.x - f.x, dy: q.y - f.y }; }, 1);
   };
@@ -805,7 +851,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     bindSegPair(sr, 0);
   };
   const segShown = () => segOverlays.length > 0 || segOverlay !== null || (segLabels !== null && segPaletteTex !== null);
-  const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
+  /** layer -> items, for every slice view; a layer for ONE view is keyed `layer@cell` (setOverlay with a cell name,
+   *  2026-10-01: each view's tract crossings belong to that view only -- in "*" they showed in the other views wherever
+   *  they lay within the slab, along the lines where the planes meet). */
+  const overlays = new Map<string, OverlayItem[]>();
   const viewStateDM = new ViewStateDisplayableManager();  // interaction / selection / crosshair / segmentEditor nodes
   const viewState: ViewState = viewStateDM.state;         // read the manager's state directly (never a stale copy)
   // Read app-level state straight from the model (live.nodes): the single source of truth, never a stale copy.
@@ -889,7 +938,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const proj = (ras: Vec3) => { const r = c.slice.rasToView(c.orientKey, off, ras, aspect); return { x: r.u * ov.width, y: r.v * ov.height, d: r.distMm }; };
     const rgba = (col: number[], a = 1) => `rgba(${Math.round(col[0] * 255)},${Math.round(col[1] * 255)},${Math.round(col[2] * 255)},${a})`;
     g.lineWidth = 2 * dpr; g.font = `${11 * dpr}px system-ui`;
-    for (const items of overlays.values()) {
+    for (const [key, items] of overlays) {
+      const at = key.lastIndexOf("@");
+      if (at > 0 && key.slice(at + 1) !== c.name) continue;      // another view's layer
       for (const it of items) {
         if (it.kind === "point") {
           const p = proj(it.ras); const inPlane = Math.abs(p.d) <= SLAB_MM;
@@ -1085,9 +1136,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   const view: MirrorView & { setViewState?: (st: ViewState) => void } = {
     setViewState(_st) { crosshairOverlay(); for (const c of cells.values()) drawOverlay(c); },
-    setOverlay(_cell, layer, items) { if (items.length) overlays.set(layer, items); else overlays.delete(layer); for (const c of cells.values()) drawOverlay(c); },
-    setField(k, f) { fields3d.set(k, f); applyShade(); rebuild3d(); },
-    removeField(k) { if (fields3d.delete(k)) rebuild3d(); },
+    setOverlay(cell, layer, items) {
+      const key = cell && cell !== "*" ? `${layer}@${cell}` : layer;
+      if (items.length) overlays.set(key, items); else overlays.delete(key);
+      for (const c of cells.values()) if (key === layer || c.name === cell) drawOverlay(c);
+    },
+    setField(k, f) { fields3d.set(k, f); fields3dGen++; applyShade(); rebuild3d(); },
+    removeField(k) { if (fields3d.delete(k)) { fields3dGen++; rebuild3d(); } },
     segments3DDrawnByVolume(segId?: string) { return segId ? colorizedSegs.has(segId) : colorizedSegs.size > 0; },
     segmentColoredByVolumeRendering(segId: string) { return vrColoredSegs.has(segId); },
     onSegments3DChanged(cb: () => void) { seg3DListeners.add(cb); return () => seg3DListeners.delete(cb); },
@@ -1141,7 +1196,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     setViewChrome(ch) {
       chrome3d = ch;
       // The node's own fields for the drawing look and the lighting (a restored scene, or a peer
-      // that carries them): applied here so what the node says is what the view does; the ⋮ panel
+      // that carries them): applied here so what the node says is what the view does; the 3D view's gear panel
       // reads the same state when it opens.
       // The shading version a restored scene was saved with (render/shading-versions.ts); a scene without one keeps the window's.
       if (typeof ch.shadingVersion === "number" && ch.shadingVersion !== shadingVersion()) setShadingVersion(ch.shadingVersion);
@@ -1280,7 +1335,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   /**
    * THE 3D VIEW IS A NODE TOO (`nativeView-3D`, kind "3d"): the drawing look, the bounding box,
-   * the axis labels, the orientation marker and the lighting preset -- what the ⋮ panel holds --
+   * the axis labels, the orientation marker and the lighting preset -- what the 3D view's gear panel holds --
    * written as data whenever one of them changes, so a scene writer finds them on a node and a
    * scene loader can put them back (SCENE-DESIGN §4). The 3D view manager reacts to the node being
    * added by setting the chrome from it, with the same values it already has, so adding it changes
@@ -1521,7 +1576,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
    * (desktop/pictures.ts), which writes it where Ron's downloads go and answers with the path.
    */
   const pictureOpts: { only3d: boolean; panel: boolean; scale: number } = { only3d: false, panel: false, scale: 1 };
-  // Settings › Pictures sets these (the shipped defaults above until it does); the ⋮ panel's Advanced
+  // Settings › Pictures sets these (the shipped defaults above until it does); the 3D view's gear panel's Advanced
   // shows them and changes them for this window.
   const pictureRepaints: (() => void)[] = [];
   (globalThis as unknown as { __setPictureDefaults?: (d: typeof pictureOpts) => void }).__setPictureDefaults = (d) => { Object.assign(pictureOpts, d); for (const f of pictureRepaints) f(); };
@@ -1685,7 +1740,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const close = () => { panel.hidden = true; paintOpeners(); };
     const opener = (glyph: string, title: string) => {
       const b = document.createElement("button");
-      b.textContent = glyph; b.title = title;
+      b.innerHTML = glyph; b.title = title;
       b.addEventListener("click", () => { panel.hidden = !panel.hidden; paintOpeners(); });
       openers.push(b); return b;
     };
@@ -1699,7 +1754,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // ring of specks that reads as noise, and several systems substitute a color emoji for it. Three
     // dots are five strokes at any size, and "more here" is what this button actually means -- the
     // panel is not only settings. Vertical because the bar is horizontal.
-    const gear = opener("\u22EE", "3D view settings — lighting, bounding box, orientation marker");
+    // AND A GEAR AGAIN, drawn (Ron, 2026-10-01, on the slice views' settings mockup: "We have it for the 3d viewer with
+    // three vertical dots as an icon. I like your cogwheel better. Only for the 2d and 3d viewers."): an outline in
+    // SVG (gear-icon.ts), not U+2699, so it does not turn to specks or an emoji.
+    const gear = opener(GEAR_SVG, "3D view settings — lighting, bounding box, orientation marker");
 
     // A CLOSE CONTROL, because a popup that only its opener can dismiss is a trap: Ron asked for "a
     // close function on the popup". Clicking into the view also closes it, but that is not
@@ -2180,7 +2238,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
    * does, which is Ron's standing rule seen from the probe's side.
    *
    * The opacity pick REMAINS as the fallback, for a ray that meets no segmentation at all: on a bare
-   * volume, "where does this become substance" is the only question there is.
+   * volume, "where does this become substance" is the only question there is. What an extension draws opaque in
+   * front of a structure (fiber tubes) answers for itself along the ray and wins when nearer (registerRayHits).
    *
    * ONE PROBE IN FLIGHT, latest cursor wins. Both routes end in a GPU readback, which is a full
    * CPU<->GPU round trip -- ~14 ms for the pick and ~16 ms for the ray march, essentially all of it
@@ -2191,8 +2250,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   let pick3dBusy = false, pick3dAt = 0;
   const probe3dWarned = new Set<string>();
   /** The point on what the 3D view shows under (x, y), RAS mm, or null: the surface seen first, else the first
-   *  visible structure along the ray, else where the volume becomes substance. The probe names it; a click while
-   *  placing a markup puts a point there (as Slicer places markups on what is shown in 3D). */
+   *  visible structure along the ray -- either of them unless an extension's opaque object (fiber tubes) is more
+   *  than a voxel nearer -- else where the volume becomes substance. The probe names it; a
+   *  click while placing a markup puts a point there (as Slicer places markups on what is shown in 3D). */
   const pickRas3d = async (x: number, y: number): Promise<Vec3 | null> => {
     if (!scene) return null;
       const u = x / Math.max(1, three.canvas.clientWidth), v = y / Math.max(1, three.canvas.clientHeight);
@@ -2260,7 +2320,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         );
         if (hit) ras = hit.ras;
       }
-      // No segmentation on this ray: fall back to where the volume becomes substance.
+      // WHAT STANDS IN FRONT (Ron, 2026-10-01: the mouse over a fiber tube in front of a tumor named only the tumor):
+      // what an extension draws opaque -- the fiber tubes -- answers for itself along the ray (probe-extras.ts
+      // registerRayHits), and wins when it is more than a voxel nearer the eye than the structure found above. NOT the
+      // march's 50% pick: that brought back the volume-rendering case recorded above (soft tissue in front of the
+      // structure looked at, and an answer that changes with an opacity slider; critic, 2026-10-01, finding 4).
+      const w = scene.worldRay(u, v);
+      const t = w ? nearestRayHit(w.origin, w.dir) : null;
+      if (w && t !== null) {
+        const hit: Vec3 = [w.origin[0] + w.dir[0] * t, w.origin[1] + w.dir[1] * t, w.origin[2] + w.dir[2] * t];
+        const along = (p: Vec3) => (p[0] - w.origin[0]) * w.dir[0] + (p[1] - w.origin[1]) * w.dir[1] + (p[2] - w.origin[2]) * w.dir[2];
+        if (!ras || t < along(ras) - vox) return hit;
+      }
+      // No structure on this ray: fall back to where the volume becomes substance.
       ras ??= await scene.pick(u, v);
       return ras;
   };
@@ -2283,6 +2355,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     finally { pick3dBusy = false; }
   };
   three.canvas.addEventListener("pointermove", (e) => {
+    labelCheckGen++;
     const { x, y } = xy3d(e);
     if (cam3d.action === "none") { void probe3d(x, y); return; }
     // NO BUTTON HELD, SO NO ROTATION -- whatever swallowed the release (a browser drag, a release
@@ -2709,8 +2782,31 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       lines: () => lineMarkups().map((n) => ({ id: String(n.id), name: String(n.name ?? "Line") })),
       toggle3D: () => setSliceIn3D(c.name, !sliceIn3D.has(c.name)),
       in3D: () => sliceIn3D.has(c.name),
+      // THE GEAR'S LAYERS (slice-controller.ts): the images a person can pick -- every image not hidden and not a label
+      // map, and of a sequence the frame on screen, once, by the sequence's name -- and this view's composite.
+      layers: () => {
+        const frames = currentFrames(live);
+        const list = [...live.nodes.values()].filter((n) => n.type === "image" && !n.labelmap && (!n.hidden || frames.has(n.id)));
+        const full = (n: { id: string; name?: unknown }) => frames.get(n.id) ?? String(n.name ?? n.id);
+        const short = (n: { id: string; name?: unknown }) => full(n).replace(/^.*?·\s*/, "").replace(/^(MR|CT|PT|US)\s+/, "");
+        // Two patients' T1s would both read "T1w": a name shared by two keeps its patient (critic, 2026-10-01, 12).
+        const count = new Map<string, number>(); for (const n of list) count.set(short(n), (count.get(short(n)) ?? 0) + 1);
+        const images = list.map((n) => ({ id: n.id, name: (count.get(short(n)) ?? 0) > 1 ? full(n) : short(n) }));
+        const comp = [...live.nodes.values()].find((n) => n.type === "sliceComposite" && n.layoutName === c.name);
+        const refs = (comp?.refs as Record<string, string[]> | undefined) ?? {};
+        return { images, background: refs.background?.[0] ?? null, foreground: refs.foreground?.[0] ?? null, opacity: (comp?.foregroundOpacity as number | undefined) ?? 0 };
+      },
+      setLayers: (change, all) => {
+        for (const comp of [...live.nodes.values()].filter((n) => n.type === "sliceComposite" && (all || n.layoutName === c.name))) {
+          if (change.background) live.write({ op: "patch", id: comp.id, path: "#/refs/background", value: [change.background] });
+          if (change.foreground !== undefined) live.write({ op: "patch", id: comp.id, path: "#/refs/foreground", value: change.foreground ? [change.foreground] : [] });
+          if (change.opacity !== undefined) live.write({ op: "patch", id: comp.id, path: "#/foregroundOpacity", value: Math.max(0, Math.min(1, change.opacity)) });
+        }
+      },
       onChange: (cb) => { sliceChangeListeners.add(cb); return () => sliceChangeListeners.delete(cb); },
     });
+    // The gear's panel follows layer changes made elsewhere (a module's map buttons, a run) while it is open.
+    live.subscribe((ch) => { if (ch.type === "sliceComposite" || ch.type === "image" || ch.kind === "reset" || ch.kind === "remove") (c as SliceCell & { controller?: SliceController }).controller?.refresh(); });
     // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
     // them (capture phase, before the control handles it) and write the frame back on release
     c.canvas.addEventListener("pointerdown", (e) => { if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) c.branched = true; }, true);
@@ -3223,7 +3319,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     return { min: Math.min(a, b), max: Math.max(a, b), step: step || 1 };
   };
   /**
-   * Fit this slice view to its volume — the bar's ⤢ button.
+   * Fit this slice view to its volume — "Fit to the image" in the view's gear panel (slice-controller.ts).
    *
    * THE FITTED FRAME HAS TO REACH THE NODE, not just the renderer. The node is the authority:
    * applyPlane re-applies `plane.centerRAS/fovX/fovY` on every render whenever the cell is not
@@ -3437,7 +3533,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
      * sixth right rib in every network). The renderer's target is BGRA on this platform, so the
      * bytes are swizzled before they become an image.
      */
-    /** The picture the ⋮ panel saves, from a script: `__savePicture(name, w, h)` is the 3D view alone at
+    /** The picture the 3D view's gear panel saves, from a script: `__savePicture(name, w, h)` is the 3D view alone at
      *  that size; `__savePicture({ only3d, panel, scale, name })` is the panel's own choices. */
     /** The 3D view as a converged PNG data URL, nothing written anywhere -- for the test browser and the
      *  critic, which must not put files into the person's Downloads. */

@@ -566,11 +566,28 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
 .sl-slice-3d.sl-active { background: var(--sl-accent-wash); border-color: var(--sl-accent); color: var(--sl-accent); }
 .sl-slice-fit { flex: 0 0 auto; background: transparent; border: 1px solid var(--sl-control-edge); color: var(--sl-fg); border-radius: 4px; font-size: 12px; line-height: 1; padding: 1px 5px; cursor: pointer; }
 .sl-slice-fit:hover { background: var(--sl-surface-3); }
+/* THE GEAR and its panel (Ron, 2026-10-01): Fit, the image, one over it, how much shows through, every slice view alike. Same surface as the 3D
+   view's panel; [hidden] restated because an author `display` beats the UA rule (see .sl-3d-panel[hidden]). */
+.sl-slice-gear { display: inline-flex; align-items: center; padding: 1px 4px; }
+.sl-slice-gear.sl-active { background: var(--sl-accent-wash); border-color: var(--sl-accent); color: var(--sl-accent); }
+.sl-slice-panel { position: absolute; top: 28px; right: 6px; z-index: 6; background: var(--sl-surface); border: 1px solid var(--sl-border); border-radius: 4px;
+  box-shadow: var(--sl-shadow-float); padding: 8px; display: grid; gap: 8px; width: 250px; pointer-events: auto; font: 12px var(--sl-font); color: var(--sl-fg); }
+.sl-slice-panel[hidden] { display: none; }
+.sl-slice-panel-fit { background: var(--sl-surface-2); color: var(--sl-fg); border: 1px solid var(--sl-control-edge); border-radius: 4px; padding: 3px 6px; cursor: pointer; font: 12px var(--sl-font); }
+.sl-slice-panel-fit:hover { background: var(--sl-surface-3); }
+.sl-slice-panel-grid { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 6px 8px; align-items: center; }
+.sl-slice-panel-grid > label { color: var(--sl-fg-muted); }
+.sl-slice-panel-grid select { min-width: 0; width: 100%; }
+.sl-sp-op { display: flex; gap: 6px; align-items: center; }
+.sl-sp-op input { flex: 1; min-width: 0; }
+.sl-sp-op span { flex: 0 0 4ch; text-align: right; font: 11px var(--sl-font-mono); color: var(--sl-fg-muted); }
+.sl-sp-all { display: flex; gap: 6px; align-items: center; color: var(--sl-fg-muted); }
 
 /* ---- 3D controller bar ---- */
 .sl-3d-bar { position: absolute; top: 3px; left: 0; right: 0; z-index: 4; display: flex; align-items: center; gap: 3px; height: 22px; padding: 0 8px; background: linear-gradient(to bottom, var(--sl-view-bar), var(--sl-view-bar-end)); pointer-events: auto; }
 .sl-3d-bar button { background: var(--sl-surface-2); color: var(--sl-fg); border: 1px solid var(--sl-control-edge); border-radius: 3px; font: 700 10px var(--sl-font); width: 20px; height: 16px; line-height: 1; cursor: pointer; padding: 0; }
 .sl-3d-bar button:hover { background: var(--sl-surface-3); }
+.sl-3d-bar button svg { width: 12px; height: 12px; margin: auto; }
 /* The frame rate while the view moves (Ron, 2026-09-23: "It would be nice to be able to see the fps"):
    plain text beside the look-from buttons, on the view's own ink so it reads over the gradient. */
 .sl-3d-fps { margin-left: 8px; font: 600 11px var(--sl-font); color: var(--sl-view-ink); opacity: 0.85; white-space: nowrap; font-variant-numeric: tabular-nums; }

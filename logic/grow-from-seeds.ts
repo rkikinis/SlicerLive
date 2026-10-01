@@ -98,3 +98,19 @@ export async function growFromSeeds(device: GPUDevice, seeds: ArrayLike<number>,
     seg.destroy(); gc.destroy(); imageTex.destroy();
   }
 }
+
+/**
+ * GROW IN PLACE, as the Segment Editor's effect does: the segments in `hidden` are neither strokes nor overwritten
+ * (critic, 2026-10-01, finding 7); everything else in the box around the strokes becomes the strokes' labels.
+ */
+export async function growInPlace(device: GPUDevice, labelmap: Uint8Array, image: ArrayLike<number>, dims: Vec3, hidden: Set<number>): Promise<{ out: Uint8Array; box: { lo: Vec3; hi: Vec3 }; ms: number }> {
+  const seeds = hidden.size ? labelmap.map((v) => hidden.has(v) ? 0 : v) : labelmap;
+  const r = await growFromSeeds(device, seeds, image, dims);
+  const out = new Uint8Array(labelmap);
+  const [nx, ny] = dims, { lo, hi } = r.box;
+  for (let z = lo[2]; z < hi[2]; z++) for (let y = lo[1]; y < hi[1]; y++) {
+    const row = (z * ny + y) * nx;
+    for (let x = lo[0]; x < hi[0]; x++) if (!hidden.has(labelmap[row + x])) out[row + x] = r.labels[row + x];
+  }
+  return { out, box: r.box, ms: r.ms };
+}

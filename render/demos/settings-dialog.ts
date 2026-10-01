@@ -220,7 +220,7 @@ export function openSettingsDialog(deps: SettingsDeps): void {
         select(SHADINGS.map((v) => [String(v.version), `${v.label} (v${v.version}, ${v.date})`] as [string, string]),
           () => String(st.getNumber("View3D", "shading", SETTING_DEFAULTS.View3D.shading)),
           (v) => { st.set("View3D", "shading", Number(v)); setShadingVersion(Number(v)); })));
-      into.appendChild(hint("These take effect the next time a window opens. The 3D view's ⋮ menu changes them for the window you are in."));
+      into.appendChild(hint("These take effect the next time a window opens. The gear in the 3D view's bar changes them for the window you are in."));
     },
     reset() {
       st.set("View3D", "drawing", undefined); st.set("View3D", "lighting", undefined); st.set("View3D", "shading", undefined); setShadingVersion(SETTING_DEFAULTS.View3D.shading);

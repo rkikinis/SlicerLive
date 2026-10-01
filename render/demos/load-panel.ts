@@ -339,12 +339,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     help: `<p>Brings data into the session. Drag files onto the views from anywhere in the
       application, or use the buttons here.</p>
       <p><b>What arrives where.</b> A volume file (NRRD, NIfTI) and a DICOM series both land in the
-      <b>scene</b> — they show up under Data, and they are gone when the application restarts.
-      Loading is not importing: nothing here writes to the DICOM database. The database is written
-      only when you save a result into it.</p>
-      <p><b>DICOM</b> is read as a series, not as a file, so individual DICOM files cannot simply be
-      dropped: use <i>DICOM files…</i> or <i>DICOM folder…</i>, which group the files into series
-      first, or <i>DICOM database…</i> for what is already indexed.</p>
+      <b>scene</b> — they show up under Data. A volume file is gone when the application restarts.</p>
+      <p><b>DICOM from disk is also kept.</b> With <i>Also add to</i> ticked (it is, unless you untick it),
+      DICOM scans loaded with <i>DICOM files…</i>, <i>DICOM folder…</i> or dropped as a folder are copied into
+      the database named there, so they are there next time, after the disc or USB stick is gone. Nothing
+      already in the database is copied twice. Untick it to look without keeping.</p>
+      <p><b>Databases…</b> shows every database Albula knows, what each holds, and which one opens by
+      default; it makes a new one, adds an existing one, and offers the public brain tumor test cases
+      (a download, its size said first).</p>
+      <p><b>DICOM</b> is read as a series, not as a file: use <i>DICOM files…</i> or <i>DICOM folder…</i>,
+      which group the files into series first, or <i>DICOM database…</i> for what is already indexed.</p>
       <p><b>Deleting from the database</b> is done in the <i>DICOM database…</i> window: tick the
       series and press <b>Delete…</b>, then press it again once it says what it is about to destroy.
       That removes the files, the index rows and the derivation edge, backs the index up first and
@@ -2789,6 +2793,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
     // ---- "Also add to [database]" and the Databases window (Ron, 2026-10-01; desktop/db-import.ts) ----
     const addBox = el.querySelector(".sl-add-db") as HTMLInputElement, addWhich = el.querySelector(".sl-add-db-which") as HTMLSelectElement;
+    const noPatientData = new Set<string>();
     const afterDatabasesChanged = async (madeId?: string) => {
       await loadRegistered();
       await fillAddWhich(madeId);
@@ -2800,14 +2805,17 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       const usable = databases.filter((d) => d.exists);
       for (const d of usable) {
         const o = document.createElement("option");
-        o.value = d.id; o.textContent = dbName(d) + (d.description?.patientData ? " (patient data)" : "");
+        o.value = d.id; o.textContent = dbName(d) + (d.description?.patientData ? " (patient data)" : d.description?.patientData === false ? " (no patient data)" : "");
+        if (d.description?.patientData === false) noPatientData.add(d.id); else noPatientData.delete(d.id);
         addWhich.appendChild(o);
       }
       if (features.includes("create")) {
         const n = document.createElement("option"); n.value = "_new"; n.textContent = "New database…"; addWhich.appendChild(n);
       }
       const all = document.createElement("option"); all.value = "_all"; all.textContent = "All databases…"; addWhich.appendChild(all);
-      addWhich.value = usable.some((d) => d.id === keep) ? keep : (usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
+      // The default target is never a database that says it holds no patient data, unless it is the only one.
+      const allowed = usable.filter((d) => d.description?.patientData !== false);
+      addWhich.value = usable.some((d) => d.id === keep) ? keep : ((allowed.find((d) => d.current) ?? allowed[0]) ?? usable[0])?.id ?? "_new";
       (el.querySelector(".sl-add-row") as HTMLElement).hidden = !features.includes("import");
     };
     addWhich.addEventListener("change", () => {
@@ -2822,7 +2830,19 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const addTarget = (): { id: string; name: string } | null =>
       addBox.checked && addWhich.value && !addWhich.value.startsWith("_") ? { id: addWhich.value, name: addWhich.selectedOptions[0]?.textContent ?? addWhich.value } : null;
     /** Run an import, then say what happened where the person looks, with a button to see the result. */
+    /**
+     * ASKED FIRST when the target says it holds no patient data (critic, 2026-10-01, finding 2): scans from a disc are
+     * usually a patient's. True to go on.
+     */
+    const okForTarget = (target: { id: string; name: string }) => !noPatientData.has(target.id) ? Promise.resolve(true) : new Promise<boolean>((resolve) => {
+      shell.notify({
+        title: `“${target.name}” says it holds no patient data`,
+        body: "<p>These scans are about to be copied into it. If they are a patient's, choose another database under <i>Also add to</i>.</p>",
+        actions: [{ label: "Add them anyway", onClick: () => resolve(true) }, { label: "Don't add", primary: true, onClick: () => resolve(false) }],
+      });
+    });
     const reportImport = async (target: { id: string; name: string }, run: () => Promise<ImportResult>) => {
+      if (!(await okForTarget(target))) { status("Not added: the scans are shown but not kept."); return; }
       let r: ImportResult;
       try { r = await run(); }
       catch (e) { shell.notify({ title: "The scans were not added", body: esc((e as Error).message) }); status((e as Error).message); return; }

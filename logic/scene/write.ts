@@ -88,7 +88,13 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
     return vol ? whose(vol) : undefined;
   };
   const thePatient = all.map(whose).find((w): w is string => typeof w === "string");
+  // MADE AGAIN WHEN THE SCENE LOADS, so left out without a word: an image a module computes from what the scene holds
+  // (`recomputable: true` -- the Diffusion module's FA and Color FA, made from the scan in about a second when it
+  // loads), and its display. Ron, 2026-10-01: a scene with Color FA asked him to save the map to DICOM first.
+  const onTheFly = new Set(all.filter((n) => n.type === "image" && (n as { recomputable?: boolean }).recomputable)
+    .flatMap((n) => [n.id, ...(((n.refs as Obj | undefined)?.display as string[] | undefined) ?? [])]));
   for (const n of all) {
+    if (onTheFly.has(n.id)) continue;
     const org = (n.origin as Obj | undefined) ?? {};
     if (n.type === "image") {
       if (typeof org.seriesInstanceUID !== "string" && typeof org.savedSeriesInstanceUID !== "string") { refused.push(`${n.name ?? n.id}: not in the DICOM database (it came from a file, a sample or a crop) — save it to DICOM first, then the scene can list it`); if (!n.labelmap) fixable.push({ id: n.id, type: "image", name: String(n.name ?? n.id), why: "file" }); continue; }

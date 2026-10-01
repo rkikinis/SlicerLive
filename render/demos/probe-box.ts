@@ -74,6 +74,8 @@ const hex = (c?: [number, number, number]) =>
  * Mount the readout into `sidebar` (appended last, so it stays at the bottom) and subscribe.
  * Returns an unsubscribe.
  */
+import { probeExtraRows } from "./probe-extras.ts";
+
 export function mountProbeBox(sidebar: HTMLElement): () => void {
   if (!document.getElementById("sl-probe-css")) {
     const st = document.createElement("style");
@@ -130,9 +132,13 @@ export function mountProbeBox(sidebar: HTMLElement): () => void {
         `<span class="sl-probe-ijk">${r.ijk.join(", ")}</span></div>` +
         `<span class="sl-probe-src">${escapeHtml(r.source)}${tail}</span>`;
     }).join("");
+    // AND WHAT EXTENSIONS KNOW ABOUT THIS POINT (render/demos/probe-extras.ts): the fiber tracts passing here, say.
+    const extra = probeExtraRows(p.ras).map((r) =>
+      `<div class="sl-probe-row">${r.color ? `<span class="sl-probe-dot" style="background:rgb(${r.color.map((v) => Math.round(v * 255)).join(",")})"></span>` : ""}` +
+      `<span class="sl-probe-seg">${escapeHtml(r.text)}</span></div><span class="sl-probe-src">${escapeHtml(r.source)}</span>`).join("");
     box.innerHTML = head +
       `<div class="sl-probe-pos">${p.cell} &nbsp; ${rasText(p.ras)}</div>` +
-      (rows ? rows + noneLine : `<div class="sl-probe-hint">outside every dataset</div>`);
+      (rows || extra ? rows + extra + noneLine : `<div class="sl-probe-hint">outside every dataset</div>`);
   };
 
   const hook = (globalThis as unknown as { __onProbe?: (fn: (p: ProbeReading | null) => void) => () => void }).__onProbe;

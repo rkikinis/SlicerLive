@@ -75,3 +75,20 @@ Deno.test("nothing loaded is not a scene; another patient's series is refused by
   const tfs = Object.values(w.doc.nodes as Record<string, { type: string }>).filter((n) => n.type === "transferFunction");
   assertEquals(tfs.length, 1);
 });
+
+Deno.test("an image a module makes again on load (recomputable: Color FA) is left out without a word, with its display", async () => {
+  const extra: MrsonNode[] = [
+    { type: "image", id: "local-image-cfa", name: "Color FA", dims: [2, 2, 2], ijkToRAS: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], recomputable: true, refs: { display: ["local-display-cfa"] }, origin: { local: true } } as unknown as MrsonNode,
+    { type: "scalarVolumeDisplay", id: "local-display-cfa", window: 1, level: 0.5 } as unknown as MrsonNode,
+  ];
+  const nodes = [...liveNodes(), ...extra];
+  // The map is over the image in a slice view: the reference goes with it.
+  const comp = nodes.find((n) => n.type === "sliceComposite") as Record<string, unknown> | undefined;
+  if (comp) comp.refs = { ...(comp.refs as Record<string, string[]>), foreground: ["local-image-cfa"] };
+  const w = await writeScene(nodes, opts);
+  assertEquals(w.refused, []);
+  assertEquals(w.fixable, []);
+  assertEquals(w.problems, []);
+  const text = JSON.stringify(w.doc);
+  assert(!text.includes("Color FA") && !text.includes("local-image-cfa") && !text.includes("local-display-cfa"));
+});

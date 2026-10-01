@@ -36,6 +36,7 @@ import { readSettings, resolveSettingsPath, writeSettings } from "./settings-fil
 import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
+import { getTestCases, TEST_CASES, testCasesComplete, type TestCaseProgress } from "./test-cases.ts";
 
 const SECTION = "Database";
 
@@ -139,7 +140,11 @@ const FEATURES = [
   "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
   "import",        // POST /_db/<id>/_import {token} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
+  "test-cases",    // GET /_db/_test-cases (what, how big, which database has them); POST to start; GET /_db/_test-cases/<job>
 ];
+
+/** The test-case download (desktop/test-cases.ts): one at a time, its progress kept while the server runs. */
+let testCasesJob: { job: string; db: string; progress: TestCaseProgress; error?: string; ended?: number } | undefined;
 
 /** Imports running or finished in this process, by job id: their progress, then their result. Finished ones go after an hour. */
 const imports = new Map<string, { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number }>();
@@ -275,6 +280,52 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 400 });
     }
+  }
+
+  // THE BRAIN TUMOR TEST CASES (Ron, 2026-10-01: "a good feature to have, with a warning about the size").
+  // GET: what they are and how big, and which registered database already holds them (by its description's source).
+  // POST: make that database if there is none ("Albula Databases" in the home folder), then download and convert into it.
+  if (url.pathname === "/_db/_test-cases") {
+    // Recognized by its folder as well as by its description's source (critic, finding 16: an edited "where from" made a
+    // second registration of the same folder).
+    let defaultPath = ""; try { defaultPath = `${defaultDatabasesFolder()}/${TEST_CASES.name}`; } catch { /* no home folder */ }
+    const mine = (await registeredDatabases(galleryRoot)).find((d) => d.exists && (d.path === defaultPath || d.description?.source?.startsWith(TEST_CASES.source.split(",")[0])));
+    if (req.method === "GET") {
+      return Response.json({ name: TEST_CASES.name, holds: TEST_CASES.holds, source: TEST_CASES.source, approxBytes: TEST_CASES.approxBytes, diskBytes: TEST_CASES.diskBytes, minutes: TEST_CASES.minutesOnFastConnection, db: mine?.id ?? null,
+        complete: mine ? await testCasesComplete(mine.path) : false,
+        running: testCasesJob && !testCasesJob.ended ? testCasesJob.job : null }, noStore);
+    }
+    if (req.method === "POST") {
+      if (testCasesJob && !testCasesJob.ended) return Response.json({ job: testCasesJob.job, id: testCasesJob.db }, noStore);
+      try {
+        let id = mine?.id, path = mine?.path;
+        if (!id || !path) {
+          path = `${defaultDatabasesFolder()}/${TEST_CASES.name}`;
+          if (!(await Deno.stat(`${path}/ctkDICOM.sql`).then(() => true, () => false))) {
+            await createDatabase(path, { name: TEST_CASES.name, holds: TEST_CASES.holds, patientData: false, source: TEST_CASES.source });
+          }
+          id = idFor(TEST_CASES.name, (await registeredDatabases(galleryRoot)).map((d) => d.id));
+          await updateDatabases(galleryRoot, { register: { id, path } });
+        }
+        const rec: NonNullable<typeof testCasesJob> = { job: crypto.randomUUID(), db: id, progress: { phase: "starting", subject: "", done: 0, subjects: 0, bytes: 0, added: 0, already: 0, skipped: [], failed: [], earlier: 0 } };
+        testCasesJob = rec;
+        const dbPath = path;
+        // Behind any import into the same database (the same queue), so "already there" stays true.
+        const prev = importQueue.get(dbPath) ?? Promise.resolve();
+        const run = prev.catch(() => {}).then(() => getTestCases(dbPath, (p) => { rec.progress = p; }))
+          .catch((e) => { rec.error = (e as Error).message; })
+          .finally(() => { rec.ended = Date.now(); rec.progress = { ...rec.progress, phase: "done" }; });
+        importQueue.set(dbPath, run);
+        return Response.json({ job: rec.job, id }, noStore);
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 500 });
+      }
+    }
+  }
+  const tcj = /^\/_db\/_test-cases\/([0-9a-f-]{36})$/.exec(url.pathname);
+  if (tcj && req.method === "GET") {
+    if (testCasesJob?.job !== tcj[1]) return Response.json({ error: "no such download" }, { status: 404 });
+    return Response.json({ db: testCasesJob.db, progress: testCasesJob.progress, error: testCasesJob.error, done: !!testCasesJob.ended }, noStore);
   }
 
   // GET /_db/_import/<job> -- an import's progress, then its result.

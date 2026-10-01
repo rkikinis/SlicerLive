@@ -103,7 +103,65 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       row.innerHTML = `<span class="sl-hint">This Albula's server is older than this window and cannot make databases; rebuild the application.</span>`;
     }
     body.appendChild(row);
+    if (features.includes("test-cases")) await testCases(body);
     if (o.startWithNew && canCreate) { o.startWithNew = false; newForm(row); }
+  };
+
+  /**
+   * THE PUBLIC TEST CASES (desktop/test-cases.ts; Ron, 2026-10-01: "a good feature to have, with a warning about the
+   * size"). Offered while no database holds them; the size is said before anything is fetched; progress while it runs.
+   */
+  const testCases = async (into: HTMLElement) => {
+    const t = await fetch("/_db/_test-cases", { cache: "no-store" }).then((r) => r.json()).catch(() => null) as { name: string; holds: string; source: string; approxBytes: number; diskBytes?: number; minutes?: number; db: string | null; complete?: boolean; running: string | null } | null;
+    // OFFERED UNTIL A RUN HAS FINISHED (critic, finding 3: a stopped download could not be continued from here).
+    if (!t || (t.db && t.complete && !t.running)) return;
+    const box = document.createElement("div");
+    box.className = "sl-dbw-form";
+    into.appendChild(box);
+    const gb = (t.approxBytes / 1e9).toFixed(1);
+    const follow = (job: string) => {
+      box.innerHTML = `<div class="sl-dbw-name">${esc(t.name)}</div><div class="sl-dbw-meta sl-tc-p">Starting…</div>`;
+      const line = box.querySelector(".sl-tc-p") as HTMLElement;
+      const poll = async () => {
+        const j = await fetch(`/_db/_test-cases/${job}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null) as { progress: { phase: string; subject: string; done: number; subjects: number; bytes: number; added: number; skipped: string[]; failed: string[]; earlier?: number }; error?: string; done: boolean; db?: string } | null;
+        if (!j) { line.textContent = "The download's progress cannot be read just now; trying again…"; setTimeout(poll, 4000); return; }
+        const p = j.progress;
+        const mb = Math.round(p.bytes / 1e6);
+        if (!j.done) {
+          line.textContent = `${p.phase === "converting" ? "Converting" : "Downloading"} ${p.subject ? `${p.subject}, ` : ""}person ${Math.min(p.done + 1, p.subjects || 1)} of ${p.subjects || "…"} · ${mb.toLocaleString()} MB so far. You can keep working; this window can be closed.`;
+          setTimeout(poll, 1500);
+          return;
+        }
+        line.textContent = j.error ? `Stopped: ${j.error}. Start again to continue where it stopped.`
+          : `Done: ${p.done - p.skipped.length - p.failed.length - (p.earlier ?? 0)} people added (${p.added} scans and outlines)${p.earlier ? `; ${p.earlier} were already there` : ""}${p.skipped.length ? `; ${p.skipped.length} not available` : ""}${p.failed.length ? `; ${p.failed.length} could not be converted: ${p.failed.join("; ")}` : ""}.`;
+        o.onChanged?.();
+        // THE WAY TO USE THEM (critic, finding 11): "Open a patient…" opens the default database, which was another.
+        if (!j.error) {
+          const use = button("Open these by default", "Makes the test cases the database Albula opens (Open a patient…, DICOM database…). Your other databases stay in this list.", true);
+          use.addEventListener("click", async () => { await post("/_db", { current: j.db ?? t.db }, "PUT"); o.onChanged?.(); await render(); });
+          box.appendChild(use);
+        } else setTimeout(() => void render(), 4000);
+      };
+      void poll();
+    };
+    if (t.running) { follow(t.running); return; }
+    const resuming = !!t.db;
+    box.innerHTML = `<div class="sl-dbw-name">Brain tumor test cases${resuming ? " — not finished" : ""}</div>
+      <p class="sl-dbw-holds">${esc(t.holds)}</p>
+      <div class="sl-dbw-meta">From: ${esc(t.source)}</div>
+      <p class="sl-dbw-holds"><b>About ${gb} GB to download${t.diskBytes ? `, and ${(t.diskBytes / 1e9).toFixed(1)} GB of disk` : ""}.</b> It becomes the database “${esc(t.name)}” in Albula Databases${t.minutes ? `, in about ${t.minutes} minutes on a fast connection (longer on a slow one)` : ""}. You can keep working; if it stops, starting again continues where it was.</p>
+      <div class="sl-dbw-acts"></div>`;
+    const go = button(resuming ? "Continue the download" : `Download (${gb} GB)`, `Downloads about ${gb} GB of public MRI from OpenNeuro and makes the database “${t.name}”.`, true);
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      const { ok, j } = await post("/_db/_test-cases", {});
+      if (!ok || !j.job) { go.disabled = false; box.appendChild(Object.assign(document.createElement("p"), { className: "sl-dbw-err", textContent: String(j.error ?? "the download did not start") })); return; }
+      // NOT onChanged(id): that would make the test database the target of "Also add to" in Load / Save, and real scans
+      // from disk would be copied into a database that says it holds no patient data (critic, finding 2).
+      o.onChanged?.();
+      follow(String(j.job));
+    });
+    (box.querySelector(".sl-dbw-acts") as HTMLElement).appendChild(go);
   };
 
   const button = (label: string, title: string, primary = false) => {

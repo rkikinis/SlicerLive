@@ -4,7 +4,7 @@
 //   deno test -A --no-check logic/grow-from-seeds.gpu.test.ts
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { initDevice } from "../render/device.ts";
-import { growFromSeeds, seedBox } from "./grow-from-seeds.ts";
+import { growFromSeeds, growInPlace, seedBox } from "./grow-from-seeds.ts";
 import type { Vec3 } from "../algorithms/geom.ts";
 
 Deno.test("the box is the strokes' extent plus a margin, inside the grid", () => {
@@ -59,4 +59,28 @@ Deno.test({ name: "one kind of stroke is not enough, and says so", ignore: !gpu,
   const s = new Uint8Array(512); s[100] = 1;
   await assertRejects(() => growFromSeeds(gpu!.device, s, new Float32Array(512), dims), Error, "two places");
   await assertRejects(() => growFromSeeds(gpu!.device, new Uint8Array(512), new Float32Array(512), dims), Error, "strokes first");
+}});
+
+Deno.test({ name: "in place: a hidden, finished segment is neither a stroke nor overwritten, and the box stays around the strokes (critic, finding 7)", ignore: !gpu, fn: async () => {
+  const dims: Vec3 = [120, 100, 90], [nx, ny, nz] = dims, N = nx * ny * nz;
+  const at = (x: number, y: number, z: number) => (z * ny + y) * nx + x;
+  const img = new Float32Array(N), lab = new Uint8Array(N);
+  for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const i = at(x, y, z);
+    img[i] = (x - 80) ** 2 + (y - 60) ** 2 + (z - 50) ** 2 <= 144 ? 800 : 300;
+    if ((x - 15) ** 2 + (y - 15) ** 2 + (z - 15) ** 2 <= 64) lab[i] = 3;                // a finished structure, far away
+  }
+  for (let d = -4; d <= 4; d++) lab[at(80 + d, 60, 50)] = 1;
+  for (let d = -6; d <= 6; d++) { lab[at(80 + d, 60 - 20, 50)] = 2; lab[at(80 + d, 60 + 20, 50)] = 2; lab[at(80 - 20, 60 + d, 50)] = 2; lab[at(80 + 20, 60 + d, 50)] = 2; }
+  const before3 = lab.reduce((n, v) => n + (v === 3 ? 1 : 0), 0);
+  const r = await growInPlace(gpu!.device, lab, img, dims, new Set([3]));
+  assertEquals(r.out.reduce((n, v) => n + (v === 3 ? 1 : 0), 0), before3, "the hidden segment is unchanged");
+  assert(r.box.lo[0] > 30 && r.box.lo[1] > 20, `the box stays near the strokes: ${JSON.stringify(r.box)}`);
+  let outside = 0;
+  for (let i = 0; i < N; i++) { const x = i % nx, y = Math.floor(i / nx) % ny, z = Math.floor(i / (nx * ny));
+    const inBox = x >= r.box.lo[0] && x < r.box.hi[0] && y >= r.box.lo[1] && y < r.box.hi[1] && z >= r.box.lo[2] && z < r.box.hi[2];
+    if (!inBox && r.out[i] !== lab[i]) outside++; }
+  assertEquals(outside, 0);
+  let tumor = 0; for (let i = 0; i < N; i++) if (r.out[i] === 1) tumor++;
+  assert(tumor > 5000, `the bright sphere grew (${tumor} voxels)`);
 }});

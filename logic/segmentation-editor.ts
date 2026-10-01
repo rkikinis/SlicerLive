@@ -15,7 +15,7 @@ import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
 import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
 import { invertRowMajor } from "./transforms.ts";
 import { frameIsCurrent, joinSequence } from "./sequences.ts";
-import { growDevice, growFromSeeds } from "./grow-from-seeds.ts";
+import { growDevice, growFromSeeds, growInPlace } from "./grow-from-seeds.ts";
 
 let segSeq = 0;
 // Slicer default new-segment colours (GenericAnatomyColors sequence, from vtkSegment defaults).
@@ -94,13 +94,10 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
     const srcNode = srcId ? live.nodes.get(srcId) : undefined;
     if (!srcNode?.zarr) throw new Error("grow from seeds needs the scan the segmentation was drawn on");
     const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
-    const r = await growFromSeeds(await growDevice(), labelmap, src.data as ArrayLike<number>, dims);
-    out = new Uint8Array(labelmap);
-    const [nx, ny] = dims, { lo, hi } = r.box;
-    for (let z = lo[2]; z < hi[2]; z++) for (let y = lo[1]; y < hi[1]; y++) {
-      const row = (z * ny + y) * nx;
-      for (let x = lo[0]; x < hi[0]; x++) out[row + x] = r.labels[row + x];
-    }
+    // ONLY THE SEGMENTS SHOWN TAKE PART, as in Slicer (critic, 2026-10-01, finding 7): logic/grow-from-seeds.ts growInPlace.
+    const hidden = new Set(((seg.segments as { labelValue: number; visible?: boolean }[] | undefined) ?? []).filter((x) => x.visible === false).map((x) => x.labelValue));
+    const r = await growInPlace(await growDevice(), labelmap, src.data as ArrayLike<number>, dims, hidden);
+    out = r.out;
     ms = r.ms;
   } else if (effect === "threshold" || effect === "autoThreshold") {
     const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];

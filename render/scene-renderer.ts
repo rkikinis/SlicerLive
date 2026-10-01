@@ -2091,7 +2091,7 @@ ${pickDispatch}
    * A SAVED PICTURE, CONVERGED: `samples` accumulated frames (sub-pixel and ray-offset jitter averaged, as
    * the on-screen view does once it settles), read back as rgba8. renderToRGBA is one frame, and one
    * frame of a volume rendering carries the per-pixel jitter noise that the screen averages away -- so
-   * the ⋮ panel's Save picture kept the grain the screen did not show (2026-09-23).
+   * the 3D view's gear panel's Save picture kept the grain the screen did not show (2026-09-23).
    */
   async renderToRGBAConverged(width: number, height: number, samples = 16): Promise<Uint8Array> {
     const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });

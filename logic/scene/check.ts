@@ -34,6 +34,9 @@ function checkFields(where: string, obj: Obj, spec: Record<string, FieldSpec>, o
   for (const [f, s] of Object.entries(spec)) {
     const v = obj[f];
     if (v === undefined) { if (s.required) out.push({ where, what: `${f} is missing` }); continue; }
+    // AN EMPTY OPTIONAL TEXT IS A VALUE (Ron, 2026-10-01: a scene with a diffusion scan would not save -- its sequence's
+    // indexUnit is "", the volume number having no unit). A required one must still say something.
+    if (s.kind === "string" && v === "" && !s.required) continue;
     if (!shapeOk(s.kind, v)) out.push({ where, what: `${f} is not a ${s.kind}` });
   }
 }

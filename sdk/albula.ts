@@ -8,8 +8,13 @@
 // Version 1 (2026-09-30): what the diffusion extension uses -- the template for the ones after it.
 // Version 2 (2026-10-01, critic finding 4): the scene's and the shell's types, the DICOM files of a series, starting
 // placement, and an extension's own files by name -- what the module had reached through globals or by convention.
+// Version 3 (2026-10-01): the Diffusion module's checklist face -- open the database, open Load / Save, make a
+// segmentation and its segments, paint into one, grow an outline, save it to DICOM, a button that says what it did.
+// Version 4 (2026-10-01, evening): rows in the data probe (registerProbeRows) and the Segmentations module's Show / Hide
+// all decision (showHideAllState), and what an extension draws opaque in 3D for the 3D probe (registerRayHits). Each
+// version only adds; an extension written for an earlier one still builds.
 
-export const SDK_VERSION = 3;
+export const SDK_VERSION = 4;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -52,6 +57,25 @@ export function openLoadFromDisk(): boolean {
   return true;
 }
 export { addSegment, createSegmentation, growIntoSegmentation } from "../logic/segmentation-editor.ts";
+/**
+ * Save a segmentation into the DICOM database under the series it was drawn on -- what AI Segmentations' "Save to
+ * DICOM" does (Ron, 2026-10-01: the tumor outline is saved with "same behavior and appearance as with the haversack
+ * functionality"). Rejects, in words, when it was not saved.
+ */
+export async function saveSegmentationToDicom(segId: string): Promise<string> {
+  const g = globalThis as unknown as { __exportSegAsDicom?: (id: string) => Promise<{ filename: string; note?: string; indexed?: boolean }> };
+  if (!g.__exportSegAsDicom) throw new Error("saving to the DICOM database is not available in this app");
+  const r = await g.__exportSegAsDicom(segId);
+  const note = r.note ?? r.filename;
+  if (r.indexed === false || /NOT indexed|NOT saved|browser's downloads/i.test(note)) throw new Error(note);
+  return note;
+}
+/** A button that says what is happening to it: busy, done, failed (core's, as every module's buttons do). */
+export { runAction } from "../render/demos/app-shell.ts";
+/** The Show / Hide all button's decision, as the Segmentations module makes it (one rule, one wording, tested in core). */
+export { showHideAllState } from "../render/demos/segmentations-panel.ts";
+/** Rows for the data probe about a point (patient RAS): an extension's objects under the pointer. */
+export { registerProbeRows, registerRayHits, type ProbeExtraRow, type RayHitProvider } from "../render/demos/probe-extras.ts";
 /** Paint with the brush in the slice views, into one segment of a segmentation (null: brush off). */
 export function paintInto(segId: string, segment: number | null, diameterMm = 5): boolean {
   const g = globalThis as unknown as { __setSegTool?: (segId: string, tool: string, p: { diameterMm?: number; sphere?: boolean; segment?: number }) => void };

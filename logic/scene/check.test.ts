@@ -50,3 +50,13 @@ Deno.test("the structure file names every type the checker knows, and the envelo
   const f = toStructureFile() as { definitions: Record<string, unknown> };
   for (const t of ["ImageNode", "SequenceNode", "SequenceBrowserNode", "SliceCompositeNode", "CameraNode", "LayoutNode", "Scene", "AnyNode"]) assert(f.definitions[t], t);
 });
+
+Deno.test("an empty optional text is a value: a sequence whose index has no unit saves (a diffusion scan's volumes)", () => {
+  const d = good() as Record<string, unknown>;
+  const nodes = d.nodes as Record<string, Record<string, unknown>>;
+  nodes.seq.indexUnit = "";
+  nodes.seq.indexName = "";
+  assertEquals(checkScene(d), []);
+  nodes.seq.indexUnit = 3;                                   // not text at all: still caught
+  assert(checkScene(d).some((x) => x.what === "indexUnit is not a string"));
+});
