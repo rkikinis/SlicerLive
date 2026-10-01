@@ -6,7 +6,7 @@
 // layout keeps ≤12 cards legible and non-overlapping and glides them as the camera orbits.
 //
 // Bundle for the gallery (idc-worker.js must sit next to the output):
-//   deno run -A npm:esbuild@0.21.5 render/demos/cards-browser.ts --bundle --format=esm \
+//   deno run -A npm:esbuild render/demos/cards-browser.ts --bundle --format=esm \
 //     --outfile=live/webgpu/cards.js
 //   cp render/vendor/idc_tools/idc-worker.js live/webgpu/idc-worker.js
 //   cp render/demos/cards.html live/webgpu/cards.html

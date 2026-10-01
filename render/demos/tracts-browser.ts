@@ -6,7 +6,7 @@
 // group (Association, Cerebellar, Commissural, Projection, Superficial), each scaling every bundle
 // under it, so whole groups can be dialed independently — alongside the streamline-density, target
 // frame rate, and depth-cue controls.
-//   deno run -A npm:esbuild@0.21.5 render/demos/tracts-browser.ts --bundle --format=esm \
+//   deno run -A npm:esbuild render/demos/tracts-browser.ts --bundle --format=esm \
 //     --outfile=/tmp/slicerlive-tracts/tracts.js
 //   cp render/demos/tracts.html /tmp/slicerlive-tracts/tracts.html
 import { initDevice } from "../device.ts";
@@ -279,7 +279,7 @@ async function main() {
     help: [{ title: "Tractography", rows: [
       ["Left-drag", "Rotate"], ["Right-drag / wheel", "Zoom"], ["Middle / Shift+Left-drag", "Pan"],
       ["SlicerLive badge", "Streamline % + target fps + depth cues + per-group opacity"],
-      ["Human-expanded tracts", "Holds 10 tracts at full opacity and drops the rest to 10%, keeping their group colours as context: the dorsal language stream (arcuate, SLF II/III), the ventral semantic pathways (IOFF/IFOF, MdLF), the frontal projection systems that grew with prefrontal cortex (thalamo-frontal, striato-frontal, frontal corona radiata), the prefrontal arm of the cerebro-cerebellar loop (cortico-ponto-cerebellar), and frontal short-association fibres. This is prior knowledge from the comparative literature, not anything measured in this scan. NO tract is unique to humans — every one has a primate homologue, and the claim is expansion relative to chimpanzee and macaque, clearest for the arcuate's temporal projection (found in 10/10 humans, 1/4 chimpanzees, 0/3 macaques; Rilling 2008). Some inclusions are contested, notably whether macaques have an IFOF at all. Shown bilaterally, though the language evidence is strongest on the left."],
+      ["Human-expanded tracts", "Holds 10 tracts at full opacity and drops the rest to 10%, keeping their group colors as context: the dorsal language stream (arcuate, SLF II/III), the ventral semantic pathways (IOFF/IFOF, MdLF), the frontal projection systems that grew with prefrontal cortex (thalamo-frontal, striato-frontal, frontal corona radiata), the prefrontal arm of the cerebro-cerebellar loop (cortico-ponto-cerebellar), and frontal short-association fibers. This is prior knowledge from the comparative literature, not anything measured in this scan. NO tract is unique to humans — every one has a primate homologue, and the claim is expansion relative to chimpanzee and macaque, clearest for the arcuate's temporal projection (found in 10/10 humans, 1/4 chimpanzees, 0/3 macaques; Rilling 2008). Some inclusions are contested, notably whether macaques have an IFOF at all. Shown bilaterally, though the language evidence is strongest on the left."],
     ] }],
     onChange: () => apply(),
   });

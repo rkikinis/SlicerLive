@@ -7,12 +7,14 @@ import { fetchZarrVolumeNative } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
 import { writeNrrd } from "./writers/nrrd.ts";
 import { writeNifti } from "./writers/nifti.ts";
+import { COLOR_MAP_REFUSAL, isColorMap } from "../render/fields.ts";
 
 export type ExportFormat = "nrrd" | "nrrd-gz" | "nifti";
 export interface ExportResult { bytes: Uint8Array; filename: string; mime: string; }
 
 async function nodeVolume(live: LiveScene, nodeId: string): Promise<Volume> {
   const n = live.nodes.get(nodeId); if (!n?.zarr) throw new Error("node has no voxels: " + nodeId);
+  if (isColorMap(n)) throw new Error(`"${String(n.name ?? nodeId)}" ${COLOR_MAP_REFUSAL}`);
   const zv = await fetchZarrVolumeNative(live.blobBase(), n.zarr as ZarrDesc);
   return { dims: n.dims as [number, number, number], ijkToRAS: n.ijkToRAS as number[], data: zv.data, dtype: (n.zarr as ZarrDesc).dtype, name: (n.name as string) ?? nodeId };
 }

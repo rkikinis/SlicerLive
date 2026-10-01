@@ -15,9 +15,23 @@ Deno.test({ name: "data: Subject Hierarchy lists all node types + operations; Sa
   const cdp = await CDP.openTab(STANDALONE);
   try {
     await waitReady(cdp, 60000);
-    // Sample Data is its own module (registered), and Data no longer contains sample buttons
-    const modules = await cdp.evalJson<string[]>(`[...document.querySelectorAll('.sl-module-select option')].map(o => o.value)`);
+    // Asked of the shell rather than the DOM: this read `.sl-module-select option` and the native
+    // <select> it named has been a searchable picker for some time, so it was quietly matching
+    // nothing and asserting over an empty list.
+    const modules = await cdp.evalJson<string[]>(`window.__shell.panels().map(p => p.id)`);
     assert(modules.includes("data") && modules.includes("sampledata"), `both modules present (${modules})`);
+
+    // ADD DATA AND DATA ARE SEPARATE MODULES: how data gets in, versus what is here now.
+    assert(modules.includes("add-data"), `Add Data registered (${modules})`);
+    await cdp.eval<void>(`await window.__shell.showPanel("add-data");`);
+    assert(
+      await cdp.evalJson<number>(`document.querySelectorAll('[data-act="dicom-db"], [data-act="open"]').length`) > 0,
+      "Add Data holds the load routes",
+    );
+    assert(
+      await cdp.evalJson<number>(`document.querySelectorAll('.sl-dropzone').length`) > 0,
+      "and the drop target is visible, not a footnote",
+    );
     await cdp.eval<void>(`await window.__shell.showPanel("sampledata");`);
     assert(await cdp.evalJson<number>(`document.querySelectorAll('.sl-samples .sl-row button').length`) > 0, "Sample Data panel has sample buttons");
 
@@ -29,6 +43,13 @@ Deno.test({ name: "data: Subject Hierarchy lists all node types + operations; Sa
     await cdp.mouse("mousePressed", red.x + red.w * 0.5, red.y + red.h * 0.5, { button: "left", buttons: 1 });
     await cdp.mouse("mouseReleased", red.x + red.w * 0.5, red.y + red.h * 0.5, { button: "left", buttons: 0 });
     await cdp.eval<void>(`await window.__slicerlive.idle(); await window.__shell.showPanel("data");`);
+
+    // ...and Data holds none of them: it answers "what is here", nothing about how it arrived.
+    assertEquals(
+      await cdp.evalJson<number>(`document.querySelectorAll('[data-act="dicom-db"], [data-act="open"], .sl-dropzone').length`),
+      0,
+      "Data no longer carries the load routes",
+    );
 
     const rows = await cdp.evalJson<{ id: string; name: string }[]>(shRows);
     const ids = rows.map((r) => r.id);

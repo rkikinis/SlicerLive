@@ -7,6 +7,7 @@
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildRoiScene } from "../demos/roi-scene.ts";
+import { RoiBoxField } from "../roi-box-field.ts";
 import { framedCamera } from "../demos/camera-control.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -67,22 +68,59 @@ check("centre drag translates", Math.abs(movedBy - Math.hypot(25, 15, 10)) < 1e-
   check("handles shine through volume", blue > 200, `${blue} blue handle px over the volume`);
 }
 
-// GHOST residual: an INACTIVE handle behind the volume shows the volume in front at ~50%
-// (blended, muted); a HOVERED handle punches through fully (residual 0, pure bright colour).
+// HOVER CUE: the hovered handle is warm (orange) and larger; idle handles are cool (blue/green).
+// This replaced the old ghost-residual cue -- ghost mode halved idle opacity, which was invisible
+// against Slicer's light background, so the widget opted out of it (see roi-widget.ts).
 {
-  const bright = async (hover: number | null) => {
+  const renderHover = async (hover: number | null) => {
     const r = await buildRoiScene(gpu.device); r.setHover(hover);
     const sc = new SceneRenderer(gpu); sc.build([r.image, r.handles]); sc.setBackground(0.05, 0.06, 0.09); sc.setClipBox(r.lo(), r.hi());
     const cam = framedCamera(r.sv.center as Vec3, r.sv.radius, 2.7); cam.azimuth(35); cam.elevation(20);
     sc.setCamera(cam.position, cam.focalPoint, cam.viewUp, cam.viewAngle, 360, 360);
-    const px = await sc.renderToRGBA(360, 360);
-    // find the most strongly-green pixel (the centre handle) and return ITS brightness
-    let bestG = -1, bright = 0;
-    for (let i = 0; i < 360 * 360; i++) { const R = px[i * 4], G = px[i * 4 + 1], B = px[i * 4 + 2]; const g = G - (R + B) / 2; if (g > bestG) { bestG = g; bright = Math.max(R, G, B); } }
-    return bright;
+    return await sc.renderToRGBA(360, 360);
   };
-  const inactive = await bright(null), hovered = await bright(14);   // 14 = centre handle
-  check("hovered handle punches through", hovered > inactive + 50, `brightest centre px: inactive ${inactive}, hovered ${hovered}`);
+  // Diff the two renders: thresholding one image measures the CT (which dominates any global
+  // red-over-green peak and is identical either way). The changed pixels ARE the hovered handle.
+  const off = await renderHover(null), on = await renderHover(6);   // 6 = first corner; the center
+  // handle (14) sits inside the volume and is occluded, so hovering it changes no visible pixel.
+  let changed = 0, warmer = 0;
+  for (let i = 0; i < 360 * 360; i++) {
+    const o = off[i * 4], o1 = off[i * 4 + 1], n = on[i * 4], n1 = on[i * 4 + 1];
+    if (Math.abs(n - o) > 8 || Math.abs(n1 - o1) > 8) { changed++; if ((n - n1) > (o - o1) + 20) warmer++; }
+  }
+  check("hover changes the handle", changed > 50, `${changed} px differ`);
+  check("hovered handle reads warm", warmer > changed * 0.3, `${warmer}/${changed} changed px went warm`);
+}
+
+// 4) AN ORIENTED BOX RENDERS, AND IS NOT THE SAME PICTURE AS AN UNORIENTED ONE.
+//
+// A crop box aligned to the patient is useless on an oblique volume -- measured on a tilted 0.67 mm
+// T1, a patient-aligned box around the head maps back onto the grid as the whole volume. So the box
+// takes the volume's own axes, supplied as a rotation the box is drawn through (RoiBoxOpts.axes).
+// With the default identity axes every count above is unchanged, which is the first thing to prove;
+// this proves the rotated case actually draws, and draws somewhere else.
+{
+  const b0 = roi.snapshot();
+  const upright = new RoiBoxField(b0.center, b0.half, { color: [1, 0.94, 0.66], barHalfMm: 1.5 });
+  // 30 degrees about Z, as direction cosines (orthonormal, which the shader's transpose requires).
+  const c = Math.cos(Math.PI / 6), sn = Math.sin(Math.PI / 6);
+  const tilted = new RoiBoxField(b0.center, b0.half, {
+    color: [1, 0.94, 0.66], barHalfMm: 1.5, axes: [c, -sn, 0, sn, c, 0, 0, 0, 1],
+  });
+  const shot = async (f: RoiBoxField) => {
+    scene.build([roi.image, f]);
+    scene.clearClip();
+    scene.syncUniforms();
+    return await render();
+  };
+  const a = await shot(upright), t = await shot(tilted);
+  check("oriented box renders", yellow(t) > 150, `${yellow(t)} ivory px`);
+  check("oriented box differs", diff(a, t) > 5000, `${diff(a, t)} px differ from upright`);
+  // The rotated box's own AABB must cover it, or the empty-space skip would cut rays short of bars.
+  const [lo2, hi2] = tilted.aabb();
+  const halfSum = b0.half[0] + b0.half[1];
+  check("oriented aabb widens", (hi2[0] - lo2[0]) > 2 * b0.half[0] && (hi2[0] - lo2[0]) < 2 * halfSum + 8,
+    `x span ${(hi2[0] - lo2[0]).toFixed(1)}mm vs ${(2 * b0.half[0]).toFixed(1)}mm upright`);
 }
 
 gpu.device.destroy();

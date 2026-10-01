@@ -43,7 +43,19 @@ export class SlicePlaneField implements Field {
   setClim(lo: number, hi: number) { this.o.clim = [lo, hi]; }
 
   uniformFloats() { return 36; }   // mat4(16) + origin/thick(4) + normal(4) + uAxis/extU(4) + vAxis/extV(4) + clim(4)
-  sampleStep(): number { return Math.max(0.25, this.halfThick); }
+  /**
+   * The slab's own thickness, not half of it.
+   *
+   * The scene marches at the MINIMUM sampleStep of any field, so a slice dropped into the 3D view
+   * sets the step for the volume as well. Ron: "making the a slice visible in the 3d window
+   * perceptibly slows down the rendering in the 3d." Measured on a 0.93 mm volume: one slice cost
+   * 15%, three cost 22%, and about half of that was the forced step rather than the extra fields.
+   *
+   * A slab of thickness T is guaranteed a sample when the step is T -- whatever the phase, a sample
+   * landing just short of the slab puts the next one inside it. This asked for halfThick, which
+   * samples every slab twice. Measured, that second sample is worth 18 pixels in 262,000: 0.01%.
+   */
+  sampleStep(): number { return Math.max(0.5, this.halfThick * 2); }
 
   aabb(): [Vec3, Vec3] {
     // corners of the quad ± the slab thickness along the normal

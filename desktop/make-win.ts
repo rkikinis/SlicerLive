@@ -9,10 +9,11 @@
 // Needs the Evergreen WebView2 runtime on the target (present on Windows 10/11).
 // NOTE: built but not runnable here — see README for what is unverified.
 import { dirname, join, fromFileUrl, resolve } from "jsr:@std/path@1";
+import { albulaVersion, webviewNativeFile } from "./versions.ts";
 import { makeSquareLogo, resizeSet, writeIco } from "./icon.ts";
 
-const VERSION = "0.1.0";
-const WEBVIEW_RELEASE = "https://github.com/webview/webview_deno/releases/download/0.9.0";
+// Both from where they are decided (desktop/versions.ts): the workspace's /VERSION, and deno.jsonc's webview pin.
+const VERSION = albulaVersion();
 
 const here = dirname(fromFileUrl(import.meta.url));
 const repo = dirname(here);
@@ -86,10 +87,9 @@ await run(Deno.execPath(), [
 ]);
 
 console.log("fetching webview DLLs…");
-await fetchTo(`${WEBVIEW_RELEASE}/webview.dll`, join(buildDir, "webview.dll"));
-await fetchTo(`${WEBVIEW_RELEASE}/WebView2Loader.dll`, join(buildDir, "WebView2Loader.dll"));
-await Deno.copyFile(join(buildDir, "webview.dll"), join(folder, "lib", "webview.dll"));
-await Deno.copyFile(join(buildDir, "WebView2Loader.dll"), join(folder, "WebView2Loader.dll"));
+// The pinned release's files, kept under its version's name and checked against their recorded checksums (versions.ts).
+await Deno.copyFile(await webviewNativeFile("webview.dll", buildDir), join(folder, "lib", "webview.dll"));
+await Deno.copyFile(await webviewNativeFile("WebView2Loader.dll", buildDir), join(folder, "WebView2Loader.dll"));
 
 // webview.dll links against the VC++ runtime, which a fresh Windows Server
 // lacks (Deno.dlopen then fails with "The specified module could not be

@@ -3,8 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SlicerLive</title>
+<title>SlicerAlbula</title>
+<!-- This page brings its own toolbar, so the desktop shell must not inject its floating "back to
+     gallery" and help buttons over it: they are fixed at the top-left corner, which is where the
+     brand mark sits. Declared in the markup rather than detected, because the shell asks at
+     DOMContentLoaded and the app shell mounts later from an async main() -- feature-detecting
+     ".sl-toolbar" looked right and lost that race every time. -->
+<meta name="sl-chrome" content="own">
 <link rel="stylesheet" href="theme.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="albula-app-icon.png">
 <style>
   /* legacy (streamed Slicer) mode keeps its own light chrome; ?legacy */
   body.legacy { background: #e8e8e8; color: #222; }
@@ -16,8 +24,14 @@
   #views .lv-cell { pointer-events: auto; }
   #link { position: absolute; left: 8px; bottom: 26px; font: 11px system-ui; color: #9aa; z-index: 5; pointer-events: none; }
   body.legacy #link { bottom: 6px; }
-  #status { position: fixed; right: 8px; bottom: 26px; z-index: 1000; font: 11px system-ui; color: var(--sl-fg-muted, #445); background: rgba(0,0,0,.35); padding: 2px 8px; border-radius: 6px; pointer-events: none; }
-  body.legacy #status { color: #445; background: rgba(255,255,255,.7); bottom: 8px; }
+  /* Ron: "the text at the bottom is rendered twice: once inside the box and once outside." This
+     floating #status is a SECOND status display, independent of the app shell's own .sl-status bar
+     -- both are fed the same status() calls. It sat just above the OLD fixed 22px bar (bottom: 26px)
+     without overlapping it; once that bar became resizable and taller, this floating copy started
+     showing inside/over it, duplicating every message. Legacy mode has no app-shell status bar at
+     all, so this is still that mode's only one -- hidden everywhere else. */
+  #status { display: none; }
+  body.legacy #status { display: block; position: fixed; right: 8px; bottom: 8px; z-index: 1000; font: 11px system-ui; color: #445; background: rgba(255,255,255,.7); padding: 2px 8px; border-radius: 6px; pointer-events: none; }
 </style>
 </head>
 <body>

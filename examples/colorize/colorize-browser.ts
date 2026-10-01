@@ -215,17 +215,17 @@ if ("ResizeObserver" in globalThis) {
   for (const n of NAMES) ro.observe(cv[n]);
 }
 const grid = attachViewGrid($("grid"), NAMES, resize);
-attachDoubleClick(cv.threeD, () => grid.toggleMax("threeD"));
+attachDoubleClick(cv.threeD, () => { grid.toggleMax("threeD"); scheduleSave(); });
 for (const o of SLICES) {
   attachSliceControls(cv[o], {
     orient: o,
     getSlice: () => sc.slice,
     step: (fwd) => { off[o] = sliceIx.wheel(o, off[o], fwd); },
     redraw: () => { drawPlane(o); cross.redraw(); },
-    hooks: { onDoubleClick: () => { grid.toggleMax(o); return true; } },
+    hooks: { onDoubleClick: () => { grid.toggleMax(o); scheduleSave(); return true; } },
   });
 }
-attachCameraControls(cv.threeD, camera, { onChange: draw3d });
+attachCameraControls(cv.threeD, camera, { onChange: () => { draw3d(); scheduleSave(); } });
 
 // ---- header preset picker (mirrors the popup combobox) --------------------------------------
 const presetSel = $("preset") as HTMLSelectElement;
@@ -253,7 +253,9 @@ attachWidgetControls(cv.threeD, camera, {
   onDragStart: () => { box0 = sc.roi.snapshot(); },
   onDrag: (h, world) => {
     const d: Vec3 = [world[0] - h.world[0], world[1] - h.world[1], world[2] - h.world[2]];
-    sc.roi.applyDrag(h.data as HandleMeta, box0, d);
+    // Pass the view direction so a corner drag resizes only the two axes the cursor can aim.
+    const vd: Vec3 = [camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]];
+    sc.roi.applyDrag(h.data as HandleMeta, box0, d, vd);
     if (sc.cropEnabled()) sc.scene.setClipBox(sc.roi.lo(), sc.roi.hi());
     sc.scene.syncUniforms();
   },
@@ -304,10 +306,86 @@ const chrome = installChrome({
     },
     ...groupControls,
   ],
-  onChange: () => { drawSlices(); draw3d(); },
+  onChange: () => { drawSlices(); draw3d(); scheduleSave(); },
 });
 
-applyPreset("CT-Soft-Tissue");
+
+// ── session persistence ─────────────────────────────────────────────────────────────────────
+// The page comes back as it was left: preset, group opacities, context opacity, crop, ROI
+// visibility, which cell is maximized, and the camera. Saved to localStorage, debounced, and
+// restored before the first frame.
+const STATE_KEY = "slicerlive-colorize-state-v1";
+
+function collectState() {
+  return {
+    preset: sc.presetName(),
+    groups: Object.fromEntries(sc.groups.map((g) => [g.name, sc.groupOpacity(g.name)])),
+    context: sc.contextOpacity(),
+    crop: sc.cropEnabled(),
+    roiVisible: sc.roiVisible(),
+    maxCell: grid.maxCell(),
+    camera: {
+      position: [...camera.position],
+      focalPoint: [...camera.focalPoint],
+      viewUp: [...camera.viewUp],
+      viewAngle: camera.viewAngle,
+      parallelProjection: camera.parallelProjection,
+      parallelScale: camera.parallelScale,
+    },
+  };
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSave() {
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { localStorage.setItem(STATE_KEY, JSON.stringify(collectState())); } catch { /* private mode, quota */ }
+  }, 300);
+}
+
+/** A persisted triple back as a Vec3; falls back when the stored entry is malformed. */
+const asVec3 = (a: number[] | undefined, fallback: Vec3): Vec3 =>
+  a && a.length === 3 ? [a[0], a[1], a[2]] : fallback;
+
+function restoreState() {
+  let saved: ReturnType<typeof collectState> | null = null;
+  try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || "null"); } catch { /* corrupt entry */ }
+
+  applyPreset(saved && CT_PRESET_NAMES.includes(saved.preset) ? saved.preset : "CT-Soft-Tissue");
+  if (!saved) return;
+
+  if (saved.groups) {
+    for (const g of sc.groups) {
+      if (saved.groups[g.name] != null) sc.setGroupOpacity(g.name, saved.groups[g.name]);
+    }
+  }
+  if (saved.context != null) sc.setContextOpacity(saved.context);
+  if (saved.crop != null) sc.setCropEnabled(saved.crop);
+  if (saved.roiVisible != null) sc.setRoiVisible(saved.roiVisible);
+  if (saved.camera) {
+    camera.position = asVec3(saved.camera.position, camera.position);
+    camera.focalPoint = asVec3(saved.camera.focalPoint, camera.focalPoint);
+    camera.viewUp = asVec3(saved.camera.viewUp, camera.viewUp);
+    if (saved.camera.viewAngle != null) camera.viewAngle = saved.camera.viewAngle;
+    if (saved.camera.parallelProjection != null) camera.parallelProjection = saved.camera.parallelProjection;
+    if (saved.camera.parallelScale != null) camera.parallelScale = saved.camera.parallelScale;
+  }
+  // NAMES is readonly Cell[]; a value read back from JSON is a plain string, so narrow by lookup
+  // rather than asserting -- a stale or hand-edited entry must not become an invalid cell name.
+  const cell = NAMES.find((n) => n === saved!.maxCell);
+  if (cell && grid.maxCell() !== cell) grid.toggleMax(cell);
+  chrome.refresh();
+  drawSlices();
+  draw3d();
+
+  // buildColorizeScene's own ctReady handler resets context opacity to its demo default once the
+  // CT finishes streaming, which would clobber the value restored above. Re-assert it after.
+  if (saved.context != null) {
+    sc.ctReady.then(() => { sc.setContextOpacity(saved!.context); chrome.refresh(); draw3d(); });
+  }
+}
+
+restoreState();
 requestAnimationFrame(() => {
   resize();
   converge(8);

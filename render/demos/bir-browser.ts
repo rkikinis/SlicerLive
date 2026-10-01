@@ -8,7 +8,7 @@
 // they are beyond the BIR profile.
 //
 // Bundle for the gallery (idc-worker.js must sit next to the output):
-//   deno run -A npm:esbuild@0.21.5 render/demos/bir-browser.ts --bundle --format=esm \
+//   deno run -A npm:esbuild render/demos/bir-browser.ts --bundle --format=esm \
 //     --outfile=live/webgpu/bir.js
 //   cp render/vendor/idc_tools/idc-worker.js live/webgpu/idc-worker.js
 //   cp render/demos/bir.html live/webgpu/bir.html
@@ -61,7 +61,7 @@ const KITS_DEFAULT: Source = {
   m: "CT",
   col: "c4kc_kits",
   st: "1.3.6.1.4.1.14519.5.2.1.6919.4624.368281589441706814147998236429",
-  sd: "KiTS-00051 · noncontrast abdomen + kidney/tumour SEG",
+  sd: "KiTS-00051 · noncontrast abdomen + kidney/tumor SEG",
   lic: "CC BY 3.0 · IDC c4kc_kits · doi:10.7937/tcia.2019.ix49e8nx",
 };
 

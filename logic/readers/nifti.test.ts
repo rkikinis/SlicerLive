@@ -33,3 +33,25 @@ Deno.test("pixdim only, big-endian, gzip, and sniffing", async () => {
   const v = await readVolume(gz, "brain.nii.gz");
   assertEquals(v.name, "brain"); assertEquals(v.data.length, 24);
 });
+
+// VALUE SCALING (2026-09-28): stored·scl_slope + scl_inter whenever the slope is non-zero -- a tumor mask stored 0..255
+// with slope 1/255 read as 0..255 before this, so a cut at one half took every voxel above zero. Offsets 112 and 116.
+Deno.test("scl_slope / scl_inter are applied; 0 or NaN means none, and integers stay integers then", async () => {
+  const withScale = (slope: number, inter: number) => {
+    const b = makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] });
+    const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    v.setFloat32(112, slope, true); v.setFloat32(116, inter, true);
+    return b;
+  };
+  const scaled = await parseNifti(withScale(1 / 255, 0));
+  assertEquals(scaled.dtype, "<f4");
+  assert(Math.abs(scaled.data[1] - 1 / 255) < 1e-7 && Math.abs(scaled.data[12] - 100 / 255) < 1e-6, `${scaled.data[1]}, ${scaled.data[12]}`);
+  const shifted = await parseNifti(withScale(2, -1000));
+  assertEquals([shifted.data[0], shifted.data[1]], [-1000, -998]);
+  for (const none of [0, NaN]) {
+    const v = await parseNifti(withScale(none, 5));
+    assertEquals([v.dtype, v.data[1]], ["<i2", 1], `slope ${none}`);
+  }
+  const unit = await parseNifti(withScale(1, 0));
+  assertEquals(unit.dtype, "<i2");
+});

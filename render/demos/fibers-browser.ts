@@ -4,7 +4,7 @@
 // markup fiducials, all composited in one ray-march. While playing, the animation loop owns the canvas
 // and renders with rolling accumulation (the fibers stay anti-aliased as the blobs move); paused, the
 // shared adaptive loop converges to a fully accumulated still.
-//   deno run -A npm:esbuild@0.21.5 render/demos/fibers-browser.ts --bundle --format=esm \
+//   deno run -A npm:esbuild render/demos/fibers-browser.ts --bundle --format=esm \
 //     --outfile=live/webgpu/fibers.js
 //   cp render/demos/fibers.html live/webgpu/fibers.html
 import { initDevice } from "../device.ts";

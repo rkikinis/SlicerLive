@@ -44,10 +44,14 @@ for (const f of files) {
 }
 
 // Legacy verification scripts that are not Deno.test files (fixtures + TS ports; hermetic). From harness/run-all.ts.
+// The engine gate is the one exception to "hermetic": on a Mac it bundles with npm:esbuild and runs
+// the bundle under JavaScriptCore. It cannot be a *.test.ts -- there is no second engine inside a
+// deno test -- and it SKIPS (exit 0) anywhere jsc is absent, so Linux CI never reaches the network.
 const SCRIPTS: [string, string][] = [
   ["vtkCamera port vs real VTK", "harness/verify-vtk-camera.ts"],
   ["camera bindings (rotate/pan/zoom/wheel)", "harness/verify-actions.ts"],
   ["slice stepping math", "harness/verify-slice-step-math.ts"],
+  ["JSC vs V8 on the surface-nets hot loop", "harness/verify-engine-ratio.ts"],
 ];
 
 const FLAGS: Record<string, string[]> = {

@@ -5,20 +5,26 @@
 // SceneRenderer.renderUpscaled does; here it consumes an EXTERNAL sample buffer so local and remote
 // share one assembly path. (M5 will add temporal accumulation/reprojection here.)
 import type { Gpu } from "./device.ts";
+import { bgAtWgsl, bgUniform, type RGB, SLICER_BG_BOTTOM, SLICER_BG_TOP } from "./background.ts";
 
 const WGSL = /* wgsl */ `
 @group(0) @binding(0) var t_sample : texture_2d<f32>;
 @group(0) @binding(1) var s_lin : sampler;
-// size = (sampleW, sampleH, _, _); rect = (originX, originY, spanW, spanH) in DESTINATION pixels —
-// the region this present writes. A full frame is (0, 0, viewW, viewH); a PATCH is its dirty rect.
+// size = (sampleW, sampleH, viewW, viewH); rect = (originX, originY, spanW, spanH) in DESTINATION
+// pixels — the region this present writes. A full frame is (0, 0, viewW, viewH); a PATCH is its
+// dirty rect. The FULL view size is carried in size.zw because the background gradient must span
+// the whole view: deriving it from the rect would give every dirty patch its own full gradient.
 struct SR { size : vec4<f32>, rect : vec4<f32> };
 @group(0) @binding(2) var<uniform> u_sr : SR;
-@group(0) @binding(3) var<uniform> u_bg : vec4<f32>;
+// Background gradient stops, sRGB: [0] = TOP, [1] = BOTTOM. Slicer's 3D view defaults are a
+// darker blue-violet above fading to light lavender below (see setBackgroundGradient).
+@group(0) @binding(3) var<uniform> u_bg : array<vec4<f32>, 2>;
 fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
   let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
+${bgAtWgsl("u_sr.size.w")}
 // Catmull-Rom via 9 bilinear taps (Sigg/Hadwiger).
 fn cr(uv : vec2<f32>, texSize : vec2<f32>) -> vec4<f32> {
   let sp = uv * texSize;
@@ -58,7 +64,7 @@ fn fs(v : RV) -> @location(0) vec4<f32> {
   let uv = (v.position.xy - u_sr.rect.xy) / u_sr.rect.zw;
   let s = cr(uv, u_sr.size.xy);
   let a = clamp(s.a, 0.0, 1.0);
-  let bg = srgb2physical(u_bg.rgb);
+  let bg = srgb2physical(bg_at(v.position.y));
   return vec4<f32>(mix(bg, s.rgb, a), 1.0);
 }`;
 
@@ -77,7 +83,7 @@ export class Reconstructor {
     this.dev = gpu.device;
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.srBuf = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.bgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bgBuf = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = this.dev.createShaderModule({ code: WGSL });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
@@ -85,11 +91,17 @@ export class Reconstructor {
       fragment: { module: mod, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
-    this.bgBuf && this.dev.queue.writeBuffer(this.bgBuf, 0, new Float32Array([0.05, 0.06, 0.09, 1]));
+    this.setBackgroundGradient(SLICER_BG_TOP, SLICER_BG_BOTTOM);
   }
 
+  /** Flat background — both gradient stops set to the same color. */
   setBackground(r: number, g: number, b: number) {
-    this.dev.queue.writeBuffer(this.bgBuf, 0, new Float32Array([r, g, b, 1]));
+    this.setBackgroundGradient([r, g, b], [r, g, b]);
+  }
+
+  /** Vertical background gradient, sRGB components in 0..1. */
+  setBackgroundGradient(top: RGB, bottom: RGB) {
+    this.dev.queue.writeBuffer(this.bgBuf, 0, bgUniform(top, bottom));
   }
 
   private ensureTex(w: number, h: number) {
@@ -115,7 +127,9 @@ export class Reconstructor {
     this.ensureTex(sampleW, sampleH);
     this.dev.queue.writeTexture({ texture: this.tex! }, samples, { bytesPerRow: sampleW * 4, rowsPerImage: sampleH }, [sampleW, sampleH]);
     const r = rect ?? { x: 0, y: 0, w: viewW, h: viewH };
-    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, 0, 0, r.x, r.y, r.w, r.h]));
+    // size.zw carries the FULL view size, so the background gradient spans the view even when this
+    // present only writes a dirty patch.
+    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, viewW, viewH, r.x, r.y, r.w, r.h]));
     const enc = this.dev.createCommandEncoder();
     const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: rect ? "load" : "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     p.setPipeline(this.pipeline); p.setBindGroup(0, this.bind!);

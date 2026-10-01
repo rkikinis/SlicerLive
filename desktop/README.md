@@ -22,7 +22,7 @@ deno run -A desktop/make-app.ts          # → build/SlicerLive.app + build/Slic
 deno run -A desktop/make-app.ts --thin   # → 70MB app that serves ../../live in place (this machine only)
 ```
 
-`deno compile` + Info.plist + icon (docs/slicerlive-logo.png, bbox-trimmed → .icns) + ad-hoc
+`deno compile` + Info.plist + icon (docs/albula-logo.png, bbox-trimmed → .icns) + ad-hoc
 codesign. The default build is **self-contained** (~400 MB): the gallery checkout (minus `.git`)
 goes in `Contents/Resources/gallery` and `libwebview.aarch64.dylib` in `Contents/Resources/lib`
 (`main.ts` points the loader at it via `PLUGIN_URL`, so a fresh machine needs no network to

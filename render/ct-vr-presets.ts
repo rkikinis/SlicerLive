@@ -48,6 +48,19 @@ export const CT_VR_PRESETS: CtVrPreset[] = [
   { name: "CT-Pulmonary-Arteries", label: "CT Pulmonary", shade: true, light: [0.2, 1.0, 0.0, 1.0],
     colorTF: [[-2048.0, 0.0, 0.0, 0.0], [-568.625, 0.0, 0.0, 0.0], [-364.081, 0.3961, 0.302, 0.1804], [-244.813, 0.6118, 0.3529, 0.0706], [18.277, 0.8431, 0.0157, 0.1569], [447.798, 0.7529, 0.7529, 0.7529], [3592.73, 1.0, 1.0, 1.0]],
     opacityTF: [[-2048.0, 0.0], [-568.625, 0.0], [-364.081, 0.0714], [-244.813, 0.4018], [18.277, 0.6071], [447.798, 0.8304], [3592.73, 0.8393]] },
+  // ALBULA'S OWN, not Slicer's: CT-Soft-Tissue's opacity (a step at -160 HU: the skin and everything
+  // inside it) with CT-Muscle's warm colors over the same span, so a CT opens flesh-colored instead of
+  // gray. Chosen by Ron on 2026-09-23 from rendered candidates on CT-Training-LC003 ("Your proposed");
+  // the rings it shows on an abdomen are real -- imprints of clothing and devices, in his words.
+  // Lit with the Standard preset (render/light-presets.ts). The app's default for a CT.
+  //
+  // NO BLACK BELOW THE SKIN: the darkest brown continues to the bottom of the scale. Slicer's preset is
+  // black there, which cost nothing while those values were invisible -- and showed as black specks the
+  // moment the opacity was pulled lower (Ron, 2026-09-23: "How do I move the color to the left so that
+  // darker voxels are not black?" ... "or add color instead of moving the lut").
+  { name: "Albula-Soft-Tissue", label: "Soft Tissue (flesh)", shade: true, light: [0.35, 0.70, 0.05, 10],
+    colorTF: [[-2048.0, 0.549, 0.251, 0.149], [-160.0, 0.549, 0.251, 0.149], [240.0, 0.8824, 0.6039, 0.2902], [3661.0, 1.0, 0.937, 0.9545]],
+    opacityTF: [[-2048.0, 0.0], [-167.01, 0.0], [-160.0, 1.0], [240.0, 1.0], [3661.0, 1.0]] },
   { name: "CT-Soft-Tissue", label: "CT Soft Tissue", shade: false, light: [0.2, 1.0, 0.0, 1.0],
     colorTF: [[-2048.0, 0.0, 0.0, 0.0], [-167.01, 0.0, 0.0, 0.0], [-160.0, 0.0556, 0.0556, 0.0556], [240.0, 1.0, 1.0, 1.0], [3661.0, 1.0, 1.0, 1.0]],
     opacityTF: [[-2048.0, 0.0], [-167.01, 0.0], [-160.0, 1.0], [240.0, 1.0], [3661.0, 1.0]] },

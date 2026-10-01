@@ -2,6 +2,7 @@
 // toggle, and the markups list with per-node measurement, visibility and delete. Placement itself is the
 // native placer wired in live-views (interaction node + placeClick); this panel only drives it through the
 // exposed hooks, so it works standalone. Plain DOM, theme.css. RAS/geometry handled downstream.
+import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { MarkupType } from "../../logic/markups/measurements.ts";
@@ -15,6 +16,7 @@ interface Hooks {
   __markups: () => MarkupInfo[];
   __deleteMarkup: (id: string) => boolean;
   __setMarkupProp: (id: string, prop: "visible" | "locked", value: boolean) => boolean;
+  __renameMarkup: (id: string, name: string) => boolean;
   __setGlyphScale: (scale: number) => void;
   __glyphScale: () => number;
 }
@@ -29,6 +31,7 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
   const { live } = opts;
   let root: HTMLElement | null = null;
   let dragging = false;   // suppress subscribe-driven re-render while the glyph slider is dragged
+  let editing = false;    // … and while a name is being typed
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
   const fmt = (m: { value: number; units: string }) => `${m.value.toFixed(m.units === "deg" ? 1 : 2)} ${m.units === "deg" ? "°" : m.units === "mm2" ? "mm²" : m.units === "mm3" ? "mm³" : m.units}`;
 
@@ -42,7 +45,7 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
       <h2>Markups</h2>
       <div class="sl-row sl-markup-types">${TYPES.map((x) => `<button data-t="${x.t}" class="${placing === x.t ? "sl-primary" : ""}">${x.label}</button>`).join("")}</div>
       <div class="sl-row"><label><input type="checkbox" class="sl-mk-persist"${persistent ? " checked" : ""}> Place multiple</label>${placing ? `<button class="sl-mk-end">Stop placing</button>` : ""}</div>
-      ${placing ? `<p class="sl-hint">Click in a slice view to place ${placing}. Esc / Stop to finish.</p>` : ""}
+      ${placing ? `<p class="sl-hint">Click in a slice view, or on the anatomy in the 3D view, to place ${placing === "line" ? "a line: two clicks, one at each end" : placing}. Esc / Stop to finish.</p>` : ""}
       <div class="sl-row"><label>Glyph size</label><input class="sl-mk-glyph" type="range" min="1" max="10" step="0.5" value="${g().__glyphScale?.() ?? 3}"></div>
       <h3>List (${list.length})</h3>
       <div class="sl-markup-list">${list.length ? list.map(nodeRow).join("") : `<p class="sl-hint">No markups yet.</p>`}</div>`;
@@ -50,7 +53,7 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     root.querySelectorAll(".sl-markup-types button").forEach((b) => b.addEventListener("click", () => {
       const t = (b as HTMLElement).dataset.t as MarkupType;
       if (placing === t) { g().__endPlace(); status("placement stopped"); }
-      else { g().__startPlace(t, $("input.sl-mk-persist").checked); status(`place ${t} — click in a slice view`); }
+      else { g().__startPlace(t, $("input.sl-mk-persist").checked); status(`place ${t} — click in a slice view or on the anatomy in 3D`); }
       render();
     }));
     $("input.sl-mk-persist")?.addEventListener("change", () => { if (placing) g().__startPlace(placing as MarkupType, $("input.sl-mk-persist").checked); });
@@ -61,15 +64,38 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     glyph?.addEventListener("change", () => { dragging = false; render(); });
     root.querySelectorAll(".sl-markup-list [data-del]").forEach((b) => b.addEventListener("click", () => { g().__deleteMarkup((b as HTMLElement).dataset.del!); render(); }));
     root.querySelectorAll(".sl-markup-list [data-vis]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.vis!, "visible", el.dataset.on !== "1"); render(); }));
+    // THREE SLICES FROM THIS LINE (logic/line-axes.ts; Ron, 2026-09-25: "two markups … would define the axis").
+    root.querySelectorAll(".sl-markup-list [data-align]").forEach((b) => b.addEventListener("click", () => {
+      const ok = (globalThis as unknown as { __alignSlicesToLine?: (id: string) => boolean }).__alignSlicesToLine?.((b as HTMLElement).dataset.align!);
+      if (!ok) status("The slices could not be aligned: the line needs two points");
+    }));
     root.querySelectorAll(".sl-markup-list [data-lock]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.lock!, "locked", el.dataset.on !== "1"); render(); }));
+    // RENAME BY CLICKING THE NAME, as the Scene control renames a scene: Enter or leaving the field keeps it, Esc does not.
+    root.querySelectorAll(".sl-markup-list [data-rename]").forEach((b) => b.addEventListener("click", () => {
+      const el = b as HTMLElement;
+      const input = document.createElement("input");
+      input.type = "text"; input.className = "sl-mk-rename"; input.value = el.dataset.name ?? "";
+      input.title = "The markup's name; Enter keeps it, Esc leaves it as it was";
+      el.replaceWith(input); input.focus(); input.select();
+      let done = false;
+      const finish = (keep: boolean) => {
+        if (done) return; done = true;
+        editing = false;
+        if (keep && input.value.trim() && input.value.trim() !== el.dataset.name) { g().__renameMarkup(el.dataset.rename!, input.value); status(`renamed to “${input.value.trim()}”`); }
+        render();
+      };
+      editing = true;
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") finish(true); else if (e.key === "Escape") { e.stopPropagation(); finish(false); } });
+      input.addEventListener("blur", () => finish(true));
+    }));
   }
 
   function nodeRow(n: MarkupInfo): string {
     const meas = n.measurements.length ? ` — ${fmt(n.measurements[0])}` : "";
-    return `<div class="sl-markup-row"><span class="sl-mk-name">${n.name} <span class="sl-hint">(${n.markupType}, ${n.points} pt${n.points === 1 ? "" : "s"})${meas}</span></span><span class="sl-mk-actions"><button data-vis="${n.id}" data-on="${n.visible ? "1" : "0"}" title="Show/hide">${n.visible ? "👁" : "🚫"}</button><button data-lock="${n.id}" data-on="${n.locked ? "1" : "0"}" title="Lock/unlock">${n.locked ? "🔒" : "🔓"}</button><button data-del="${n.id}" title="Delete">✕</button></span></div>`;
+    return `<div class="sl-markup-row"><span class="sl-mk-name"><button class="sl-mk-rename-btn" data-rename="${n.id}" data-name="${escapeHtml(n.name)}" title="Click to rename">${escapeHtml(n.name)}</button> <span class="sl-hint">(${n.markupType}, ${n.points} pt${n.points === 1 ? "" : "s"})${meas}</span></span><span class="sl-mk-actions">${n.markupType === "line" && n.points >= 2 ? `<button data-align="${n.id}" title="Red across this line, yellow and green along it at 90 degrees — the slices follow its points (the heart's idea, with the axis given by hand)">Align slices</button>` : ""}<button data-vis="${n.id}" data-on="${n.visible ? "1" : "0"}" title="Show/hide">${n.visible ? "👁" : "🚫"}</button><button data-lock="${n.id}" data-on="${n.locked ? "1" : "0"}" title="Lock/unlock">${n.locked ? "🔒" : "🔓"}</button><button data-del="${n.id}" title="Delete">✕</button></span></div>`;
   }
 
-  shell.registerPanel({ id: "markups", title: "Markups", order: 5, mount(el) { root = el; render(); } });
-  live.subscribe((c) => { if (!dragging && (c.type === "markup" || c.type === "interaction" || c.kind === "remove")) render(); });
+  shell.registerPanel({ id: "markups", title: "Markups", groups: ["Geometry"], tip: "Points, lines and curves placed in the views, with their measurements", mount(el) { root = el; render(); } });
+  live.subscribe((c) => { if (!dragging && !editing && (c.type === "markup" || c.type === "interaction" || c.kind === "remove")) render(); });
   addEventListener("keydown", (e) => { if (e.key === "Escape") { const ps = g().__placeState?.(); if (ps?.mode === "place") { g().__endPlace(); render(); } } });
 }

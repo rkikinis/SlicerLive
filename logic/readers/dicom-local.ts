@@ -2,7 +2,7 @@
 // pure reconstructor in dicom-series.ts. A "project" here is a File System Access directory the user grants;
 // the minimal browser lists its series so one can be loaded. (The richer SlicerRad project browser — FSA
 // directories toggled on/off — reconciles onto these same Project/StudyIndex/SeriesSource seams later.)
-import { loadDcmjs, parseInstances, groupSeries, reconstructSeries, type DicomInstance, type Series } from "./dicom-series.ts";
+import { parseInstances, groupSeries, reconstructSeries, type DicomInstance, type Series } from "./dicom-series.ts";
 import type { Volume } from "./nifti.ts";
 
 export interface SeriesEntry {
@@ -75,5 +75,4 @@ export function loadEntry(entry: SeriesEntry): Volume {
   throw new Error("series has no parsed instances (re-index the folder)");
 }
 
-export { loadDcmjs };
 export type { Series };

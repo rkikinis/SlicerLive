@@ -5,6 +5,7 @@
 // geometry is handed straight to the ImageField — no resampling to an axis-aligned box.
 
 import { ImageField } from "./fields.ts";
+import { SLICER_VR_SHADE, UNSHADED, type Shade } from "./shading.ts";
 import { fetchZarrVolume, type ZarrDesc } from "./zarr.ts";
 import { adaptMrsonScene, isMrsonScene } from "./mrson.ts";
 import type { Vec3 } from "./mat4.ts";
@@ -153,7 +154,7 @@ export async function loadSceneVolumeField(
     const lo = colorTF[0][0], hi = colorTF[colorTF.length - 1][0];
     clim = [lo, hi];
     lut = lutFromTransferFunctions(colorTF, opacityTF, clim);
-    shade = vp.attrs.shade ? [0.25, 0.75, 0.5, 24] : [1, 0, 0, 1];
+    shade = vp.attrs.shade ? [...SLICER_VR_SHADE] : [...UNSHADED];
   } else {
     // window/level grayscale
     const disp = nodes[(vol.refs?.display ?? [])[0]]?.attrs ?? {};
@@ -161,7 +162,7 @@ export async function loadSceneVolumeField(
     const lev = (disp.level as number) ?? (zv.range[0] + zv.range[1]) / 2;
     clim = [lev - win / 2, lev + win / 2];
     lut = lutFromWindowLevel();
-    shade = [0.25, 0.75, 0.5, 24];
+    shade = [...SLICER_VR_SHADE];
   }
 
   // Display window/level for MPR grayscale (fall back to the observed data range).

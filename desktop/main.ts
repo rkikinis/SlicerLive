@@ -13,7 +13,8 @@
 // hundreds of MB of immutable JS2 blob data cached across launches.
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { dirname, join, fromFileUrl, toFileUrl } from "jsr:@std/path@1";
-import { installMacMenu, showAlert } from "./macmenu.ts";
+import { attachedDisplays, installMacMenu, keepPageVisibleOffScreen, placeWindowTopLeft, showAlert } from "./macmenu.ts";
+import { chooseFrame, readWindowFrames, windowFilePath } from "./window-frame.ts";
 import { HELP_INIT_JS } from "./help-content.ts";
 
 const exeDir = dirname(Deno.execPath());
@@ -57,7 +58,7 @@ if (Deno.build.os === "windows") {
 function fatal(message: string): never {
   log(`FATAL ${message}`);
   console.error(message);
-  showAlert("SlicerLive could not start", message);
+  showAlert("SlicerAlbula could not start", message);
   Deno.exit(1);
 }
 
@@ -68,10 +69,10 @@ const args = parseArgs(Deno.args, {
 
 if (args.help) {
   console.log(
-    "SlicerLive desktop gallery\n" +
+    "SlicerAlbula desktop app\n" +
       "  --gallery <dir>  gallery checkout to serve (default: auto-detect)\n" +
       "  --port <n>       preferred port (default 4180; +1..+9 fallback)\n" +
-      "  --url <path>     initial page, e.g. /webgpu/cardiac.html (default /)",
+      "  --url <path>     initial page (default: /webgpu/slicer-app.html when the gallery has it, else /)",
   );
   Deno.exit(0);
 }
@@ -79,7 +80,7 @@ if (args.help) {
 // Loaded after arg handling: importing this module dlopens the native
 // webview library, which must not happen for --help.
 log("loading webview module");
-const { Webview, SizeHint } = await import("jsr:@webview/webview@0.9.0").catch((e) =>
+const { Webview, SizeHint } = await import("jsr:@webview/webview").catch((e) =>
   fatal(`The native window library failed to load.\n\n${e}`)
 );
 log("webview module loaded");
@@ -123,15 +124,77 @@ const worker = new Worker(new URL("./server-worker.ts", import.meta.url), { type
 const port = await new Promise<number>((resolve) => {
   worker.onmessage = (e) => resolve(e.data.port);
   worker.onerror = (e) => fatal(`The local gallery server could not start.\n\n${e.message}`);
-  worker.postMessage({ root, port: preferredPort });
+  // The window's remembered place lives beside the launcher; this server is the one that keeps it
+  // up to date (desktop/window-frame.ts). The headless server passes no file, so it never writes.
+  worker.postMessage({ root, port: preferredPort, windowFile: windowFilePath(root) });
 });
 const origin = `http://127.0.0.1:${port}`;
 log(`SlicerLive gallery: serving ${root} at ${origin}`);
 
 log("creating webview window");
-const webview = new Webview(false, { width: 1440, height: 900, hint: SizeHint.NONE });
+// CREATE IT AT THE REMEMBERED SIZE. Ron: "when I start Native it first comes up in a landscape
+// format in the center of the screen. Then there is a 20 sec break and then the remembered portrait
+// configuration comes up."
+//
+// Both halves of that were here. The window was created 1440x900 -- landscape, hard-coded -- and the
+// launcher then reshaped it from outside through System Events, polling for the window and
+// re-applying until it stuck, which is where the wait came from. So the first thing on screen was
+// always the wrong shape, and the right one arrived visibly later.
+//
+// The app can read the remembered frame itself: it is four numbers in .slicer-app-window beside the
+// launcher, and this process is Deno. Reading it here means the window is the right SHAPE from the
+// first frame. Position still belongs to the launcher -- webview_deno exposes a size setter and no
+// position -- but a correctly-shaped window that then slides is a different experience from one that
+// changes orientation.
+function rememberedSize(): { width: number; height: number } {
+  const fallback = { width: 1440, height: 900 };
+  try {
+    // Beside the launcher, which is the workspace root. Option B (2026-09-16) put the gallery at
+    // Contents/src/live, three levels down, and a fixed "two levels up" silently missed the file
+    // for a day (every launch opened 1440x900; the critic found it in the startup captures). So:
+    // walk up from the gallery, up to four levels, and take the first file found.
+    let p = "";
+    for (let dir = dirname(root), i = 0; i < 4 && !p; dir = dirname(dir), i++) {
+      try { Deno.statSync(join(dir, ".slicer-app-window")); p = join(dir, ".slicer-app-window"); } catch { /* next */ }
+    }
+    if (!p) return fallback;
+    const parts = Deno.readTextFileSync(p).trim().split(/\s+/).map(Number);
+    if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return fallback;
+    const [, , w, h] = parts;
+    // Clamped: a frame saved on a larger display must not open a window bigger than this one.
+    return w >= 640 && h >= 480 ? { width: Math.round(w), height: Math.round(h) } : fallback;
+  } catch {
+    return fallback;   // first run, or the launcher was not used
+  }
+}
+
+// THE WINDOW FOR THE DISPLAYS ATTACHED NOW: the one saved for a display that is here, or the most
+// recent one fitted to the main display (desktop/window-frame.ts). Ron moves between an office with
+// an external display and a laptop screen, and one remembered window fits only one of them.
+const chosen = mac ? chooseFrame(readWindowFrames(windowFilePath(root)), attachedDisplays()) : null;
+const size = chosen ? { width: chosen.w, height: chosen.h } : rememberedSize();
+log(`window ${size.width}x${size.height}${chosen ? ` (${chosen.why})` : size.width === 1440 && size.height === 900 ? " (default)" : " (remembered)"}`);
+const webview = new Webview(false, { width: size.width, height: size.height, hint: SizeHint.NONE });
 log("webview created");
-webview.title = "SlicerLive";
+webview.title = "SlicerAlbula";
+// AND WHERE IT WAS. The size above has always come from the remembered frame; the position was the
+// launcher's job, from outside, so a start from the Dock came up centered. Now the app puts its own
+// window back (desktop/window-frame.ts has the why) -- if that place is still on a screen.
+if (mac) {
+  const placed = chosen ? `${placeWindowTopLeft(webview.unsafeWindowHandle, chosen.x, chosen.y)} — ${chosen.why}` : "no remembered place";
+  log(`window position: ${placed}`);
+  await fetch(`${origin}/_log`, { method: "POST", body: `window position: ${placed}`, signal: AbortSignal.timeout(2000) }).catch(() => {});
+}
+// A window left on another desktop must not lose the study (see macmenu.ts for the chain). The
+// outcome also goes to the session log: stdout is lost when the Dock or `open` starts the app,
+// and "was the switch on?" is the first question after a lost study.
+if (mac) {
+  const outcome = `occlusion detection: ${keepPageVisibleOffScreen(webview.unsafeWindowHandle)}`;
+  log(outcome);
+  // Awaited: webview.run() blocks the event loop a few lines down, and an un-awaited fetch never
+  // gets to send (the first build of this line wrote nothing -- checked in the log).
+  await fetch(`${origin}/_log`, { method: "POST", body: outcome, signal: AbortSignal.timeout(2000) }).catch(() => {});
+}
 
 // External http(s) links open in the system browser.
 webview.bind("slicerliveOpenExternal", (url: string) => {
@@ -143,7 +206,12 @@ webview.bind("slicerliveOpenExternal", (url: string) => {
 });
 // Native menu bar: App menu with Quit ⌘Q, Edit (clipboard), Window, and a Help
 // menu whose "SlicerLive Help" opens the documentation dialog in the page.
-installMacMenu("SlicerLive", () => webview.eval("window.__sllShowHelp && __sllShowHelp()"));
+installMacMenu(
+  "SlicerAlbula",
+  () => webview.eval("window.__sllShowHelp && __sllShowHelp()"),
+  () => webview.eval("location.reload()"),
+  () => webview.eval("window.__sllShowSettings && __sllShowSettings()"),
+);
 
 // Runs before page scripts on every navigation. The gallery opens demos with
 // target=_blank, which a bare WKWebView silently ignores — retarget same-origin
@@ -179,7 +247,7 @@ webview.init(`
     const b = document.createElement("div");
     b.textContent = text; b.title = title;
     b.style.cssText = "position:fixed;top:10px;left:" + left + "px;z-index:2147483647;width:34px;height:34px;" +
-      "border-radius:17px;background:rgba(20,20,28,.55);color:#d8d8e0;border:1px solid rgba(160,180,210,.35);" +
+      "border-radius:17px;background:var(--sl-pill-bg);color:var(--sl-pill-fg);border:1px solid var(--sl-pill-edge);" +
       "display:flex;align-items:center;justify-content:center;font:20px -apple-system,system-ui,sans-serif;" +
       "cursor:pointer;opacity:.45;transition:opacity .15s;user-select:none;-webkit-user-select:none";
     b.onmouseenter = () => (b.style.opacity = "1");
@@ -199,10 +267,10 @@ webview.init(`
     }
     if (!reason) return;
     const b = document.createElement("div");
-    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483646;padding:12px 18px;background:#5a1e1e;" +
-      "color:#ffe3e3;font:13px/1.45 -apple-system,system-ui,sans-serif;border-top:1px solid #a33;box-shadow:0 -6px 20px rgba(0,0,0,.4)";
+    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483646;padding:12px 18px;background:var(--sl-error-bg);" +
+      "color:var(--sl-error-fg);font:13px/1.45 var(--sl-font);border-top:1px solid var(--sl-error-edge);box-shadow:0 -6px 20px var(--sl-scrim)";
     b.innerHTML = "<b>WebGPU is not available, so the demos cannot render.</b> " + reason +
-      " SlicerLive renders on your GPU through WebGPU (Chrome/Edge 113+, Safari 26+, WebView2 with a GPU driver)." +
+      " SlicerAlbula renders on your GPU through WebGPU (Chrome/Edge 113+, Safari 26+, WebView2 with a GPU driver)." +
       "${mac ? "" : " Without a GPU you can try SlicerLive-softgpu.cmd for a slow software fallback."}" +
       "<span style='float:right;cursor:pointer;opacity:.7' title='dismiss'>✕</span>";
     b.querySelector("span").onclick = () => b.remove();
@@ -211,18 +279,37 @@ webview.init(`
   addEventListener("DOMContentLoaded", () => {
     checkGpu();
     const home = location.pathname === "/" || location.pathname === "/index.html";
+    // A page that brings its own chrome gets none injected. These buttons are fixed at the top-left
+    // corner, which is where the application shell puts its brand mark -- Ron found a translucent
+    // circle sitting on top of the Slicer logo and wanted it gone, and he was right twice over: it
+    // overlapped the mark, and in the app there is no gallery to go back TO. The gallery's own demo
+    // pages have no toolbar and nothing else to navigate with, so they keep it.
+    //
+    // The page DECLARES it, in a meta tag that exists as soon as the document is parsed. Detecting
+    // ".sl-toolbar" here was the obvious thing and is wrong: this runs at DOMContentLoaded and the
+    // application shell mounts later from an async main(), so the toolbar is never there yet and
+    // the buttons went in anyway -- which is precisely what Ron saw after the first fix.
+    const ownChrome = !!document.querySelector('meta[name="sl-chrome"][content="own"]');
     let left = 10;
-    if (!home) {
+    if (!home && !ownChrome) {
       button("←", "Back to gallery (${mac ? "⌘[" : "Ctrl+["})", left,
         () => (history.length > 1 ? history.back() : (location.href = "/")));
       left += 42;
     }
-    if (!${mac}) button("?", "Help (F1)", left, () => __sllShowHelp());
+    if (!${mac} && !ownChrome) button("?", "Help (F1)", left, () => __sllShowHelp());
   });
 })();
 `);
 
-webview.navigate(origin + (args.url ?? "/"));
+// The Dock icon passes no --url. Ron, 2026-09-16: "that currently results in bringing up
+// slicerlive instead of Albula" -- "/" is the gallery's index. When the gallery carries the
+// application page, that page is the default; the launcher's --url still wins.
+const startPath = (() => {
+  if (args.url) return args.url;
+  try { Deno.statSync(join(root, "webgpu", "slicer-app.html")); return "/webgpu/slicer-app.html"; } catch { return "/"; }
+})();
+log(`start page ${startPath}`);
+webview.navigate(origin + startPath);
 log("entering run loop");
 webview.run(); // blocks until the window closes
 log("run loop exited");

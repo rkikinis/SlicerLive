@@ -107,7 +107,7 @@ export class SequenceBrowser<T> {
   sequences: SynchronizedSequence<T>[] = [];
   selectedItemNumber = -1;
   playbackActive = false;
-  playbackRateFps = 10;
+  playbackRateFps = 4;   // Albula's default (Ron, 2026-09-25: "the default fps should be 4, not 10"); Slicer's is 10
   playbackLooped = true;
   playbackItemSkippingEnabled = true;
   /** Continuous position, so fractional values can drive inter-frame interpolation. */

@@ -1,0 +1,36 @@
+// EVERY JAVASCRIPT PACKAGE'S VERSION, IN ONE PLACE (Ron, 2026-09-25: "every dependency's version in one place", an update
+// is one line plus the test suite). Deno reads this file when it starts in this folder -- the rebuild, the tests and the
+// compiled app all start here; tools started elsewhere pass --config Contents/src/SlicerLive/deno.jsonc. deno.lock beside
+// it records exactly what resolved, with checksums. The inventory with the reasons is the workspace's
+// Contents/docs/DEPENDING-ON-OTHER-PEOPLE.md; the update schedule is there too.
+// A jsr sub-path is pinned entry by entry: a key ending in "/" is ignored for jsr: (checked with an empty cache,
+// 2026-09-28). An explicit version in an import beats this map -- write imports without one.
+{
+  "imports": {
+    // THE SDK: the one door from an extension into core (sdk/albula.ts; Contents/docs/EXTENSIONS.md in the workspace).
+    // Extensions import "albula" and, in their tests, "albula/testing"; the app's build maps the same names.
+    "albula": "./sdk/albula.ts",
+    "albula/testing": "./sdk/testing.ts",
+    // Deno's standard library: tests (assert), paths, the server's file serving, the tools' argument parsing.
+    // Versions as resolved on 2026-09-28; next look: the quarterly slow-movers date.
+    "jsr:@std/assert": "jsr:@std/assert@1.0.19",
+    "jsr:@std/assert@1": "jsr:@std/assert@1.0.19",
+    "jsr:@std/path@1": "jsr:@std/path@1.1.6",
+    "jsr:@std/cli@1/parse-args": "jsr:@std/cli@1.0.32/parse-args",
+    "jsr:@std/encoding@1/base64": "jsr:@std/encoding@1.0.11/base64",
+    "jsr:@std/fs@1/walk": "jsr:@std/fs@1.0.24/walk",
+    "jsr:@std/http@1/file-server": "jsr:@std/http@1.1.3/file-server",
+    // The app's window. Upstream's last release (2025-01-29); desktop/make-app.ts reads this line for the native
+    // library's version, so the binding and the library cannot drift apart.
+    "jsr:@webview/webview": "jsr:@webview/webview@0.9.0",
+    // The bundler. Its version is part of the duckn copy fingerprint (desktop/make-copy-code.ts): moving it re-makes
+    // every copy, so it moves on the quarterly date, on a day the sweep can run.
+    "npm:esbuild": "npm:esbuild@0.28.2",
+    // Tool-only: data tables (build-idc-slim), the icon, the anatomy workbook. Not in the app.
+    "npm:hyparquet": "npm:hyparquet@1.29.2",
+    "npm:hyparquet-writer": "npm:hyparquet-writer@0.16.9",
+    "npm:pngjs@7": "npm:pngjs@7.0.0",
+    // SheetJS publishes on its own site since 0.18.5 (2022, npm's last, with public advisories): logic/anatomy/build-harmonized.ts.
+    "npm:xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs"
+  }
+}

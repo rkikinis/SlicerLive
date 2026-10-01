@@ -51,6 +51,27 @@ function rotateAboutAxis(v: Vec3, axis: Vec3, deg: number): Vec3 {
 
 export interface CameraBasis { right: Vec3; up: Vec3; back: Vec3 }
 
+/**
+ * Should a bounding-box face's axis label be hidden, because it would land on the anatomy?
+ *
+ * `faceNormal` is the outward normal of the box face (a signed unit axis); `viewDir` is the camera's
+ * direction of projection, pointing from the eye into the scene. A face whose normal runs ALONG the
+ * view direction is the far wall of the box, and its center projects inside the silhouette -- so its
+ * label draws over the organs, because the overlay that draws it carries no depth.
+ *
+ * THE THRESHOLD IS THE WHOLE DESIGN. A plain back-face test (hide whenever the face points away from
+ * the camera) hides five of six labels on an axis-aligned view: measured on a camera looking down
+ * -A at a 100x150x200 box, only A survived, and R, L, S and I all vanished though none of them
+ * obstructs anything. Ron asked for "the one in front of the object" -- one -- so the test is how
+ * DIRECTLY the face faces away: past 60 degrees of straight-away, which is the far face and, at a
+ * corner-on view, the two or three that share the far corner.
+ */
+export function labelFacesAway(faceNormal: Vec3, viewDir: Vec3, cosLimit = 0.5): boolean {
+  const l = Math.hypot(viewDir[0], viewDir[1], viewDir[2]) || 1;
+  const d = (faceNormal[0] * viewDir[0] + faceNormal[1] * viewDir[1] + faceNormal[2] * viewDir[2]) / l;
+  return d > cosLimit;
+}
+
 export class VtkCamera {
   position: Vec3;
   focalPoint: Vec3;
@@ -159,7 +180,13 @@ export class VtkCamera {
     const dop = this.directionOfProjection;
     const rel = sub(p, this.position);
     const depth = dot(rel, dop);
-    const halfH = Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
+    // UNDER PARALLEL PROJECTION THE VIEW HEIGHT DOES NOT DEPEND ON DEPTH -- that is what makes it
+    // parallel. Leaving the perspective form here put the bounding box, the R/A/S/L/P/I labels and
+    // the orientation marker in the wrong place the moment the projection toggle was used, since all
+    // three are drawn through this.
+    const halfH = this.parallelProjection
+      ? Math.max(1e-6, this.parallelScale)
+      : Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
     const aspect = w / h;
     const ndcx = dot(rel, right) / (halfH * aspect);
     const ndcy = dot(rel, up) / halfH;
@@ -172,7 +199,9 @@ export class VtkCamera {
   displayToWorldAtDepth(x: number, y: number, depth: number, w: number, h: number): Vec3 {
     const { right, up } = this.basis();
     const dop = this.directionOfProjection;
-    const halfH = Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
+    const halfH = this.parallelProjection
+      ? Math.max(1e-6, this.parallelScale)
+      : Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
     const aspect = w / h;
     const ndcx = (x / w) * 2 - 1;
     const ndcy = 1 - (y / h) * 2;
@@ -190,4 +219,35 @@ export class VtkCamera {
       distance: this.distance,
     };
   }
+}
+
+/**
+ * How far a camera must sit from a sphere of radius `r` to contain it.
+ *
+ * THE ARITHMETIC, EXPORTED, BECAUSE IT WAS A MAGIC NUMBER AND IT WAS WRONG. The 3D fit used
+ * `radius * 2.6`, which contains a sphere only if the half field of view is asin(1/2.6) = 22.6
+ * degrees. vtk's default is 15 (a 30 degree view angle), so the fit was a third too close and the
+ * data always overflowed. Ron, having pressed the fit button: "the zoom is incorrect, because I dont
+ * see the entire data." Nothing in the file said what 2.6 was for, so nothing could contradict it.
+ *
+ * `viewAngle` IS THE VERTICAL FIELD OF VIEW, which is the other half of it. In a viewport taller
+ * than it is wide -- the 3D pane in Conventional Widescreen -- the horizontal field is the narrower
+ * one, so that is the one the fit has to satisfy. The old code fitted to the vertical alone.
+ *
+ * `margin` leaves the outermost point inside the frame rather than exactly on it.
+ */
+export function fitDistance(r: number, viewAngleDeg: number, aspectWH: number, margin = 1.05): number {
+  const halfV = (viewAngleDeg * Math.PI) / 360;
+  const halfH = Math.atan(Math.tan(halfV) * Math.max(aspectWH, 1e-6));
+  const half = Math.max(1e-3, Math.min(halfV, halfH));
+  return (r / Math.sin(half)) * margin;
+}
+
+/**
+ * The orthographic equivalent: `parallelScale` is the half-HEIGHT of the view in world units, so a
+ * viewport narrower than it is tall needs it divided by the aspect or the sides are cut off. Setting
+ * it to the radius alone is the rest of "the orthographic toggle has no visible effect".
+ */
+export function fitParallelScale(r: number, aspectWH: number, margin = 1.05): number {
+  return (r / Math.min(1, Math.max(aspectWH, 1e-6))) * margin;
 }

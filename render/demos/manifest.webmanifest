@@ -1,0 +1,18 @@
+{
+  "name": "SlicerAlbula",
+  "short_name": "SlicerAlbula",
+  "description": "WebGPU medical image viewing, segmentation and editing — runs standalone in the browser.",
+  "start_url": "slicer-app.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#151922",
+  "theme_color": "#151922",
+  "icons": [
+    {
+      "src": "albula-app-icon.png",
+      "sizes": "716x716",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

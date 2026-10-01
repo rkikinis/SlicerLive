@@ -49,3 +49,21 @@ export class BudgetController {
     return Math.max(0.25, Math.min(1, Math.sqrt(this.budgetPx / area)));
   }
 }
+
+/**
+ * THE MOVING SCALE IN STEPS, NOT A CONTINUUM. The budget's scale changes a little every frame, and every new
+ * trace size re-creates the 3D view's working images (the low-resolution trace, the surface color, depth and
+ * normal targets): ~80 MB a frame on a Retina window at 60%, at 30 frames a second. Suspected of Ron's
+ * out-of-memory reset (2026-09-24 16:40, after a minute of dragging a slice shown in 3D and zooming, the log showing
+ * a different resolution nearly every frame) -- suspected, NOT confirmed: the page still peaked at 3.2-3.5 GB with
+ * this and the corner drawing in place (WORKING-STATE, 16:50 and 17:04). So the scale moves in eighths, and only
+ * when the budget has left the step in use by half a step: a drag reuses one set of targets.
+ */
+export const MOVING_SCALE_STEP = 1 / 8;
+export function stepMovingScale(current: number, raw: number): number {
+  if (raw > 0.98) return 1;
+  // The step in use holds while the budget stays within half a step below it and one and a half above (the
+  // step covers [current, current + step); the half steps are the reluctance to switch).
+  if (current > 0 && current < 1 && raw >= current - MOVING_SCALE_STEP / 2 && raw < current + 1.5 * MOVING_SCALE_STEP) return current;
+  return Math.max(0.25, Math.floor(raw / MOVING_SCALE_STEP) * MOVING_SCALE_STEP);
+}

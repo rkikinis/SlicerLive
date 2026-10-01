@@ -3,7 +3,7 @@
 // canvas into a 2d canvas inside requestAnimationFrame. Numeric ground truth,
 // no screenshot eyeballing.
 //   deno run -A --unstable-ffi desktop/smoke-test.ts [--url /webgpu/cardiac.html] [--gallery <dir>]
-import { Webview, SizeHint } from "jsr:@webview/webview@0.9.0";
+import { Webview, SizeHint } from "jsr:@webview/webview";
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { dirname, join, fromFileUrl, resolve } from "jsr:@std/path@1";
 

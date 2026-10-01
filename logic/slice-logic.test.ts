@@ -18,6 +18,23 @@ Deno.test("fitFovToVolume matches Slicer's FitSliceToVolumes for MRHead (all 3 o
   }
 });
 
+// The MRHead fixture only exercises volumes the HEIGHT ratio happens to decide, so it passed both
+// with and without the extent actually being covered. These are the cases it never reached: a volume
+// proportionally wider than its cell, and one proportionally taller.
+Deno.test("fitFovToVolume covers the WHOLE extent, whichever way the volume is out of proportion", () => {
+  const wide = fitFovToVolume("axial", [0, 0, 0], [350, 100, 10], [], 270, 180);
+  assert(wide[0] >= 350 - 1e-6, `wide fovX ${wide[0]} must cover the 350 mm extent`);
+  assert(wide[1] >= 100 - 1e-6, `wide fovY ${wide[1]} must cover the 100 mm extent`);
+
+  const tall = fitFovToVolume("axial", [0, 0, 0], [100, 400, 10], [], 200, 100);
+  assert(tall[0] >= 100 - 1e-6, `tall fovX ${tall[0]} must cover the 100 mm extent`);
+  assert(tall[1] >= 400 - 1e-6, `tall fovY ${tall[1]} must cover the 400 mm extent`);
+
+  // and the field of view keeps the viewport's aspect, so the fit letterboxes rather than distorts
+  assertAlmostEquals(wide[0] / wide[1], 270 / 180, 1e-9, "wide keeps the viewport aspect");
+  assertAlmostEquals(tall[0] / tall[1], 200 / 100, 1e-9, "tall keeps the viewport aspect");
+});
+
 Deno.test("offsetRangeResolution: bounds along the normal, step = spacing", async () => {
   const s = await fixture<Startup>("slicer-startup.json");
   const { ijkToRAS, rasLo, rasHi } = s.volume;

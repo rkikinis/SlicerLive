@@ -44,7 +44,7 @@ const port = await new Promise<number>((resolve) => { worker.onmessage = (e) => 
 const origin = `http://127.0.0.1:${port}`;
 
 // 3. window + native menus
-const { Webview, SizeHint } = await import("jsr:@webview/webview@0.9.0");
+const { Webview, SizeHint } = await import("jsr:@webview/webview");
 const webview = new Webview(false, { width: 1440, height: 900, hint: SizeHint.NONE });
 webview.title = "3D Slicer — SlicerLive";
 installMacMenu("SlicerLive", () => {});

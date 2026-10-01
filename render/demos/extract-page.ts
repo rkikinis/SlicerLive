@@ -1,7 +1,7 @@
 // Lightweight KiTS extractor: loads a case (CT + SEG) from IDC via idc_tools and
 // POSTs the raw arrays + geometry to the local drop server. NO WebGPU — this exists
 // only to cache native arrays to disk so the feature-cortex work happens headless in
-// Deno. Bundle: deno run -A npm:esbuild@0.21.5 render/demos/extract-page.ts --bundle
+// Deno. Bundle: deno run -A npm:esbuild render/demos/extract-page.ts --bundle
 //   --format=esm --outfile=render/demos/extract.js
 //   ?pid=KiTS-00012   which case   ?drop=http://127.0.0.1:8150   drop server
 import { loadManifest, loadSeries } from "../vendor/idc_tools/index.js";

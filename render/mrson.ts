@@ -40,6 +40,9 @@ const TYPE_TO_CLASS: Record<string, string> = {
   volumeRenderingDisplay: "vtkMRMLGPURayCastVolumeRenderingDisplayNode",
   modelDisplay: "vtkMRMLModelDisplayNode",
   markupDisplay: "vtkMRMLMarkupsDisplayNode",
+  sequence: "vtkMRMLSequenceNode",
+  sequenceBrowser: "vtkMRMLSequenceBrowserNode",
+  terminology: "vtkMRMLColorTableNode",
 };
 
 export function isMrsonScene(raw: unknown): raw is MrsonScene {

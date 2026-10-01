@@ -3,14 +3,42 @@
 Status: **A-0 built + verified (2026-08-04)**; A-1…A-7 are the reviewable plan below.
 
 `algorithms/` lives at the **top level of the SlicerLive repo, a sibling of `render/`** (not
-under it). It imports from `render/` (`device.ts`, `mat4.ts`, `bake.ts`, `fields.ts`) but
-**`render/` never imports `algorithms/`** — one-way dependency, so the editor stays independent
-of the renderer. Naming is plain (`EditableSegmentation`, `PaintEffect`, `SegEditDriver`) — the
+under it). It imports from `render/` (`device.ts`, `mat4.ts`, `bake.ts`, `build-id.ts`, `fields.ts`).
+The rule was once **`render/` never imports `algorithms/`**, and that is no longer true: `livescene.ts`
+imports `resampleIsotropic` from `algorithms/geom.ts`. Recorded rather than quietly dropped — the
+one-way direction is still the intent and still worth defending, but the document should not claim a
+property the code does not have. Naming is plain (`EditableSegmentation`, `PaintEffect`, `SegEditDriver`) — the
 `Live*` convention belongs to `LiveStory`, which is a *Slicer module*; this is repo-internal.
 
 This is the SlicerLive re-envisioning of the Slicer Segment Editor: re-built WebGPU-compute-first,
 so painting / growcut / morphology are clean, and the result feeds the renderer's GPU buffers
 directly with no CPU round-trip.
+
+
+---
+
+## Surface extraction — `surface-nets.ts` (built 2026-09-08, shelved on speed)
+
+Not part of the A-0…A-7 editing plan below; it shares this directory because it is compute over a
+labelmap. A labelmap in, one closed triangle mesh per label out, at the labelmap's NATIVE resolution
+— this is Slicer's "Show 3D" button (`vtkBinaryLabelmapToClosedSurfaceConversionRule`) without VTK.
+
+Surface nets rather than flying edges for a reason beyond speed: it places **one vertex per cell,
+shared by every label meeting in it**, so parcels that touch cannot crack apart. Slicer carries a
+separate "joint smoothing" option to prevent exactly that, because it extracts each segment
+independently. Here the problem is designed out instead of corrected afterwards — anything that
+changes this is a regression however fast it is.
+
+Defaults are measured, not chosen (`DEFAULT_SMOOTH_ITERS = 24`, `DEFAULT_NORMAL_SMOOTH = 16`); the
+curve and the two hypotheses that died on measurement are in the file's own comments. Seven tests in
+`surface-nets.test.ts`, including two that exist because the shipped code failed them: peak memory
+must follow the SURFACE and not the grid, and normals must stay accurate on ANISOTROPIC voxels.
+
+**Status: correct and shelved.** 34.2 s standalone against 118.2 s inside the application for the
+same work on the same machine — the app runs a webview, so JavaScriptCore rather than V8. Ron: "This
+is too slow. It breaks rons rules for tools." The route forward is WebGPU compute, packaged for a
+fresh session in **`docs/GREASED-LIGHTNING.md`** — read that first, and its step 0 in particular,
+since it may cancel the project.
 
 ---
 

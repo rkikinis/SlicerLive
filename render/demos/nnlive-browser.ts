@@ -20,6 +20,7 @@ import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
 import { applyRowMajor, type Vec3 } from "../mat4.ts";
 import { FaithfulSegmenter } from "../faithful-segmenter.ts";
+import { workerUrl } from "../build-id.ts";
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -111,8 +112,10 @@ async function main() {
   // --- nnLive faithful 192 backend ---------------------------------------------
   status("loading nnLive faithful model (188 MB perclick weights, cached after first load)…");
   const seg = new FaithfulSegmenter({
-    workerUrl: new URL("nnlive/pathA-faithful-worker.js", location.href).href,
-    encUrl: new URL("nnlive/faithful-enc.js", location.href).href,
+    // Versioned like every other runtime code load -- these are vendored .js served beside the page,
+    // so a rebuild that changes them is invisible to the browser without it.
+    workerUrl: workerUrl("nnlive/pathA-faithful-worker.js").href,
+    encUrl: workerUrl("nnlive/faithful-enc.js").href,
     base: BASE, weights: WEIGHTS, onStatus: (m) => status(m),
   });
   try {

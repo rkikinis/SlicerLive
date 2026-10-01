@@ -2,6 +2,7 @@
 // translation, reset to identity, and Harden (bake the world matrix into the node's geometry and clear the
 // ref) — Slicer's Transforms module core. Live edits re-place the field via the transform chain in the image
 // DM. Plain DOM, theme.css. Matrices row-major, RAS.
+import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import type { LiveScene } from "../livescene.ts";
 
@@ -33,7 +34,7 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
     const m = tf?.matrix ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     root.innerHTML = `
       <h2>Transforms</h2>
-      <div class="sl-row"><label>Node</label><select class="sl-tf-target">${vols.map((v) => `<option value="${v.imageId}"${v.imageId === target ? " selected" : ""}>${v.name}</option>`).join("")}</select></div>
+      <div class="sl-row"><label>Node</label><select class="sl-tf-target">${vols.map((v) => `<option value="${v.imageId}"${v.imageId === target ? " selected" : ""}>${escapeHtml(v.name)}</option>`).join("")}</select></div>
       <div class="sl-row"><button class="sl-primary sl-tf-apply">${tid ? "Transform applied" : "Apply a transform"}</button></div>
       ${tid ? `
       <h3>Translation (mm)</h3>
@@ -56,6 +57,6 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
     $(".sl-tf-harden")?.addEventListener("click", () => { g().__hardenTransform(target); status("transform hardened"); render(); });
   }
 
-  shell.registerPanel({ id: "transforms", title: "Transforms", order: 7, mount(el) { root = el; render(); } });
+  shell.registerPanel({ id: "transforms", title: "Transforms", groups: ["Geometry"], tip: "Move, rotate or scale a volume or segmentation in space", mount(el) { root = el; render(); } });
   live.subscribe((c) => { if (!dragging && (c.type === "transform" || c.type === "image")) render(); });
 }

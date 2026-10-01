@@ -30,6 +30,7 @@ import {
   SliceDisplayableManager,
   type SlicePlane,
   type Vec3,
+  type Volume3D,
   VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 import { SegEditDisplayableManager } from "../../logic/seged-manager.ts";
@@ -65,7 +66,7 @@ async function main() {
   let scene: SceneRenderer | null = null;
   const fields3d = new Map<string, Field>();
   let volumeField: ImageField | null = null;
-  let volumeShown3D = false;
+  const vol3d = new Map<string, Volume3D>();   // 3D volume renderings, one per image
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
   let inReplay = false;   // replaying a finalized recording → local 3D orbit + slice scroll (branch); Play snaps back
   let followCamera = true; // LIVE mode: follow Slicer's camera. Orbiting locally sets false (look around);
@@ -75,6 +76,9 @@ async function main() {
   const slice = new SliceRenderer(gpu, srgb);
   let volumeReady = false;
   let segOverlay: GPUTexture | null = null;
+  // The label form of the same overlay: the labelmap plus a palette, colored in the shader rather
+  // than baked into an rgba volume. Exclusive with segOverlay.
+  let segLabels: GPUTexture | null = null, segPaletteTex: GPUTexture | null = null;
   let segFill = 0.5;
   let segOutline = 1.0;
   const planes: Record<string, SlicePlane | undefined> = {};
@@ -125,7 +129,7 @@ async function main() {
 
   const rebuild3d = () => {
     const fs = [...fields3d.values()];
-    if (volumeShown3D && volumeField) fs.unshift(volumeField);
+    for (const v of vol3d.values()) fs.unshift(v.field);
     if (fs.length === 0) { scene = null; clearCanvas("threeD"); return; }
     if (!scene) scene = new SceneRenderer(gpu, srgb);
     scene.build(fs);
@@ -179,9 +183,11 @@ async function main() {
         const [lo, hi] = f.aabb();
         slice.setVolume(f.patientToTexture(), lo, hi);
         slice.setTextures(f.volumeTexture(), segOverlay ?? undefined);
+        slice.setLabelOverlay(segLabels, segPaletteTex);
         if (wl) slice.setWindowLevel(wl.win, wl.lev);
-        slice.setOverlayOpacity(segOverlay ? segFill : 0);
-        slice.setOutlineOpacity(segOverlay ? segOutline : 0);
+        const shown = segOverlay !== null || (segLabels !== null && segPaletteTex !== null);
+        slice.setOverlayOpacity(shown ? segFill : 0);
+        slice.setOutlineOpacity(shown ? segOutline : 0);
         volumeReady = true;
         renderSlices();
       } else {
@@ -190,17 +196,32 @@ async function main() {
       }
       rebuild3d();
     },
-    showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
+    setVolume3D(imageId, vol) { if (vol) vol3d.set(imageId, vol); else if (!vol3d.delete(imageId)) return; rebuild3d(); },
     setSlicePlane(cell, pl) { cell = cell.toLowerCase(); if (!(cell in CELL_ORIENT)) return; planes[cell] = pl; renderSlice(cell); },   // SliceDM keys by Slicer layoutName (Red/Green/Yellow); this demo has the fixed trio
     setLayout(name) { applyLayout(name); },
     setSegmentationOverlay(tex, fillOpacity, outlineOpacity) {
       segOverlay = tex;
+      segLabels = null; segPaletteTex = null;     // the two forms are exclusive
       segFill = fillOpacity;
       segOutline = outlineOpacity;
       if (volumeField) {
         slice.setTextures(volumeField.volumeTexture(), tex ?? undefined);
+        slice.setLabelOverlay(null, null);
         slice.setOverlayOpacity(tex ? fillOpacity : 0);
         slice.setOutlineOpacity(tex ? outlineOpacity : 0);
+      }
+      renderSlices();
+    },
+    setSegmentationLabelOverlay(labels, palette, fillOpacity, outlineOpacity) {
+      segLabels = labels; segPaletteTex = palette; segOverlay = null;
+      segFill = fillOpacity;
+      segOutline = outlineOpacity;
+      const on = !!(labels && palette);
+      if (volumeField) {
+        slice.setTextures(volumeField.volumeTexture(), undefined);
+        slice.setLabelOverlay(labels, palette);
+        slice.setOverlayOpacity(on ? fillOpacity : 0);
+        slice.setOutlineOpacity(on ? outlineOpacity : 0);
       }
       renderSlices();
     },
@@ -255,7 +276,7 @@ async function main() {
     Object.assign(globalThis, {
       __seged: {
         fields: () => [...fields3d.keys()],
-        vr3d: () => volumeShown3D,
+        vr3d: () => [...vol3d.keys()],
         cam: () => camera.state(),
         rebuild: () => { rebuild3d(); return [...fields3d.keys()]; },
         redraw: () => a3d.draw(),

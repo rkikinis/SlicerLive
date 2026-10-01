@@ -83,6 +83,98 @@ export interface ImageFieldOpts {
   ijkToRAS?: ArrayLike<number>;          // row-major 4x4 voxel-center->RAS (real, rotated/anisotropic geometry)
   opacityUnitDistance?: number;          // default min(spacing)
   shade?: [number, number, number, number]; // ka, kd, ks, shininess
+  /**
+   * ONE TEXTURE PER VOLUME, however many fields show it. The slice views and the volume rendering
+   * each build an ImageField over the same samples, and each built its own 3D texture: two copies
+   * of every CT on the GPU. With a key -- the volume's content hash -- the second field adopts
+   * the first one's texture, and the texture lives until the last field holding it is destroyed.
+   */
+  textureKey?: string;
+  /**
+   * HALF PRECISION. r16float is half the memory of r32float and filterable like it; integers are
+   * exact to 2048 and within 2 above (a CT's densest bone). Meant for the frames of a sequence,
+   * where five or six volumes are resident at once: Ron's five-phase coronary CTA is 560 MB a
+   * frame as f32, and the webview's page process was killed for holding them ("the image loaded,
+   * started beating and disappeared", 2026-09-12). Needs Float16Array (Safari 18, Chrome 135);
+   * without it the volume stays f32 rather than paying a JS conversion loop.
+   */
+  halfFloat?: boolean;
+  /**
+   * A COLOR VOLUME: each sample holds red + 256·green + 65536·blue (0..255 each). Stored as ordinary float32 samples
+   * (every integer below 2^24 is exact), uploaded here as an rgba8unorm texture, which the card filters linearly like
+   * any other. Only the slice views draw it as color (SliceRenderer.setBackgroundRGB); it is not volume-rendered.
+   * First use: Color FA (extensions/diffusion). Opt-in, so every other volume takes exactly the path it took before.
+   */
+  rgb24?: boolean;
+}
+
+/** Is this image node a color map (ImageFieldOpts.rgb24)? Its samples are packed colors, not measurements. */
+export function isColorMap(node: { rgb24?: unknown } | undefined): boolean { return !!(node as { rgb24?: boolean } | undefined)?.rgb24; }
+/** What Save, export and Crop say to a color map instead of writing packed numbers as if they were measurements. */
+export const COLOR_MAP_REFUSAL = "is a color map (made from its scan, and made again from it in about a second); it cannot be saved or cropped yet — save or crop the scan, or its FA map";
+
+/** Pack 0..255 red, green, blue into one sample (see ImageFieldOpts.rgb24). */
+export function packRGB24(r: number, g: number, b: number): number { return (r & 255) + 256 * (g & 255) + 65536 * (b & 255); }
+
+function uploadRGB24Texture(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
+  const n = dims[0] * dims[1] * dims[2], px = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) { const v = data[i] | 0; px[4 * i] = v & 255; px[4 * i + 1] = (v >> 8) & 255; px[4 * i + 2] = (v >> 16) & 255; px[4 * i + 3] = 255; }
+  const tex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
+  const slice = dims[0] * dims[1] * 4;
+  for (let z = 0; z < dims[2]; z++) dev.queue.writeTexture({ texture: tex, origin: [0, 0, z] }, px.subarray(z * slice, (z + 1) * slice), { bytesPerRow: dims[0] * 4, rowsPerImage: dims[1] }, [dims[0], dims[1], 1]);
+  return { tex, format: "rgba8unorm", normScale: 1 };
+}
+
+/** A volume texture shared between fields, reference-counted; see ImageFieldOpts.textureKey. */
+interface SharedVolumeTexture { tex: GPUTexture; format: GPUTextureFormat; normScale: number; refs: number }
+const sharedTextures = new Map<string, SharedVolumeTexture>();
+/** Whether a volume texture under this key is already on the GPU (so its samples need not be fetched). */
+export function hasSharedTexture(key: string | undefined): boolean { return !!key && sharedTextures.has(key); }
+const F16 = (globalThis as unknown as { Float16Array?: { from(a: ArrayLike<number>): ArrayBufferView & { length: number } } }).Float16Array;
+
+/**
+ * Create and fill a 3D scalar texture in the volume's NATIVE dtype where possible -- 4x less VRAM
+ * and upload than expanding to f32. r8unorm/r16float/r32float are all `float` sample types
+ * (filterable), so the sampling WGSL and bind layout are unchanged; only the clim is normalized
+ * for r8unorm (its samples return v/255). uint16 has no filterable core format (r16uint is not
+ * linearly sampled), so it promotes to f32 -- or to f16 when asked.
+ */
+function uploadVolumeTexture(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, halfFloat: boolean): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
+  let src: ArrayBufferView = data, fmt: GPUTextureFormat = "r32float", bpe = 4, normScale = 1;
+  if (data instanceof Uint8Array) { fmt = "r8unorm"; bpe = 1; normScale = 255; }
+  else if (halfFloat && F16) { src = F16.from(data); fmt = "r16float"; bpe = 2; }
+  else if (data instanceof Uint16Array) { src = Float32Array.from(data); }
+  // COPY_SRC so the data probe can read ONE texel back. Ron: "The probe should show all gray scale
+  // values ... at the probe location." A CPU copy of the volume for that question would be the
+  // whole volume again; copyTextureToBuffer of a 1x1x1 region is a padded row. Nothing else about
+  // the texture changes, and a usage flag costs no memory.
+  const tex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
+  // Upload the 3D texture in Z-slabs. wgpu's writeTexture stages the whole write through ONE
+  // buffer whose size can't exceed the device's maxBufferSize (~4 GB on an L4) — a single write
+  // of a multi-GB volume crashes the backend. Chunking the depth keeps each staging buffer small,
+  // so volumes are bounded only by total VRAM, not by one upload's size.
+  const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+  const CHUNK = 256 * 1024 * 1024;   // ~256 MB per write — comfortably under any maxBufferSize
+  const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+  // EACH SLAB FROM ITS OWN SMALL BUFFER, at offset 0 (Steve's 8c42972, authored 2026-08-22): wgpu mishandles
+  // data offsets past ~2 GB (32-bit overflow), so a volume over 2 GB uploaded with a running offset came out
+  // mostly empty. Below 2 GB the running offset is kept -- no copy, no extra time.
+  const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+  const big = u8.byteLength > 2 ** 31 - 1;
+  for (let z = 0; z < dims[2]; z += slab) {
+    const depth = Math.min(slab, dims[2] - z);
+    if (big) dev.queue.writeTexture({ texture: tex, origin: { x: 0, y: 0, z } }, u8.slice(z * sliceBytes, (z + depth) * sliceBytes), { offset: 0, bytesPerRow, rowsPerImage }, [dims[0], dims[1], depth]);
+    else dev.queue.writeTexture({ texture: tex, origin: { x: 0, y: 0, z } }, src, { offset: z * sliceBytes, bytesPerRow, rowsPerImage }, [dims[0], dims[1], depth]);
+  }
+  return { tex, format: fmt, normScale };
+}
+
+/** IEEE half to float, for reading an r16float texel back (the probe). */
+export function halfToFloat(h: number): number {
+  const s = (h & 0x8000) ? -1 : 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
+  if (e === 0) return s * m * 2 ** -24;
+  if (e === 31) return m ? NaN : s * Infinity;
+  return s * (1 + m / 1024) * 2 ** (e - 15);
 }
 
 /** A scalar volume + color/opacity LUT rendered by DVR (the ImageField). */
@@ -99,44 +191,24 @@ export class ImageField implements Field {
   private stepMm: number;
   private box: [Vec3, Vec3];
   private normScale = 1;   // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
+  private shared?: string; // the key this field's texture is shared under, if it is
 
   private dims: Vec3;
+  /** A color volume (ImageFieldOpts.rgb24): the slice views draw its samples as color, not through window/level. */
+  readonly rgb: boolean;
   constructor(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
     this.dims = dims;
+    this.rgb = !!opts.rgb24;
     const center = opts.center ?? [0, 0, 0];
-    // Store the volume in its NATIVE dtype where possible — 4× less VRAM + upload than expanding to
-    // f32. r8unorm/r32float are both `float` sample types (filterable), so the sampling WGSL and bind
-    // layout are unchanged; only the clim is normalized (below) since r8unorm samples return v/255.
-    // uint16 has no filterable core format (r16uint isn't linearly sampled), so it promotes to f32.
-    let src: ArrayBufferView = data, fmt: GPUTextureFormat = "r32float", bpe = 4;
-    this.normScale = 1;
-    if (data instanceof Uint8Array) { fmt = "r8unorm"; bpe = 1; this.normScale = 255; }
-    else if (data instanceof Uint16Array) { src = Float32Array.from(data); fmt = "r32float"; bpe = 4; }
-    this.volTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    // Upload the 3D texture in Z-slabs. wgpu's writeTexture stages the whole write through ONE
-    // buffer whose size can't exceed the device's maxBufferSize (~4 GB on an L4) — a single write
-    // of a multi-GB volume crashes the backend. Chunking the depth keeps each staging buffer small,
-    // so volumes are bounded only by total VRAM, not by one upload's size.
-    {
-      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
-      const CHUNK = 256 * 1024 * 1024;   // ~256 MB per write — comfortably under any maxBufferSize
-      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
-      // Copy each slab into a FRESH small buffer (offset 0) rather than passing the whole volume with
-      // a byte offset. wgpu's writeTexture mishandles data offsets past ~2 GB (32-bit overflow), so a
-      // multi-GB volume uploaded with a running offset corrupts every slab beyond 2 GB — the volume
-      // renders as mostly-zero with a small valid fragment. A per-slab copy keeps every offset 0.
-      const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
-      for (let z = 0; z < dims[2]; z += slab) {
-        const depth = Math.min(slab, dims[2] - z);
-        const slabBytes = depth * sliceBytes;
-        const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);   // fresh buffer, offset 0
-        dev.queue.writeTexture(
-          { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          slabData,
-          { offset: 0, bytesPerRow, rowsPerImage },
-          [dims[0], dims[1], depth],
-        );
-      }
+    const key = opts.textureKey;
+    const have = key ? sharedTextures.get(key) : undefined;
+    if (have && have.tex.width === dims[0] && have.tex.height === dims[1] && have.tex.depthOrArrayLayers === dims[2]) {
+      have.refs++;
+      this.volTex = have.tex; this.normScale = have.normScale; this.shared = key;
+    } else {
+      const up = opts.rgb24 ? uploadRGB24Texture(dev, data, dims) : uploadVolumeTexture(dev, data, dims, !!opts.halfFloat);
+      this.volTex = up.tex; this.normScale = up.normScale;
+      if (key) { sharedTextures.set(key, { ...up, refs: 1 }); this.shared = key; }
     }
     this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
@@ -175,15 +247,28 @@ export class ImageField implements Field {
   uniformFloats() { return 28; }        // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
-  /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
+  /** The 3D scalar texture (e.g. to share with a SliceRenderer for MPR); `textureFormat()` says which. */
   volumeTexture(): GPUTexture { return this.volTex; }
+  /** Give the textures back. A field is not reusable after this; the caller drops it. A shared
+   *  volume texture goes when its last field does. */
+  destroy(): void {
+    this.lutTex.destroy();
+    if (this.shared) {
+      const t = sharedTextures.get(this.shared);
+      if (t && --t.refs <= 0) { sharedTextures.delete(this.shared); t.tex.destroy(); }
+    } else this.volTex.destroy();
+  }
+  /**
+   * The storage format, so a reader can DECODE a texel rather than assume one.
+   *
+   * r32float holds the value as-is (Float32 input, and Uint16 promoted because no filterable
+   * 16-bit format exists); r8unorm holds the original byte, which the shader scales by normScale.
+   * A probe that guessed would report bytes as if they were Hounsfield units.
+   */
+  textureFormat(): GPUTextureFormat { return this.volTex.format; }
   /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
    *  texture must use the same factor. 1 for f32 volumes. */
   normScaleOf(): number { return this.normScale; }
-
-  /** Free this field's GPU textures (call when replacing it, e.g. a low-res proxy upgraded to full,
-   *  or an LRU-evicted specimen) so VRAM isn't leaked across a menu of large volumes. */
-  destroy() { this.volTex.destroy(); this.lutTex.destroy(); }
 
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter(): Vec3 {
@@ -614,6 +699,17 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
 }`;
   }
 
+  /**
+   * The lighting, changeable after construction.
+   *
+   * THIS DID NOT EXIST, and its absence was SILENT. The 3D view's lighting panel calls
+   * `field.setShade?.(...)` across everything it draws, and an optional call on a method that is not
+   * there does nothing and reports nothing -- so the two field types that actually draw a
+   * segmentation in 3D could never be told, while the ones that do have it (ImageField,
+   * ColorizeField) made the wiring look correct. Ron, twice, on the lighting presets: "No impact."
+   */
+  setShade(shade: [number, number, number, number]) { this.shade = [shade[0], shade[1], shade[2], shade[3]]; }
+
   fillUniforms(out: Float32Array, off: number) {
     out.set(this.p2t, off);
     out[off + 16] = this.color[0]; out[off + 17] = this.color[1]; out[off + 18] = this.color[2]; out[off + 19] = this.opacity;
@@ -727,6 +823,17 @@ fn sample_field_rgba${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   return vec4<f32>(lit * opacity, opacity);
 }`;
   }
+
+  /**
+   * The lighting, changeable after construction.
+   *
+   * THIS DID NOT EXIST, and its absence was SILENT. The 3D view's lighting panel calls
+   * `field.setShade?.(...)` across everything it draws, and an optional call on a method that is not
+   * there does nothing and reports nothing -- so the two field types that actually draw a
+   * segmentation in 3D could never be told, while the ones that do have it (ImageField,
+   * ColorizeField) made the wiring look correct. Ron, twice, on the lighting presets: "No impact."
+   */
+  setShade(shade: [number, number, number, number]) { this.shade = [shade[0], shade[1], shade[2], shade[3]]; }
 
   fillUniforms(out: Float32Array, off: number) {
     out.set(this.p2t, off);

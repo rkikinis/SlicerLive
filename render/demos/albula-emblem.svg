@@ -1,0 +1,72 @@
+<!-- AUTO-GENERATED (do not hand-edit; see brand/regenerate.py): small-size cut: no wordmark, no hairpin dividers, rock lightened one step.
+     The master is brand/albula-logo.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="215 55 370 370" width="370" height="370">
+<defs>
+  <linearGradient id="gDark" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" stop-color="#6B5B49"/><stop offset="100%" stop-color="#463A2E"/>
+  </linearGradient>
+  <linearGradient id="gMed" x1="0%" y1="0%" x2="0%" y2="100%">
+    <stop offset="0%" stop-color="#9A8670"/><stop offset="100%" stop-color="#6B5B49"/>
+  </linearGradient>
+  <linearGradient id="gGold" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" stop-color="#FFE896"/><stop offset="60%" stop-color="#FBDD70"/>
+    <stop offset="100%" stop-color="#E8BE45"/>
+  </linearGradient>
+  <linearGradient id="gSnow" x1="0%" y1="0%" x2="0%" y2="100%">
+    <stop offset="0%" stop-color="#FFFDF9"/><stop offset="100%" stop-color="#EDE7D9"/>
+  </linearGradient>
+  <linearGradient id="iDark" x1="0%" y1="0%" x2="100%" y2="100%">
+    <stop offset="0%" stop-color="#8E7A62"/><stop offset="100%" stop-color="#665544"/>
+  </linearGradient>
+  <linearGradient id="iMed" x1="0%" y1="0%" x2="0%" y2="100%">
+    <stop offset="0%" stop-color="#BFA98C"/><stop offset="100%" stop-color="#8E7A62"/>
+  </linearGradient>
+  <clipPath id="disc"><circle cx="400" cy="240" r="171"/></clipPath>
+</defs>
+  <circle cx="400" cy="240" r="171" fill="#332E28" stroke="#8A765C" stroke-width="10"/>
+  <g clip-path="url(#disc)">
+<g id="mountain-group">
+      <!-- Background Peak Left -->
+      <path d="M 270,300 L 330,180 L 390,300 Z" fill="#5A4C3C"/>
+      <path d="M 330,180 L 390,300 L 330,300 Z" fill="#40352A"/>
+
+      <!-- Background Peak Right -->
+      <path d="M 410,300 L 470,170 L 530,300 Z" fill="#5A4C3C"/>
+      <path d="M 470,170 L 530,300 L 470,300 Z" fill="#40352A"/>
+
+      <!-- Main Center Peak (Albula Massif) - Light Side -->
+      <path d="M 400,100 L 260,340 L 350,230 Z" fill="url(#gMed)"/>
+      <path d="M 400,100 L 350,230 L 400,340 Z" fill="url(#gMed)"/>
+
+      <!-- Main Center Peak - Dark Side -->
+      <path d="M 400,100 L 400,340 L 470,240 Z" fill="url(#gDark)"/>
+      <path d="M 400,100 L 470,240 L 540,340 Z" fill="#463A2E"/>
+
+      <!-- Foreground Left Ridge -->
+      <path d="M 230,350 L 310,220 L 370,350 Z" fill="url(#gMed)"/>
+      <path d="M 310,220 L 370,350 L 320,350 Z" fill="url(#gDark)"/>
+
+      <!-- Foreground Right Ridge -->
+      <path d="M 430,350 L 490,230 L 570,350 Z" fill="url(#gDark)"/>
+
+      <!-- Snow Caps -->
+      <path d="M 400,100 L 370,150 L 400,142 L 420,148 Z" fill="url(#gSnow)"/>
+      <path d="M 400,100 L 420,148 L 400,142 Z" fill="#D6CCB8"/>
+
+      <path d="M 310,220 L 292,248 L 310,242 L 322,248 Z" fill="url(#gSnow)"/>
+      <path d="M 470,170 L 452,198 L 470,192 L 485,198 Z" fill="url(#gSnow)"/>
+
+      <!-- Winding Albula Pass Road (#F8D764) -->
+      <path d="M 400,200 
+               C 375,230 335,240 335,260 
+               C 335,280 465,290 465,315 
+               C 465,340 310,348 280,365
+               L 315,365
+               C 345,352 495,342 495,315
+               C 495,280 365,270 365,260
+               C 365,248 395,235 418,208 Z" 
+            fill="url(#gGold)"/>
+
+      </g>
+  </g>
+</svg>

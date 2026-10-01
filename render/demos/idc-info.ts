@@ -1,6 +1,7 @@
 // Shared IDC "Details" dialog for IDC demos (DRY): a glass modal with the source citation (DOIs),
 // license, links to the OHIF viewer + IDC portal, and the full segment list — the old SEGRoulette
 // "Details" panel. Reusable by any Imaging Data Commons demo.
+import { escapeHtml } from "./html.ts";
 import type { SeriesEntry } from "../vendor/idc_tools/types.js";
 
 export interface IdcInfoOpts {
@@ -46,7 +47,7 @@ export function installIdcInfo(host: HTMLElement, opts: IdcInfoOpts): { refresh(
     const lic = e?.lic ?? "";
     const idoi = e?.idoi as string | undefined, sdoi = e?.sdoi as string | undefined, pid = e?.pid as string | undefined;
     const chips = segs.map((s) =>
-      `<span style="font-size:11px;border:1px solid rgb(${s.color.map((c) => Math.round(c * 255)).join(",")});border-radius:999px;padding:1px 9px;white-space:nowrap">${s.name}</span>`).join(" ");
+      `<span style="font-size:11px;border:1px solid rgb(${s.color.map((c) => Math.round(c * 255)).join(",")});border-radius:999px;padding:1px 9px;white-space:nowrap">${escapeHtml(s.name)}</span>`).join(" ");
     const doiLink = (d?: string, label = "DOI") => d ? `<a href="https://doi.org/${d}" target="_blank" rel="noopener">${label}</a>` : "";
     const ohif = e?.st ? `<a href="${opts.ohifURL(e.st)}" target="_blank" rel="noopener">Open in OHIF viewer</a>` : "";
     const portal = `<a href="https://portal.imaging.datacommons.cancer.gov/explore/filters/?collection_id=${e?.col ?? ""}" target="_blank" rel="noopener">IDC portal — ${e?.col ?? "collections"}</a>`;

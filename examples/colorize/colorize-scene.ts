@@ -9,6 +9,7 @@ import { ColorizeField } from "../../render/colorize-field.ts";
 import { fetchZarrVolume, type ZarrDesc } from "../../render/zarr.ts";
 import { createRoiWidget, type RoiWidget } from "../../render/demos/roi-widget.ts";
 import { lutFromTransferFunctions } from "../../render/scene-volume.ts";
+import { SLICER_BG_BOTTOM, SLICER_BG_TOP } from "../../render/background.ts";
 import type { Vec3 } from "../../render/mat4.ts";
 import { CT_PRESETS } from "./ct-presets.ts";
 
@@ -149,7 +150,9 @@ export async function buildColorizeScene(
   let cropOn = false, roiOn = false;
   const rebuild = () => {
     scene.build(roiOn ? [field, roi.box, roi.handles] : [field]);
-    scene.setBackground(0.05, 0.06, 0.09);
+    // Slicer's 3D view gradient, not a flat dark fill. This runs on every rebuild (crop and ROI
+    // toggles call it), so setting a flat color here would re-flatten the gradient each time.
+    scene.setBackgroundGradient(SLICER_BG_TOP, SLICER_BG_BOTTOM);
     if (cropOn) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip();
   };
   rebuild();

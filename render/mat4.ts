@@ -55,6 +55,23 @@ export function perspectiveZO(fovy: number, aspect: number, near: number, far: n
   return m;
 }
 
+/** Orthographic, matching perspectiveZO's conventions exactly: column-major, right-handed looking
+ *  down -z, depth mapped 0 at `near` to 1 at `far` (WebGPU's ZO clip space). `halfH` is the half
+ *  height of the view volume in world units -- VTK's `parallelScale`.
+ *
+ *  Derivation, since getting it wrong is silent: with z_view in [-near, -far] we want
+ *  z_ndc = (-z_view - near) / (far - near), which is affine in z_view and needs no w divide, hence
+ *  m[15] = 1 rather than perspectiveZO's m[11] = -1. */
+export function orthoZO(halfH: number, aspect: number, near: number, far: number): Mat4 {
+  const m = new Float32Array(16);
+  m[0] = 1 / (halfH * aspect);
+  m[5] = 1 / halfH;
+  m[10] = -1 / (far - near);
+  m[14] = -near / (far - near);
+  m[15] = 1;
+  return m;
+}
+
 /** Off-centre perspective covering ONLY the pixel rect (x,y,w,h) of a viewW×viewH view (y down).
  *  Same conventions as perspectiveZO — with the full rect it produces exactly that matrix — so a
  *  tile renders the identical rays the full frame would have cast for those pixels. That is what

@@ -6,6 +6,7 @@
 // remind-worker.js. Loads are queued at a small concurrency so a row that the user just
 // toggled on is not stuck behind five others saturating the connection pool.
 import { s3ListKeys } from "../../render/vendor/idc_tools/s3.js";
+import { workerUrl } from "../../render/build-id.ts";
 
 export interface SegEntry {
   u: string;            // crdc_series_uuid — the object-store prefix
@@ -136,7 +137,7 @@ export interface LoadOpts {
 }
 
 let seq = 0;
-const WORKER_URL = () => new URL("./remind-worker.js", import.meta.url);
+const WORKER_URL = () => workerUrl("./remind-worker.js", import.meta.url);
 
 function runWorker<T>(msg: Record<string, unknown>, opts: LoadOpts | undefined, want: string): Promise<T> {
   return new Promise((resolve, reject) => {

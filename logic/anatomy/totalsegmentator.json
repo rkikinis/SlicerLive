@@ -1,0 +1,3830 @@
+{
+ "source": "Extensions-34906/TotalSegmentator/lib/Slicer-5.13/qt-scripted-modules/Resources/totalsegmentator_snomed_mapping.csv",
+ "structures": {
+  "spleen": {
+   "name": "Spleen",
+   "system": "Lymphoid system",
+   "code": "SCT:78961009",
+   "rgb": [
+    157,
+    108,
+    162
+   ],
+   "type": "Spleen"
+  },
+  "kidney_right": {
+   "name": "Kidney, right",
+   "system": "Urinary system",
+   "code": "SCT:64033007",
+   "rgb": [
+    212,
+    126,
+    151
+   ],
+   "type": "Kidney",
+   "mod": "Right"
+  },
+  "kidney_left": {
+   "name": "Kidney, left",
+   "system": "Urinary system",
+   "code": "SCT:64033007",
+   "rgb": [
+    212,
+    126,
+    151
+   ],
+   "type": "Kidney",
+   "mod": "Left"
+  },
+  "gallbladder": {
+   "name": "Gallbladder",
+   "system": "Alimentary system",
+   "code": "SCT:28231008",
+   "rgb": [
+    139,
+    150,
+    98
+   ],
+   "type": "Gallbladder"
+  },
+  "liver": {
+   "name": "Liver",
+   "system": "Alimentary system",
+   "code": "SCT:10200004",
+   "rgb": [
+    221,
+    130,
+    101
+   ],
+   "type": "Liver"
+  },
+  "stomach": {
+   "name": "Stomach",
+   "system": "Alimentary system",
+   "code": "SCT:69695003",
+   "rgb": [
+    160,
+    139,
+    76
+   ],
+   "type": "Stomach"
+  },
+  "aorta": {
+   "name": "Aorta",
+   "system": "Cardiovascular system",
+   "code": "SCT:15825003",
+   "rgb": [
+    224,
+    97,
+    76
+   ],
+   "type": "Aorta"
+  },
+  "inferior_vena_cava": {
+   "name": "Inferior vena cava",
+   "system": "Cardiovascular system",
+   "code": "SCT:64131007",
+   "rgb": [
+    110,
+    165,
+    54
+   ],
+   "type": "Inferior vena cava"
+  },
+  "portal_vein_and_splenic_vein": {
+   "name": "Portal vein and splenic vein",
+   "system": "Cardiovascular system",
+   "code": "SCT:110765007",
+   "rgb": [
+    0,
+    151,
+    206
+   ],
+   "type": "Portal vein and splenic vein"
+  },
+  "pancreas": {
+   "name": "Pancreas",
+   "system": "Alimentary system",
+   "code": "SCT:15776009",
+   "rgb": [
+    249,
+    180,
+    111
+   ],
+   "type": "Pancreas"
+  },
+  "adrenal_gland_right": {
+   "name": "Adrenal gland, right",
+   "system": "Endocrine glands",
+   "code": "SCT:23451007",
+   "rgb": [
+    199,
+    27,
+    27
+   ],
+   "type": "Adrenal gland",
+   "mod": "Right"
+  },
+  "adrenal_gland_left": {
+   "name": "Adrenal gland, left",
+   "system": "Endocrine glands",
+   "code": "SCT:23451007",
+   "rgb": [
+    199,
+    27,
+    27
+   ],
+   "type": "Adrenal gland",
+   "mod": "Left"
+  },
+  "lung_upper_lobe_left": {
+   "name": "Upper lobe of lung, left",
+   "system": "Respiratory system",
+   "code": "SCT:45653009",
+   "rgb": [
+    112,
+    162,
+    95
+   ],
+   "type": "Upper lobe of lung",
+   "mod": "Left"
+  },
+  "lung_lower_lobe_left": {
+   "name": "Lower lobe of lung, left",
+   "system": "Respiratory system",
+   "code": "SCT:90572001",
+   "rgb": [
+    242,
+    150,
+    232
+   ],
+   "type": "Lower lobe of lung",
+   "mod": "Left"
+  },
+  "lung_upper_lobe_right": {
+   "name": "Upper lobe of lung, right",
+   "system": "Respiratory system",
+   "code": "SCT:45653009",
+   "rgb": [
+    173,
+    69,
+    44
+   ],
+   "type": "Upper lobe of lung",
+   "mod": "Right"
+  },
+  "lung_middle_lobe_right": {
+   "name": "Middle lobe of right lung",
+   "system": "Respiratory system",
+   "code": "SCT:72481006",
+   "rgb": [
+    202,
+    164,
+    140
+   ],
+   "type": "Middle lobe of right lung"
+  },
+  "lung_lower_lobe_right": {
+   "name": "Lower lobe of lung, right",
+   "system": "Respiratory system",
+   "code": "SCT:90572001",
+   "rgb": [
+    212,
+    191,
+    32
+   ],
+   "type": "Lower lobe of lung",
+   "mod": "Right"
+  },
+  "vertebrae_L5": {
+   "name": "L5 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:49668003",
+   "rgb": [
+    117,
+    78,
+    55
+   ],
+   "type": "L5 vertebra"
+  },
+  "vertebrae_L4": {
+   "name": "L4 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:11994002",
+   "rgb": [
+    255,
+    255,
+    128
+   ],
+   "type": "L4 vertebra"
+  },
+  "vertebrae_L3": {
+   "name": "L3 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:36470004",
+   "rgb": [
+    157,
+    126,
+    0
+   ],
+   "type": "L3 vertebra"
+  },
+  "vertebrae_L2": {
+   "name": "L2 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:14293000",
+   "rgb": [
+    255,
+    144,
+    32
+   ],
+   "type": "L2 vertebra"
+  },
+  "vertebrae_L1": {
+   "name": "L1 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:66794005",
+   "rgb": [
+    255,
+    255,
+    1
+   ],
+   "type": "L1 vertebra"
+  },
+  "vertebrae_T12": {
+   "name": "T12 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:23215003",
+   "rgb": [
+    166,
+    89,
+    255
+   ],
+   "type": "T12 vertebra"
+  },
+  "vertebrae_T11": {
+   "name": "T11 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:12989004",
+   "rgb": [
+    16,
+    164,
+    144
+   ],
+   "type": "T11 vertebra"
+  },
+  "vertebrae_T10": {
+   "name": "T10 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:7610001",
+   "rgb": [
+    26,
+    97,
+    228
+   ],
+   "type": "T10 vertebra"
+  },
+  "vertebrae_T9": {
+   "name": "T9 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:82687006",
+   "rgb": [
+    96,
+    188,
+    62
+   ],
+   "type": "T9 vertebra"
+  },
+  "vertebrae_T8": {
+   "name": "T8 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:11068009",
+   "rgb": [
+    164,
+    216,
+    199
+   ],
+   "type": "T8 vertebra"
+  },
+  "vertebrae_T7": {
+   "name": "T7 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:62487009",
+   "rgb": [
+    109,
+    0,
+    145
+   ],
+   "type": "T7 vertebra"
+  },
+  "vertebrae_T6": {
+   "name": "T6 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:45296009",
+   "rgb": [
+    88,
+    119,
+    255
+   ],
+   "type": "T6 vertebra"
+  },
+  "vertebrae_T5": {
+   "name": "T5 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:56401006",
+   "rgb": [
+    8,
+    82,
+    73
+   ],
+   "type": "T5 vertebra"
+  },
+  "vertebrae_T4": {
+   "name": "T4 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:73071006",
+   "rgb": [
+    73,
+    228,
+    202
+   ],
+   "type": "T4 vertebra"
+  },
+  "vertebrae_T3": {
+   "name": "T3 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:1626008",
+   "rgb": [
+    30,
+    128,
+    188
+   ],
+   "type": "T3 vertebra"
+  },
+  "vertebrae_T2": {
+   "name": "T2 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:53733008",
+   "rgb": [
+    141,
+    186,
+    216
+   ],
+   "type": "T2 vertebra"
+  },
+  "vertebrae_T1": {
+   "name": "T1 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:64864005",
+   "rgb": [
+    0,
+    2,
+    145
+   ],
+   "type": "T1 vertebra"
+  },
+  "vertebrae_C7": {
+   "name": "C7 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:87391001",
+   "rgb": [
+    255,
+    0,
+    0
+   ],
+   "type": "C7 vertebra"
+  },
+  "vertebrae_C6": {
+   "name": "C6 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:36054005",
+   "rgb": [
+    253,
+    134,
+    125
+   ],
+   "type": "C6 vertebra"
+  },
+  "vertebrae_C5": {
+   "name": "C5 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:36978003",
+   "rgb": [
+    118,
+    40,
+    9
+   ],
+   "type": "C5 vertebra"
+  },
+  "vertebrae_C4": {
+   "name": "C4 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:5329002",
+   "rgb": [
+    250,
+    14,
+    116
+   ],
+   "type": "C4 vertebra"
+  },
+  "vertebrae_C3": {
+   "name": "C3 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:113205007",
+   "rgb": [
+    167,
+    117,
+    152
+   ],
+   "type": "C3 vertebra"
+  },
+  "vertebrae_C2": {
+   "name": "C2 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:39976000",
+   "rgb": [
+    193,
+    99,
+    36
+   ],
+   "type": "C2 vertebra"
+  },
+  "vertebrae_C1": {
+   "name": "C1 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:14806007",
+   "rgb": [
+    255,
+    186,
+    107
+   ],
+   "type": "C1 vertebra"
+  },
+  "esophagus": {
+   "name": "Esophagus",
+   "system": "Alimentary system",
+   "code": "SCT:32849002",
+   "rgb": [
+    211,
+    171,
+    143
+   ],
+   "type": "Esophagus"
+  },
+  "trachea": {
+   "name": "Trachea",
+   "system": "Respiratory system",
+   "code": "SCT:44567001",
+   "rgb": [
+    182,
+    228,
+    255
+   ],
+   "type": "Trachea"
+  },
+  "heart_myocardium": {
+   "name": "Myocardium",
+   "system": "Cardiovascular system",
+   "code": "SCT:74281007",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Myocardium"
+  },
+  "heart_atrium_left": {
+   "name": "Left atrium",
+   "system": "Cardiovascular system",
+   "code": "SCT:82471001",
+   "rgb": [
+    221,
+    129,
+    37
+   ],
+   "type": "Left atrium"
+  },
+  "heart_ventricle_left": {
+   "name": "Left ventricle of heart",
+   "system": "Cardiovascular system",
+   "code": "SCT:87878005",
+   "rgb": [
+    152,
+    55,
+    13
+   ],
+   "type": "Left ventricle of heart"
+  },
+  "heart_atrium_right": {
+   "name": "Right atrium",
+   "system": "Cardiovascular system",
+   "code": "SCT:73829009",
+   "rgb": [
+    221,
+    129,
+    37
+   ],
+   "type": "Right atrium"
+  },
+  "heart_ventricle_right": {
+   "name": "Right ventricle of heart",
+   "system": "Cardiovascular system",
+   "code": "SCT:53085002",
+   "rgb": [
+    181,
+    85,
+    57
+   ],
+   "type": "Right ventricle of heart"
+  },
+  "pulmonary_artery": {
+   "name": "Pulmonary artery",
+   "system": "Cardiovascular system",
+   "code": "SCT:81040000",
+   "rgb": [
+    0,
+    122,
+    171
+   ],
+   "type": "Pulmonary artery"
+  },
+  "brain": {
+   "name": "Brain",
+   "system": "Nervous system",
+   "code": "SCT:12738006",
+   "rgb": [
+    250,
+    250,
+    225
+   ],
+   "type": "Brain"
+  },
+  "iliac_artery_left": {
+   "name": "Common iliac artery, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:73634005",
+   "rgb": [
+    217,
+    162,
+    48
+   ],
+   "type": "Common iliac artery",
+   "mod": "Left"
+  },
+  "iliac_artery_right": {
+   "name": "Common iliac artery, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:73634005",
+   "rgb": [
+    217,
+    162,
+    48
+   ],
+   "type": "Common iliac artery",
+   "mod": "Right"
+  },
+  "iliac_vena_left": {
+   "name": "Common iliac vein, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:46027005",
+   "rgb": [
+    197,
+    174,
+    37
+   ],
+   "type": "Common iliac vein",
+   "mod": "Left"
+  },
+  "iliac_vena_right": {
+   "name": "Common iliac vein, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:46027005",
+   "rgb": [
+    197,
+    174,
+    37
+   ],
+   "type": "Common iliac vein",
+   "mod": "Right"
+  },
+  "small_bowel": {
+   "name": "Small Intestine",
+   "system": "Alimentary system",
+   "code": "SCT:30315005",
+   "rgb": [
+    205,
+    167,
+    142
+   ],
+   "type": "Small Intestine"
+  },
+  "duodenum": {
+   "name": "Duodenum",
+   "system": "Alimentary system",
+   "code": "SCT:38848004",
+   "rgb": [
+    255,
+    253,
+    229
+   ],
+   "type": "Duodenum"
+  },
+  "colon": {
+   "name": "Colon",
+   "system": "Alimentary system",
+   "code": "SCT:71854001",
+   "rgb": [
+    204,
+    168,
+    143
+   ],
+   "type": "Colon"
+  },
+  "rib_left_1": {
+   "name": "First rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:48535007",
+   "rgb": [
+    0,
+    2,
+    145
+   ],
+   "type": "First rib",
+   "mod": "Left"
+  },
+  "rib_left_2": {
+   "name": "Second rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:78247007",
+   "rgb": [
+    141,
+    186,
+    216
+   ],
+   "type": "Second rib",
+   "mod": "Left"
+  },
+  "rib_left_3": {
+   "name": "Third rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:25888004",
+   "rgb": [
+    30,
+    128,
+    188
+   ],
+   "type": "Third rib",
+   "mod": "Left"
+  },
+  "rib_left_4": {
+   "name": "Fourth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:25523003",
+   "rgb": [
+    73,
+    228,
+    202
+   ],
+   "type": "Fourth rib",
+   "mod": "Left"
+  },
+  "rib_left_5": {
+   "name": "Fifth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:15339008",
+   "rgb": [
+    8,
+    82,
+    73
+   ],
+   "type": "Fifth rib",
+   "mod": "Left"
+  },
+  "rib_left_6": {
+   "name": "Sixth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:59558009",
+   "rgb": [
+    88,
+    119,
+    255
+   ],
+   "type": "Sixth rib",
+   "mod": "Left"
+  },
+  "rib_left_7": {
+   "name": "Seventh rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:24915002",
+   "rgb": [
+    109,
+    0,
+    145
+   ],
+   "type": "Seventh rib",
+   "mod": "Left"
+  },
+  "rib_left_8": {
+   "name": "Eighth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:5953002",
+   "rgb": [
+    164,
+    216,
+    199
+   ],
+   "type": "Eighth rib",
+   "mod": "Left"
+  },
+  "rib_left_9": {
+   "name": "Ninth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:22565002",
+   "rgb": [
+    96,
+    188,
+    62
+   ],
+   "type": "Ninth rib",
+   "mod": "Left"
+  },
+  "rib_left_10": {
+   "name": "Tenth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:77644006",
+   "rgb": [
+    26,
+    97,
+    228
+   ],
+   "type": "Tenth rib",
+   "mod": "Left"
+  },
+  "rib_left_11": {
+   "name": "Eleventh rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:58830002",
+   "rgb": [
+    16,
+    164,
+    144
+   ],
+   "type": "Eleventh rib",
+   "mod": "Left"
+  },
+  "rib_left_12": {
+   "name": "Twelfth rib, left",
+   "system": "Skeletal system",
+   "code": "SCT:43993008",
+   "rgb": [
+    166,
+    89,
+    255
+   ],
+   "type": "Twelfth rib",
+   "mod": "Left"
+  },
+  "rib_right_1": {
+   "name": "First rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:48535007",
+   "rgb": [
+    0,
+    2,
+    145
+   ],
+   "type": "First rib",
+   "mod": "Right"
+  },
+  "rib_right_2": {
+   "name": "Second rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:78247007",
+   "rgb": [
+    141,
+    186,
+    216
+   ],
+   "type": "Second rib",
+   "mod": "Right"
+  },
+  "rib_right_3": {
+   "name": "Third rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:25888004",
+   "rgb": [
+    30,
+    128,
+    188
+   ],
+   "type": "Third rib",
+   "mod": "Right"
+  },
+  "rib_right_4": {
+   "name": "Fourth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:25523003",
+   "rgb": [
+    73,
+    228,
+    202
+   ],
+   "type": "Fourth rib",
+   "mod": "Right"
+  },
+  "rib_right_5": {
+   "name": "Fifth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:15339008",
+   "rgb": [
+    8,
+    82,
+    73
+   ],
+   "type": "Fifth rib",
+   "mod": "Right"
+  },
+  "rib_right_6": {
+   "name": "Sixth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:59558009",
+   "rgb": [
+    88,
+    119,
+    255
+   ],
+   "type": "Sixth rib",
+   "mod": "Right"
+  },
+  "rib_right_7": {
+   "name": "Seventh rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:24915002",
+   "rgb": [
+    109,
+    0,
+    145
+   ],
+   "type": "Seventh rib",
+   "mod": "Right"
+  },
+  "rib_right_8": {
+   "name": "Eighth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:5953002",
+   "rgb": [
+    164,
+    216,
+    199
+   ],
+   "type": "Eighth rib",
+   "mod": "Right"
+  },
+  "rib_right_9": {
+   "name": "Ninth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:22565002",
+   "rgb": [
+    96,
+    188,
+    62
+   ],
+   "type": "Ninth rib",
+   "mod": "Right"
+  },
+  "rib_right_10": {
+   "name": "Tenth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:77644006",
+   "rgb": [
+    26,
+    97,
+    228
+   ],
+   "type": "Tenth rib",
+   "mod": "Right"
+  },
+  "rib_right_11": {
+   "name": "Eleventh rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:58830002",
+   "rgb": [
+    16,
+    164,
+    144
+   ],
+   "type": "Eleventh rib",
+   "mod": "Right"
+  },
+  "rib_right_12": {
+   "name": "Twelfth rib, right",
+   "system": "Skeletal system",
+   "code": "SCT:43993008",
+   "rgb": [
+    166,
+    89,
+    255
+   ],
+   "type": "Twelfth rib",
+   "mod": "Right"
+  },
+  "humerus_left": {
+   "name": "Humerus, left",
+   "system": "Skeletal system",
+   "code": "SCT:85050009",
+   "rgb": [
+    95,
+    229,
+    185
+   ],
+   "type": "Humerus",
+   "mod": "Left"
+  },
+  "humerus_right": {
+   "name": "Humerus, right",
+   "system": "Skeletal system",
+   "code": "SCT:85050009",
+   "rgb": [
+    95,
+    229,
+    185
+   ],
+   "type": "Humerus",
+   "mod": "Right"
+  },
+  "scapula_left": {
+   "name": "Scapula, left",
+   "system": "Skeletal system",
+   "code": "SCT:79601000",
+   "rgb": [
+    199,
+    204,
+    131
+   ],
+   "type": "Scapula",
+   "mod": "Left"
+  },
+  "scapula_right": {
+   "name": "Scapula, right",
+   "system": "Skeletal system",
+   "code": "SCT:79601000",
+   "rgb": [
+    199,
+    204,
+    131
+   ],
+   "type": "Scapula",
+   "mod": "Right"
+  },
+  "clavicula_left": {
+   "name": "Clavicle, left",
+   "system": "Skeletal system",
+   "code": "SCT:51299004",
+   "rgb": [
+    241,
+    188,
+    38
+   ],
+   "type": "Clavicle",
+   "mod": "Left"
+  },
+  "clavicula_right": {
+   "name": "Clavicle, right",
+   "system": "Skeletal system",
+   "code": "SCT:51299004",
+   "rgb": [
+    241,
+    188,
+    38
+   ],
+   "type": "Clavicle",
+   "mod": "Right"
+  },
+  "femur_left": {
+   "name": "Femur, left",
+   "system": "Skeletal system",
+   "code": "SCT:71341001",
+   "rgb": [
+    130,
+    222,
+    207
+   ],
+   "type": "Femur",
+   "mod": "Left"
+  },
+  "femur_right": {
+   "name": "Femur, right",
+   "system": "Skeletal system",
+   "code": "SCT:71341001",
+   "rgb": [
+    130,
+    222,
+    207
+   ],
+   "type": "Femur",
+   "mod": "Right"
+  },
+  "hip_left": {
+   "name": "Hip, left",
+   "system": "Skeletal system",
+   "code": "SCT:29836001",
+   "rgb": [
+    241,
+    214,
+    145
+   ],
+   "type": "Hip",
+   "mod": "Left"
+  },
+  "hip_right": {
+   "name": "Hip, right",
+   "system": "Skeletal system",
+   "code": "SCT:29836001",
+   "rgb": [
+    241,
+    214,
+    145
+   ],
+   "type": "Hip",
+   "mod": "Right"
+  },
+  "sacrum": {
+   "name": "Sacrum",
+   "system": "Skeletal system",
+   "code": "SCT:54735007",
+   "rgb": [
+    163,
+    140,
+    140
+   ],
+   "type": "Sacrum"
+  },
+  "face": {
+   "name": "Face",
+   "system": "Body regions",
+   "code": "SCT:89545001",
+   "rgb": [
+    255,
+    182,
+    193
+   ],
+   "type": "Face"
+  },
+  "gluteus_maximus_left": {
+   "name": "Gluteus maximus muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:181674001",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus maximus muscle",
+   "mod": "Left"
+  },
+  "gluteus_maximus_right": {
+   "name": "Gluteus maximus muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:181674001",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus maximus muscle",
+   "mod": "Right"
+  },
+  "gluteus_medius_left": {
+   "name": "Gluteus medius muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:78333006",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus medius muscle",
+   "mod": "Left"
+  },
+  "gluteus_medius_right": {
+   "name": "Gluteus medius muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:78333006",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus medius muscle",
+   "mod": "Right"
+  },
+  "gluteus_minimus_left": {
+   "name": "Gluteus minius muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:75297007",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus minius muscle",
+   "mod": "Left"
+  },
+  "gluteus_minimus_right": {
+   "name": "Gluteus minius muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:75297007",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Gluteus minius muscle",
+   "mod": "Right"
+  },
+  "autochthon_left": {
+   "name": "Deep muscle of back, left",
+   "system": "Muscular system",
+   "code": "SCT:244849004",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Deep muscle of back",
+   "mod": "Left"
+  },
+  "autochthon_right": {
+   "name": "Deep muscle of back, right",
+   "system": "Muscular system",
+   "code": "SCT:244849004",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Deep muscle of back",
+   "mod": "Right"
+  },
+  "iliopsoas_left": {
+   "name": "Iliopsoas muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:68455001",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Iliopsoas muscle",
+   "mod": "Left"
+  },
+  "iliopsoas_right": {
+   "name": "Iliopsoas muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:68455001",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Iliopsoas muscle",
+   "mod": "Right"
+  },
+  "urinary_bladder": {
+   "name": "Urinary bladder",
+   "system": "Urinary system",
+   "code": "SCT:89837001",
+   "rgb": [
+    222,
+    154,
+    132
+   ],
+   "type": "Urinary bladder"
+  },
+  "thyroid_gland": {
+   "name": "Thyroid gland",
+   "system": "Endocrine glands",
+   "code": "SCT:69748006",
+   "type": "Thyroid gland"
+  },
+  "prostate": {
+   "name": "Prostate",
+   "system": "Genital system",
+   "code": "SCT:41216001",
+   "type": "Prostate"
+  },
+  "kidney_cyst_left": {
+   "name": "Cyst",
+   "system": "Findings",
+   "code": "SCT:367643001",
+   "type": "Cyst",
+   "region": "Kidney",
+   "regionMod": "Left"
+  },
+  "kidney_cyst_right": {
+   "name": "Cyst",
+   "system": "Findings",
+   "code": "SCT:367643001",
+   "type": "Cyst",
+   "region": "Kidney",
+   "regionMod": "Right"
+  },
+  "vertebrae_S1": {
+   "name": "S1 vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:65985001",
+   "type": "S1 vertebra"
+  },
+  "heart": {
+   "name": "Heart",
+   "system": "Cardiovascular system",
+   "code": "SCT:80891009",
+   "type": "Heart"
+  },
+  "pulmonary_vein": {
+   "name": "Pulmonary vein",
+   "system": "Cardiovascular system",
+   "code": "SCT:122972007",
+   "type": "Pulmonary vein"
+  },
+  "brachiocephalic_trunk": {
+   "name": "Brachiocephalic artery",
+   "system": "Cardiovascular system",
+   "code": "SCT:12691009",
+   "type": "Brachiocephalic artery"
+  },
+  "subclavian_artery_right": {
+   "name": "Subclavian artery, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:29700009",
+   "type": "Subclavian artery",
+   "mod": "Right"
+  },
+  "subclavian_artery_left": {
+   "name": "Subclavian artery, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:29700009",
+   "type": "Subclavian artery",
+   "mod": "Left"
+  },
+  "common_carotid_artery_right": {
+   "name": "Common carotid artery, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:32062004",
+   "type": "Common carotid artery",
+   "mod": "Right"
+  },
+  "common_carotid_artery_left": {
+   "name": "Common carotid artery, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:32062004",
+   "type": "Common carotid artery",
+   "mod": "Left"
+  },
+  "brachiocephalic_vein_left": {
+   "name": "Brachiocephalic vein, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:8887007",
+   "type": "Brachiocephalic vein",
+   "mod": "Left"
+  },
+  "brachiocephalic_vein_right": {
+   "name": "Brachiocephalic vein, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:8887007",
+   "type": "Brachiocephalic vein",
+   "mod": "Right"
+  },
+  "atrial_appendage_left": {
+   "name": "Auricular appendage, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:68786006",
+   "type": "Auricular appendage",
+   "mod": "Left"
+  },
+  "superior_vena_cava": {
+   "name": "Superior vena cava",
+   "system": "Cardiovascular system",
+   "code": "SCT:48345005",
+   "type": "Superior vena cava"
+  },
+  "spinal_cord": {
+   "name": "Spinal cord",
+   "system": "Nervous system",
+   "code": "SCT:2748008",
+   "type": "Spinal cord"
+  },
+  "skull": {
+   "name": "Skull",
+   "system": "Skeletal system",
+   "code": "SCT:89546000",
+   "type": "Skull"
+  },
+  "sternum": {
+   "name": "Sternum",
+   "system": "Skeletal system",
+   "code": "SCT:56873002",
+   "type": "Sternum"
+  },
+  "costal_cartilages": {
+   "name": "Costal cartilage",
+   "system": "Skeletal system",
+   "code": "SCT:50016007",
+   "type": "Costal cartilage"
+  },
+  "lung_left": {
+   "name": "Lung, left",
+   "system": "Respiratory system",
+   "code": "SCT:39607008",
+   "type": "Lung",
+   "mod": "Left"
+  },
+  "lung_right": {
+   "name": "Lung, right",
+   "system": "Respiratory system",
+   "code": "SCT:39607008",
+   "type": "Lung",
+   "mod": "Right"
+  },
+  "vertebrae": {
+   "name": "Vertebra",
+   "system": "Skeletal system",
+   "code": "SCT:51282000",
+   "type": "Vertebra"
+  },
+  "intervertebral_discs": {
+   "name": "Intervertebral disc",
+   "system": "Skeletal system",
+   "code": "SCT:360499006",
+   "type": "Intervertebral disc"
+  },
+  "fibula": {
+   "name": "Fibula",
+   "system": "Skeletal system",
+   "code": "SCT:87342007",
+   "type": "Fibula"
+  },
+  "tibia": {
+   "name": "Tibia",
+   "system": "Skeletal system",
+   "code": "SCT:12611008",
+   "type": "Tibia"
+  },
+  "quadriceps_femoris_left": {
+   "name": "Quadriceps femoris muscle",
+   "system": "Muscular system",
+   "code": "SCT:21989003",
+   "type": "Quadriceps femoris muscle"
+  },
+  "quadriceps_femoris_right": {
+   "name": "Quadriceps femoris muscle",
+   "system": "Muscular system",
+   "code": "SCT:21989003",
+   "type": "Quadriceps femoris muscle"
+  },
+  "thigh_medial_compartment_left": {
+   "name": "Structure of medial muscle of thigh, left",
+   "system": "Muscular system",
+   "code": "SCT:1179657002",
+   "type": "Structure of medial muscle of thigh",
+   "mod": "Left"
+  },
+  "thigh_medial_compartment_right": {
+   "name": "Structure of medial muscle of thigh, right",
+   "system": "Muscular system",
+   "code": "SCT:1179657002",
+   "type": "Structure of medial muscle of thigh",
+   "mod": "Right"
+  },
+  "thigh_posterior_compartment_left": {
+   "name": "Posterior muscle of thigh structure, left",
+   "system": "Muscular system",
+   "code": "SCT:128511007",
+   "type": "Posterior muscle of thigh structure",
+   "mod": "Left"
+  },
+  "thigh_posterior_compartment_right": {
+   "name": "Posterior muscle of thigh structure, right",
+   "system": "Muscular system",
+   "code": "SCT:128511007",
+   "type": "Posterior muscle of thigh structure",
+   "mod": "Right"
+  },
+  "sartorius_left": {
+   "name": "Sartorius muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:12595009",
+   "type": "Sartorius muscle",
+   "mod": "Left"
+  },
+  "sartorius_right": {
+   "name": "Sartorius muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:12595009",
+   "type": "Sartorius muscle",
+   "mod": "Right"
+  },
+  "lung_vessels": {
+   "name": "Blood vessel",
+   "system": "Cardiovascular system",
+   "code": "SCT:59820001",
+   "type": "Blood vessel",
+   "region": "Lung"
+  },
+  "lung_trachea_bronchia": {
+   "name": "Trachea and bronchus",
+   "system": "Respiratory system",
+   "code": "SCT:110726009",
+   "type": "Trachea and bronchus"
+  },
+  "lung_airways": {
+   "name": "Trachea and bronchus",
+   "system": "Respiratory system",
+   "code": "SCT:110726009",
+   "type": "Trachea and bronchus"
+  },
+  "lung_airways_wall": {
+   "name": "Bronchus",
+   "system": "Respiratory system",
+   "code": "SCT:955009",
+   "type": "Bronchus"
+  },
+  "lung_arteries": {
+   "name": "Pulmonary artery",
+   "system": "Cardiovascular system",
+   "code": "SCT:81040000",
+   "type": "Pulmonary artery"
+  },
+  "lung_veins": {
+   "name": "Pulmonary vein",
+   "system": "Cardiovascular system",
+   "code": "SCT:122972007",
+   "type": "Pulmonary vein"
+  },
+  "lung_covid_infiltrate": {
+   "name": "Infiltrate, covid-19",
+   "system": "Respiratory system",
+   "code": "SCT:47351003",
+   "type": "Infiltrate",
+   "mod": "COVID-19",
+   "region": "Lung"
+  },
+  "intracerebral_hemorrhage": {
+   "name": "Hemorrhage",
+   "system": "Findings",
+   "code": "SCT:50960005",
+   "type": "Hemorrhage",
+   "region": "Brain"
+  },
+  "hip_implant": {
+   "name": "Implant",
+   "system": "Skeletal system",
+   "code": "SCT:40388003",
+   "type": "Implant",
+   "region": "Hip joint"
+  },
+  "coronary_arteries": {
+   "name": "Coronary artery",
+   "system": "Cardiovascular system",
+   "code": "SCT:41801008",
+   "type": "Coronary artery"
+  },
+  "body_trunc": {
+   "name": "Trunk",
+   "system": "Body regions",
+   "code": "SCT:22943007",
+   "type": "Trunk"
+  },
+  "body_extremities": {
+   "name": "Limb",
+   "system": "Body regions",
+   "code": "SCT:66019005",
+   "type": "Limb"
+  },
+  "pleural_effusion": {
+   "name": "Effusion",
+   "system": "Findings",
+   "code": "SCT:41699000",
+   "type": "Effusion",
+   "region": "Pleural cavity"
+  },
+  "pericardial_effusion": {
+   "name": "Effusion",
+   "system": "Findings",
+   "code": "SCT:41699000",
+   "type": "Effusion",
+   "region": "Pericardial cavity"
+  },
+  "liver_vessels": {
+   "name": "Blood vessel",
+   "system": "Cardiovascular system",
+   "code": "SCT:59820001",
+   "type": "Blood vessel",
+   "region": "Liver"
+  },
+  "liver_tumor": {
+   "name": "Neoplasm",
+   "system": "Findings",
+   "code": "SCT:108369006",
+   "type": "Neoplasm",
+   "region": "Liver"
+  },
+  "liver_lesions": {
+   "name": "Lesion",
+   "system": "Findings",
+   "code": "SCT:52988006",
+   "rgb": [
+    255,
+    200,
+    50
+   ],
+   "type": "Lesion",
+   "region": "Liver"
+  },
+  "vertebrae_body": {
+   "name": "Vertebral body",
+   "system": "Skeletal system",
+   "code": "SCT:3572006",
+   "type": "Vertebral body"
+  },
+  "patella": {
+   "name": "Patella",
+   "system": "Skeletal system",
+   "code": "SCT:64234005",
+   "type": "Patella"
+  },
+  "tarsal": {
+   "name": "Tarsal bones",
+   "system": "Skeletal system",
+   "code": "SCT:108371006",
+   "type": "Tarsal bones"
+  },
+  "metatarsal": {
+   "name": "Metatarsal",
+   "system": "Skeletal system",
+   "code": "SCT:53884002",
+   "type": "Metatarsal"
+  },
+  "phalanges_feet": {
+   "name": "Phalanx structure",
+   "system": "Skeletal system",
+   "code": "SCT:28641004",
+   "type": "Phalanx structure"
+  },
+  "ulna": {
+   "name": "Ulna",
+   "system": "Skeletal system",
+   "code": "SCT:23416004",
+   "type": "Ulna"
+  },
+  "radius": {
+   "name": "Radius",
+   "system": "Skeletal system",
+   "code": "SCT:62413002",
+   "type": "Radius"
+  },
+  "carpal": {
+   "name": "Carpus",
+   "system": "Skeletal system",
+   "code": "SCT:83936004",
+   "type": "Carpus"
+  },
+  "metacarpal": {
+   "name": "Metacarpal bones",
+   "system": "Skeletal system",
+   "code": "SCT:36455000",
+   "type": "Metacarpal bones"
+  },
+  "phalanges_hand": {
+   "name": "Phalanx structure",
+   "system": "Skeletal system",
+   "code": "SCT:28641004",
+   "type": "Phalanx structure"
+  },
+  "humerus": {
+   "name": "Humerus",
+   "system": "Skeletal system",
+   "code": "SCT:85050009",
+   "type": "Humerus"
+  },
+  "femur": {
+   "name": "Femur",
+   "system": "Skeletal system",
+   "code": "SCT:71341001",
+   "type": "Femur"
+  },
+  "subcutaneous_fat": {
+   "name": "Subcutaneous fatty tissue",
+   "system": "Body regions",
+   "code": "SCT:67769002",
+   "type": "Subcutaneous fatty tissue"
+  },
+  "torso_fat": {
+   "name": "Fat",
+   "system": "Body regions",
+   "code": "SCT:55603005",
+   "type": "Fat",
+   "region": "Trunk"
+  },
+  "skeletal_muscle": {
+   "name": "Skeletal muscle",
+   "system": "Muscular system",
+   "code": "SCT:127954009",
+   "type": "Skeletal muscle"
+  },
+  "intermuscular_fat": {
+   "name": "Fat",
+   "system": "Body regions",
+   "code": "SCT:55603005",
+   "type": "Fat",
+   "region": "Muscle"
+  },
+  "medial_pterygoid_right": {
+   "name": "Medial pterygoid muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:85002005",
+   "type": "Medial pterygoid muscle",
+   "mod": "Right"
+  },
+  "medial_pterygoid_left": {
+   "name": "Medial pterygoid muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:85002005",
+   "type": "Medial pterygoid muscle",
+   "mod": "Left"
+  },
+  "lateral_pterygoid_right": {
+   "name": "Lateral pterygoid muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:88938001",
+   "type": "Lateral pterygoid muscle",
+   "mod": "Right"
+  },
+  "lateral_pterygoid_left": {
+   "name": "Lateral pterygoid muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:88938001",
+   "type": "Lateral pterygoid muscle",
+   "mod": "Left"
+  },
+  "masseter_right": {
+   "name": "Masseter muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:79368004",
+   "type": "Masseter muscle",
+   "mod": "Right"
+  },
+  "masseter_left": {
+   "name": "Masseter muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:79368004",
+   "type": "Masseter muscle",
+   "mod": "Left"
+  },
+  "temporalis_right": {
+   "name": "Temporalis muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:52927003",
+   "type": "Temporalis muscle",
+   "mod": "Right"
+  },
+  "temporalis_left": {
+   "name": "Temporalis muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:52927003",
+   "type": "Temporalis muscle",
+   "mod": "Left"
+  },
+  "digastric_right": {
+   "name": "Digastric muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:52410001",
+   "type": "Digastric muscle",
+   "mod": "Right"
+  },
+  "digastric_left": {
+   "name": "Digastric muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:52410001",
+   "type": "Digastric muscle",
+   "mod": "Left"
+  },
+  "tongue": {
+   "name": "Tongue",
+   "system": "Alimentary system",
+   "code": "SCT:21974007",
+   "type": "Tongue"
+  },
+  "nasal_cavity_right": {
+   "name": "Nasal cavity, right",
+   "system": "Respiratory system",
+   "code": "SCT:279549004",
+   "type": "Nasal cavity",
+   "mod": "Right"
+  },
+  "nasal_cavity_left": {
+   "name": "Nasal cavity, left",
+   "system": "Respiratory system",
+   "code": "SCT:279549004",
+   "type": "Nasal cavity",
+   "mod": "Left"
+  },
+  "eye_right": {
+   "name": "Right eye",
+   "system": "Sense organs",
+   "code": "SCT:1290032005",
+   "type": "Right eye"
+  },
+  "eye_left": {
+   "name": "Left eye",
+   "system": "Sense organs",
+   "code": "SCT:1290031003",
+   "type": "Left eye"
+  },
+  "eye_lens_right": {
+   "name": "Lens of right eye",
+   "system": "Sense organs",
+   "code": "SCT:72345007",
+   "type": "Lens of right eye"
+  },
+  "eye_lens_left": {
+   "name": "Lens of left eye",
+   "system": "Sense organs",
+   "code": "SCT:88258005",
+   "type": "Lens of left eye"
+  },
+  "optic_nerve_right": {
+   "name": "Optic nerve, right",
+   "system": "Nervous system",
+   "code": "SCT:18234004",
+   "type": "Optic nerve",
+   "mod": "Right"
+  },
+  "optic_nerve_left": {
+   "name": "Optic nerve, left",
+   "system": "Nervous system",
+   "code": "SCT:18234004",
+   "type": "Optic nerve",
+   "mod": "Left"
+  },
+  "parotid_gland_right": {
+   "name": "Parotid gland",
+   "system": "Alimentary system",
+   "code": "SCT:45289007",
+   "type": "Parotid gland"
+  },
+  "parotid_gland_left": {
+   "name": "Parotid gland",
+   "system": "Alimentary system",
+   "code": "SCT:45289007",
+   "type": "Parotid gland"
+  },
+  "submandibular_gland_right": {
+   "name": "Submandibular gland, right",
+   "system": "Alimentary system",
+   "code": "SCT:54019009",
+   "type": "Submandibular gland",
+   "mod": "Right"
+  },
+  "submandibular_gland_left": {
+   "name": "Submandibular gland, left",
+   "system": "Alimentary system",
+   "code": "SCT:54019009",
+   "type": "Submandibular gland",
+   "mod": "Left"
+  },
+  "nasopharynx": {
+   "name": "Nasopharynx",
+   "system": "Alimentary system",
+   "code": "SCT:360955006",
+   "type": "Nasopharynx"
+  },
+  "oropharynx": {
+   "name": "Oropharynx",
+   "system": "Alimentary system",
+   "code": "SCT:31389004",
+   "type": "Oropharynx"
+  },
+  "hypopharynx": {
+   "name": "Hypopharynx",
+   "system": "Alimentary system",
+   "code": "SCT:81502006",
+   "type": "Hypopharynx"
+  },
+  "auditory_canal_right": {
+   "name": "Right external auditory canal",
+   "system": "Sense organs",
+   "code": "SCT:45124007",
+   "type": "Right external auditory canal"
+  },
+  "auditory_canal_left": {
+   "name": "Left external auditory canal",
+   "system": "Sense organs",
+   "code": "SCT:71471005",
+   "type": "Left external auditory canal"
+  },
+  "hard_palate": {
+   "name": "Hard palate",
+   "system": "Alimentary system",
+   "code": "SCT:90228003",
+   "type": "Hard palate"
+  },
+  "soft_palate": {
+   "name": "Soft palate",
+   "system": "Alimentary system",
+   "code": "SCT:49460000",
+   "type": "Soft palate"
+  },
+  "sternocleidomastoid_right": {
+   "name": "Sternocleidomastoid muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:22823000",
+   "type": "Sternocleidomastoid muscle",
+   "mod": "Right"
+  },
+  "sternocleidomastoid_left": {
+   "name": "Sternocleidomastoid muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:22823000",
+   "type": "Sternocleidomastoid muscle",
+   "mod": "Left"
+  },
+  "superior_pharyngeal_constrictor": {
+   "name": "Superior pharyngeal constrictor muscle",
+   "system": "Muscular system",
+   "code": "SCT:82182001",
+   "type": "Superior pharyngeal constrictor muscle"
+  },
+  "middle_pharyngeal_constrictor": {
+   "name": "Middle pharyngeal constrictor muscle",
+   "system": "Muscular system",
+   "code": "SCT:66138004",
+   "type": "Middle pharyngeal constrictor muscle"
+  },
+  "inferior_pharyngeal_constrictor": {
+   "name": "Inferior pharyngeal constrictor muscle",
+   "system": "Muscular system",
+   "code": "SCT:80461005",
+   "type": "Inferior pharyngeal constrictor muscle"
+  },
+  "trapezius_right": {
+   "name": "Trapezius muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:31764008",
+   "type": "Trapezius muscle",
+   "mod": "Right"
+  },
+  "trapezius_left": {
+   "name": "Trapezius muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:31764008",
+   "type": "Trapezius muscle",
+   "mod": "Left"
+  },
+  "platysma_right": {
+   "name": "Platysma muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:18252004",
+   "type": "Platysma muscle",
+   "mod": "Right"
+  },
+  "platysma_left": {
+   "name": "Platysma muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:18252004",
+   "type": "Platysma muscle",
+   "mod": "Left"
+  },
+  "levator_scapulae_right": {
+   "name": "Levator scapulae muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:11327007",
+   "type": "Levator scapulae muscle",
+   "mod": "Right"
+  },
+  "levator_scapulae_left": {
+   "name": "Levator scapulae muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:11327007",
+   "type": "Levator scapulae muscle",
+   "mod": "Left"
+  },
+  "anterior_scalene_right": {
+   "name": "Scalenus anterior muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:50755001",
+   "type": "Scalenus anterior muscle",
+   "mod": "Right"
+  },
+  "anterior_scalene_left": {
+   "name": "Scalenus anterior muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:50755001",
+   "type": "Scalenus anterior muscle",
+   "mod": "Left"
+  },
+  "middle_scalene_right": {
+   "name": "Scalenus medius muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:38630006",
+   "type": "Scalenus medius muscle",
+   "mod": "Right"
+  },
+  "middle_scalene_left": {
+   "name": "Scalenus medius muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:38630006",
+   "type": "Scalenus medius muscle",
+   "mod": "Left"
+  },
+  "posterior_scalene_right": {
+   "name": "Scalenus posterior muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:58162002",
+   "type": "Scalenus posterior muscle",
+   "mod": "Right"
+  },
+  "posterior_scalene_left": {
+   "name": "Scalenus posterior muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:58162002",
+   "type": "Scalenus posterior muscle",
+   "mod": "Left"
+  },
+  "sterno_thyroid_right": {
+   "name": "Sternothyroid muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:1087003",
+   "type": "Sternothyroid muscle",
+   "mod": "Right"
+  },
+  "sterno_thyroid_left": {
+   "name": "Sternothyroid muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:1087003",
+   "type": "Sternothyroid muscle",
+   "mod": "Left"
+  },
+  "thyrohyoid_right": {
+   "name": "Thyrohyoid muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:113226007",
+   "type": "Thyrohyoid muscle",
+   "mod": "Right"
+  },
+  "thyrohyoid_left": {
+   "name": "Thyrohyoid muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:113226007",
+   "type": "Thyrohyoid muscle",
+   "mod": "Left"
+  },
+  "prevertebral_right": {
+   "name": "Anterior vertebral muscle of neck, right",
+   "system": "Muscular system",
+   "code": "SCT:714472006",
+   "type": "Anterior vertebral muscle of neck",
+   "mod": "Right"
+  },
+  "prevertebral_left": {
+   "name": "Anterior vertebral muscle of neck, left",
+   "system": "Muscular system",
+   "code": "SCT:714472006",
+   "type": "Anterior vertebral muscle of neck",
+   "mod": "Left"
+  },
+  "ventricle_frontal_horn_right": {
+   "name": "Anterior horn of lateral ventricle, right",
+   "system": "Nervous system",
+   "code": "SCT:30399003",
+   "type": "Anterior horn of lateral ventricle",
+   "mod": "Right"
+  },
+  "ventricle_frontal_horn_left": {
+   "name": "Anterior horn of lateral ventricle, left",
+   "system": "Nervous system",
+   "code": "SCT:30399003",
+   "type": "Anterior horn of lateral ventricle",
+   "mod": "Left"
+  },
+  "ventricle_body_right": {
+   "name": "Body of lateral ventricle, right",
+   "system": "Nervous system",
+   "code": "SCT:34803007",
+   "type": "Body of lateral ventricle",
+   "mod": "Right"
+  },
+  "ventricle_body_left": {
+   "name": "Body of lateral ventricle, left",
+   "system": "Nervous system",
+   "code": "SCT:34803007",
+   "type": "Body of lateral ventricle",
+   "mod": "Left"
+  },
+  "ventricle_temporal_horn_right": {
+   "name": "Inferior horn of lateral ventricle, right",
+   "system": "Nervous system",
+   "code": "SCT:53118009",
+   "type": "Inferior horn of lateral ventricle",
+   "mod": "Right"
+  },
+  "ventricle_temporal_horn_left": {
+   "name": "Inferior horn of lateral ventricle, left",
+   "system": "Nervous system",
+   "code": "SCT:53118009",
+   "type": "Inferior horn of lateral ventricle",
+   "mod": "Left"
+  },
+  "ventricle_trigone_right": {
+   "name": "Collateral trigone, right",
+   "system": "Nervous system",
+   "code": "NEU:217",
+   "type": "Collateral trigone",
+   "mod": "Right"
+  },
+  "ventricle_trigone_left": {
+   "name": "Collateral trigone, left",
+   "system": "Nervous system",
+   "code": "NEU:217",
+   "type": "Collateral trigone",
+   "mod": "Left"
+  },
+  "ventricle_occipital_horn_right": {
+   "name": "Posterior horn of lateral ventricle, right",
+   "system": "Nervous system",
+   "code": "SCT:52943005",
+   "type": "Posterior horn of lateral ventricle",
+   "mod": "Right"
+  },
+  "ventricle_occipital_horn_left": {
+   "name": "Posterior horn of lateral ventricle, left",
+   "system": "Nervous system",
+   "code": "SCT:52943005",
+   "type": "Posterior horn of lateral ventricle",
+   "mod": "Left"
+  },
+  "third_ventricle": {
+   "name": "Third ventricle",
+   "system": "Nervous system",
+   "code": "SCT:49841001",
+   "type": "Third ventricle"
+  },
+  "fourth_ventricle": {
+   "name": "Fourth ventricle",
+   "system": "Nervous system",
+   "code": "SCT:35918002",
+   "type": "Fourth ventricle"
+  },
+  "brainstem": {
+   "name": "Brainstem",
+   "system": "Nervous system",
+   "code": "SCT:15926001",
+   "type": "Brainstem"
+  },
+  "subarachnoid_space": {
+   "name": "Subarachnoid space",
+   "system": "Nervous system",
+   "code": "SCT:35951006",
+   "type": "Subarachnoid space"
+  },
+  "venous_sinuses": {
+   "name": "Venous sinus",
+   "system": "Cardiovascular system",
+   "code": "SCT:80334009",
+   "type": "Venous sinus"
+  },
+  "septum_pellucidum": {
+   "name": "Septum pellucidum",
+   "system": "Nervous system",
+   "code": "SCT:70146006",
+   "type": "Septum pellucidum"
+  },
+  "cerebellum": {
+   "name": "Cerebellum",
+   "system": "Nervous system",
+   "code": "SCT:113305005",
+   "type": "Cerebellum"
+  },
+  "caudate_nucleus": {
+   "name": "Caudate nucleus",
+   "system": "Nervous system",
+   "code": "SCT:11000004",
+   "type": "Caudate nucleus"
+  },
+  "lentiform_nucleus": {
+   "name": "Lentiform nucleus",
+   "system": "Nervous system",
+   "code": "SCT:41648007",
+   "type": "Lentiform nucleus"
+  },
+  "internal_capsule": {
+   "name": "Internal capsule of brain",
+   "system": "Nervous system",
+   "code": "SCT:85637007",
+   "type": "Internal capsule of brain"
+  },
+  "insular_cortex": {
+   "name": "Insula",
+   "system": "Nervous system",
+   "code": "SCT:36169008",
+   "type": "Insula"
+  },
+  "ventricle": {
+   "name": "Brain ventricle",
+   "system": "Nervous system",
+   "code": "SCT:35764002",
+   "type": "Brain ventricle"
+  },
+  "central_sulcus": {
+   "name": "Central sulcus",
+   "system": "Nervous system",
+   "code": "SCT:28294002",
+   "type": "Central sulcus"
+  },
+  "frontal_lobe": {
+   "name": "Frontal lobe",
+   "system": "Nervous system",
+   "code": "SCT:83251001",
+   "type": "Frontal lobe"
+  },
+  "parietal_lobe": {
+   "name": "Parietal lobe",
+   "system": "Nervous system",
+   "code": "SCT:16630005",
+   "type": "Parietal lobe"
+  },
+  "occipital_lobe": {
+   "name": "Occipital lobe",
+   "system": "Nervous system",
+   "code": "SCT:31065004",
+   "type": "Occipital lobe"
+  },
+  "temporal_lobe": {
+   "name": "Temporal lobe",
+   "system": "Nervous system",
+   "code": "SCT:78277001",
+   "type": "Temporal lobe"
+  },
+  "thalamus": {
+   "name": "Thalamus",
+   "system": "Nervous system",
+   "code": "SCT:119406000",
+   "type": "Thalamus"
+  },
+  "left_ventricular_outflow_tract": {
+   "name": "Left ventricle outflow tract",
+   "system": "Cardiovascular system",
+   "code": "SCT:13418002",
+   "type": "Left ventricle outflow tract"
+  },
+  "right_coronary_cusp": {
+   "name": "Right cusp of aortic valve",
+   "system": "Cardiovascular system",
+   "code": "SCT:45324002",
+   "type": "Right cusp of aortic valve"
+  },
+  "left_coronary_cusp": {
+   "name": "Left cusp of aortic valve",
+   "system": "Cardiovascular system",
+   "code": "SCT:63059004",
+   "type": "Left cusp of aortic valve"
+  },
+  "non_coronary_cusp": {
+   "name": "Posterior cusp of aortic valve",
+   "system": "Cardiovascular system",
+   "code": "SCT:69374003",
+   "type": "Posterior cusp of aortic valve"
+  },
+  "eyeball_right": {
+   "name": "Eyeball, right",
+   "system": "Sense organs",
+   "code": "SCT:79652003",
+   "type": "Eyeball",
+   "mod": "Right"
+  },
+  "eyeball_left": {
+   "name": "Eyeball, left",
+   "system": "Sense organs",
+   "code": "SCT:79652003",
+   "type": "Eyeball",
+   "mod": "Left"
+  },
+  "lateral_rectus_muscle_right": {
+   "name": "Lateral rectus muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:31836009",
+   "type": "Lateral rectus muscle",
+   "mod": "Right"
+  },
+  "lateral_rectus_muscle_left": {
+   "name": "Lateral rectus muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:31836009",
+   "type": "Lateral rectus muscle",
+   "mod": "Left"
+  },
+  "superior_oblique_muscle_right": {
+   "name": "Superior oblique muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:66041005",
+   "type": "Superior oblique muscle",
+   "mod": "Right"
+  },
+  "superior_oblique_muscle_left": {
+   "name": "Superior oblique muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:66041005",
+   "type": "Superior oblique muscle",
+   "mod": "Left"
+  },
+  "levator_palpebrae_superioris_right": {
+   "name": "Superior levator palpebrae muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:58641002",
+   "type": "Superior levator palpebrae muscle",
+   "mod": "Right"
+  },
+  "levator_palpebrae_superioris_left": {
+   "name": "Superior levator palpebrae muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:58641002",
+   "type": "Superior levator palpebrae muscle",
+   "mod": "Left"
+  },
+  "superior_rectus_muscle_right": {
+   "name": "Superior rectus muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:5815008",
+   "type": "Superior rectus muscle",
+   "mod": "Right"
+  },
+  "superior_rectus_muscle_left": {
+   "name": "Superior rectus muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:5815008",
+   "type": "Superior rectus muscle",
+   "mod": "Left"
+  },
+  "medial_rectus_muscle_right": {
+   "name": "Medial rectus muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:24937009",
+   "type": "Medial rectus muscle",
+   "mod": "Right"
+  },
+  "medial_rectus_muscle_left": {
+   "name": "Medial rectus muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:24937009",
+   "type": "Medial rectus muscle",
+   "mod": "Left"
+  },
+  "inferior_oblique_muscle_right": {
+   "name": "Inferior oblique muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:57516003",
+   "type": "Inferior oblique muscle",
+   "mod": "Right"
+  },
+  "inferior_oblique_muscle_left": {
+   "name": "Inferior oblique muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:57516003",
+   "type": "Inferior oblique muscle",
+   "mod": "Left"
+  },
+  "inferior_rectus_muscle_right": {
+   "name": "Inferior rectus muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:47869003",
+   "type": "Inferior rectus muscle",
+   "mod": "Right"
+  },
+  "inferior_rectus_muscle_left": {
+   "name": "Inferior rectus muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:47869003",
+   "type": "Inferior rectus muscle",
+   "mod": "Left"
+  },
+  "deltoid": {
+   "name": "Deltoid muscle",
+   "system": "Muscular system",
+   "code": "SCT:35259002",
+   "type": "Deltoid muscle"
+  },
+  "supraspinatus": {
+   "name": "Supraspinatus muscle",
+   "system": "Muscular system",
+   "code": "SCT:6423006",
+   "type": "Supraspinatus muscle"
+  },
+  "infraspinatus": {
+   "name": "Infraspinatus muscle",
+   "system": "Muscular system",
+   "code": "SCT:72573008",
+   "type": "Infraspinatus muscle"
+  },
+  "subscapularis": {
+   "name": "Subscapularis muscle",
+   "system": "Muscular system",
+   "code": "SCT:90588001",
+   "type": "Subscapularis muscle"
+  },
+  "coracobrachial": {
+   "name": "Coracobrachialis muscle",
+   "system": "Muscular system",
+   "code": "SCT:44202005",
+   "type": "Coracobrachialis muscle"
+  },
+  "trapezius": {
+   "name": "Trapezius muscle",
+   "system": "Muscular system",
+   "code": "SCT:31764008",
+   "type": "Trapezius muscle"
+  },
+  "pectoralis_minor": {
+   "name": "Pectoralis minor muscle",
+   "system": "Muscular system",
+   "code": "SCT:18686000",
+   "type": "Pectoralis minor muscle"
+  },
+  "serratus_anterior": {
+   "name": "Serratus anterior muscle",
+   "system": "Muscular system",
+   "code": "SCT:18346003",
+   "type": "Serratus anterior muscle"
+  },
+  "teres_major": {
+   "name": "Teres major muscle",
+   "system": "Muscular system",
+   "code": "SCT:1193009",
+   "type": "Teres major muscle"
+  },
+  "triceps_brachii": {
+   "name": "Triceps brachii muscle",
+   "system": "Muscular system",
+   "code": "SCT:40284004",
+   "type": "Triceps brachii muscle"
+  },
+  "larynx_air": {
+   "name": "Air",
+   "system": "Respiratory system",
+   "code": "SCT:15158005",
+   "type": "Air",
+   "region": "Larynx"
+  },
+  "thyroid_cartilage": {
+   "name": "Thyroid cartilage",
+   "system": "Endocrine glands",
+   "code": "SCT:52940008",
+   "type": "Thyroid cartilage"
+  },
+  "hyoid": {
+   "name": "Hyoid bone",
+   "system": "Skeletal system",
+   "code": "SCT:21387005",
+   "type": "Hyoid bone"
+  },
+  "cricoid_cartilage": {
+   "name": "Cricoid cartilage",
+   "system": "Skeletal system",
+   "code": "SCT:8600008",
+   "type": "Cricoid cartilage"
+  },
+  "zygomatic_arch_right": {
+   "name": "Zygomatic arch, right",
+   "system": "Skeletal system",
+   "code": "SCT:51204001",
+   "type": "Zygomatic arch",
+   "mod": "Right"
+  },
+  "zygomatic_arch_left": {
+   "name": "Zygomatic arch, left",
+   "system": "Skeletal system",
+   "code": "SCT:51204001",
+   "type": "Zygomatic arch",
+   "mod": "Left"
+  },
+  "styloid_process_right": {
+   "name": "Styloid process of skull, right",
+   "system": "Skeletal system",
+   "code": "SCT:279226000",
+   "type": "Styloid process of skull",
+   "mod": "Right"
+  },
+  "styloid_process_left": {
+   "name": "Styloid process of skull, left",
+   "system": "Skeletal system",
+   "code": "SCT:279226000",
+   "type": "Styloid process of skull",
+   "mod": "Left"
+  },
+  "internal_carotid_artery_right": {
+   "name": "Internal carotid artery, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:86117002",
+   "type": "Internal carotid artery",
+   "mod": "Right"
+  },
+  "internal_carotid_artery_left": {
+   "name": "Internal carotid artery, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:86117002",
+   "type": "Internal carotid artery",
+   "mod": "Left"
+  },
+  "internal_jugular_vein_right": {
+   "name": "Internal jugular vein, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:12123001",
+   "type": "Internal jugular vein",
+   "mod": "Right"
+  },
+  "internal_jugular_vein_left": {
+   "name": "Internal jugular vein, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:12123001",
+   "type": "Internal jugular vein",
+   "mod": "Left"
+  },
+  "liver_segment_1": {
+   "name": "Caudate lobe of liver",
+   "system": "Alimentary system",
+   "code": "SCT:71133005",
+   "type": "Caudate lobe of liver"
+  },
+  "liver_segment_2": {
+   "name": "Couinaud hepatic segment II",
+   "system": "Alimentary system",
+   "code": "SCT:277956007",
+   "type": "Couinaud hepatic segment II"
+  },
+  "liver_segment_3": {
+   "name": "Couinaud hepatic segment III",
+   "system": "Alimentary system",
+   "code": "SCT:277957003",
+   "type": "Couinaud hepatic segment III"
+  },
+  "liver_segment_4": {
+   "name": "Couinaud hepatic segment IV",
+   "system": "Alimentary system",
+   "code": "SCT:277958008",
+   "type": "Couinaud hepatic segment IV"
+  },
+  "liver_segment_5": {
+   "name": "Couinaud hepatic segment V",
+   "system": "Alimentary system",
+   "code": "SCT:277959000",
+   "type": "Couinaud hepatic segment V"
+  },
+  "liver_segment_6": {
+   "name": "Couinaud hepatic segment VI",
+   "system": "Alimentary system",
+   "code": "SCT:277960005",
+   "type": "Couinaud hepatic segment VI"
+  },
+  "liver_segment_7": {
+   "name": "Couinaud hepatic segment VII",
+   "system": "Alimentary system",
+   "code": "SCT:277961009",
+   "type": "Couinaud hepatic segment VII"
+  },
+  "liver_segment_8": {
+   "name": "Couinaud hepatic segment VIII",
+   "system": "Alimentary system",
+   "code": "SCT:277962002",
+   "type": "Couinaud hepatic segment VIII"
+  },
+  "lung": {
+   "name": "Lung",
+   "system": "Respiratory system",
+   "code": "SCT:39607008",
+   "type": "Lung"
+  },
+  "lung_nodules": {
+   "name": "Lung nodule",
+   "system": "Findings",
+   "code": "SCT:786838002",
+   "type": "Lung nodule"
+  },
+  "breast": {
+   "name": "Breast",
+   "system": "Integument",
+   "code": "SCT:76752008",
+   "type": "Breast"
+  },
+  "mandible": {
+   "name": "Mandible",
+   "system": "Skeletal system",
+   "code": "SCT:91609006",
+   "rgb": [
+    255,
+    220,
+    180
+   ],
+   "type": "Mandible"
+  },
+  "teeth_lower": {
+   "name": "Lower teeth",
+   "system": "Alimentary system",
+   "code": "SCT:38199008",
+   "rgb": [
+    255,
+    255,
+    210
+   ],
+   "type": "Lower teeth"
+  },
+  "head": {
+   "name": "Head",
+   "system": "Body regions",
+   "code": "SCT:69536005",
+   "rgb": [
+    255,
+    218,
+    185
+   ],
+   "type": "Head"
+  },
+  "sinus_maxillary": {
+   "name": "Maxillary sinus",
+   "system": "Skeletal system",
+   "code": "SCT:15924003",
+   "rgb": [
+    180,
+    210,
+    230
+   ],
+   "type": "Maxillary sinus"
+  },
+  "sinus_frontal": {
+   "name": "Frontal sinus",
+   "system": "Respiratory system",
+   "code": "SCT:55060009",
+   "rgb": [
+    170,
+    200,
+    220
+   ],
+   "type": "Frontal sinus"
+  },
+  "teeth_upper": {
+   "name": "Upper teeth",
+   "system": "Alimentary system",
+   "code": "SCT:38090009",
+   "rgb": [
+    255,
+    250,
+    200
+   ],
+   "type": "Upper teeth"
+  },
+  "pectoralis_major_right": {
+   "name": "Pectoralis major muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:75070003",
+   "rgb": [
+    200,
+    120,
+    100
+   ],
+   "type": "Pectoralis major muscle",
+   "mod": "Right"
+  },
+  "pectoralis_major_left": {
+   "name": "Pectoralis major muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:75070003",
+   "rgb": [
+    200,
+    120,
+    100
+   ],
+   "type": "Pectoralis major muscle",
+   "mod": "Left"
+  },
+  "rectus_abdominis_right": {
+   "name": "Rectus abdominis muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:77634003",
+   "rgb": [
+    180,
+    100,
+    90
+   ],
+   "type": "Rectus abdominis muscle",
+   "mod": "Right"
+  },
+  "rectus_abdominis_left": {
+   "name": "Rectus abdominis muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:77634003",
+   "rgb": [
+    180,
+    100,
+    90
+   ],
+   "type": "Rectus abdominis muscle",
+   "mod": "Left"
+  },
+  "serratus_anterior_right": {
+   "name": "Serratus anterior muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:18346003",
+   "rgb": [
+    190,
+    110,
+    95
+   ],
+   "type": "Serratus anterior muscle",
+   "mod": "Right"
+  },
+  "serratus_anterior_left": {
+   "name": "Serratus anterior muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:18346003",
+   "rgb": [
+    190,
+    110,
+    95
+   ],
+   "type": "Serratus anterior muscle",
+   "mod": "Left"
+  },
+  "latissimus_dorsi_right": {
+   "name": "Latissimus dorsi muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:76862009",
+   "rgb": [
+    175,
+    95,
+    85
+   ],
+   "type": "Latissimus dorsi muscle",
+   "mod": "Right"
+  },
+  "latissimus_dorsi_left": {
+   "name": "Latissimus dorsi muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:76862009",
+   "rgb": [
+    175,
+    95,
+    85
+   ],
+   "type": "Latissimus dorsi muscle",
+   "mod": "Left"
+  },
+  "external_oblique_right": {
+   "name": "External oblique muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:44530005",
+   "rgb": [
+    170,
+    90,
+    80
+   ],
+   "type": "External oblique muscle",
+   "mod": "Right"
+  },
+  "external_oblique_left": {
+   "name": "External oblique muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:44530005",
+   "rgb": [
+    170,
+    90,
+    80
+   ],
+   "type": "External oblique muscle",
+   "mod": "Left"
+  },
+  "internal_oblique_right": {
+   "name": "Internal oblique muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:33147005",
+   "rgb": [
+    165,
+    85,
+    75
+   ],
+   "type": "Internal oblique muscle",
+   "mod": "Right"
+  },
+  "internal_oblique_left": {
+   "name": "Internal oblique muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:33147005",
+   "rgb": [
+    165,
+    85,
+    75
+   ],
+   "type": "Internal oblique muscle",
+   "mod": "Left"
+  },
+  "erector_spinae_right": {
+   "name": "Erector spinae muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:44947003",
+   "rgb": [
+    171,
+    85,
+    68
+   ],
+   "type": "Erector spinae muscle",
+   "mod": "Right"
+  },
+  "erector_spinae_left": {
+   "name": "Erector spinae muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:44947003",
+   "rgb": [
+    171,
+    85,
+    68
+   ],
+   "type": "Erector spinae muscle",
+   "mod": "Left"
+  },
+  "transversospinalis_right": {
+   "name": "Transversospinalis muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:49975005",
+   "rgb": [
+    160,
+    80,
+    70
+   ],
+   "type": "Transversospinalis muscle",
+   "mod": "Right"
+  },
+  "transversospinalis_left": {
+   "name": "Transversospinalis muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:49975005",
+   "rgb": [
+    160,
+    80,
+    70
+   ],
+   "type": "Transversospinalis muscle",
+   "mod": "Left"
+  },
+  "psoas_major_right": {
+   "name": "Psoas major muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:64038003",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Psoas major muscle",
+   "mod": "Right"
+  },
+  "psoas_major_left": {
+   "name": "Psoas major muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:64038003",
+   "rgb": [
+    192,
+    104,
+    88
+   ],
+   "type": "Psoas major muscle",
+   "mod": "Left"
+  },
+  "quadratus_lumborum_right": {
+   "name": "Quadratus lumborum muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:47560002",
+   "rgb": [
+    155,
+    78,
+    65
+   ],
+   "type": "Quadratus lumborum muscle",
+   "mod": "Right"
+  },
+  "quadratus_lumborum_left": {
+   "name": "Quadratus lumborum muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:47560002",
+   "rgb": [
+    155,
+    78,
+    65
+   ],
+   "type": "Quadratus lumborum muscle",
+   "mod": "Left"
+  },
+  "lower_jawbone": {
+   "name": "Mandible",
+   "system": "Skeletal system",
+   "code": "SCT:91609006",
+   "rgb": [
+    255,
+    220,
+    180
+   ],
+   "type": "Mandible"
+  },
+  "upper_jawbone": {
+   "name": "Maxilla",
+   "system": "Skeletal system",
+   "code": "SCT:22457002",
+   "rgb": [
+    255,
+    225,
+    190
+   ],
+   "type": "Maxilla"
+  },
+  "left_inferior_alveolar_canal": {
+   "name": "Inferior alveolar nerve, left",
+   "system": "Nervous system",
+   "code": "SCT:55636003",
+   "rgb": [
+    200,
+    180,
+    160
+   ],
+   "type": "Inferior alveolar nerve",
+   "mod": "Left"
+  },
+  "right_inferior_alveolar_canal": {
+   "name": "Inferior alveolar nerve, right",
+   "system": "Nervous system",
+   "code": "SCT:55636003",
+   "rgb": [
+    200,
+    180,
+    160
+   ],
+   "type": "Inferior alveolar nerve",
+   "mod": "Right"
+  },
+  "left_maxillary_sinus": {
+   "name": "Maxillary sinus, left",
+   "system": "Skeletal system",
+   "code": "SCT:15924003",
+   "rgb": [
+    180,
+    210,
+    230
+   ],
+   "type": "Maxillary sinus",
+   "mod": "Left"
+  },
+  "right_maxillary_sinus": {
+   "name": "Maxillary sinus, right",
+   "system": "Skeletal system",
+   "code": "SCT:15924003",
+   "rgb": [
+    180,
+    210,
+    230
+   ],
+   "type": "Maxillary sinus",
+   "mod": "Right"
+  },
+  "pharynx": {
+   "name": "Pharynx",
+   "system": "Alimentary system",
+   "code": "SCT:54066008",
+   "rgb": [
+    210,
+    180,
+    170
+   ],
+   "type": "Pharynx"
+  },
+  "bridge": {
+   "name": "Dental prosthesis",
+   "system": "Devices",
+   "code": "SCT:272680005",
+   "rgb": [
+    200,
+    200,
+    200
+   ],
+   "type": "Dental prosthesis"
+  },
+  "crown": {
+   "name": "Dental crown",
+   "system": "Devices",
+   "code": "SCT:75142005",
+   "rgb": [
+    220,
+    220,
+    220
+   ],
+   "type": "Dental crown"
+  },
+  "implant": {
+   "name": "Implant",
+   "system": "Devices",
+   "code": "SCT:40388003",
+   "rgb": [
+    190,
+    190,
+    190
+   ],
+   "type": "Implant",
+   "region": "Tooth"
+  },
+  "upper_right_central_incisor_fdi11": {
+   "name": "Central incisor tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:245576003",
+   "rgb": [
+    255,
+    255,
+    240
+   ],
+   "type": "Central incisor tooth",
+   "mod": "Right"
+  },
+  "upper_right_lateral_incisor_fdi12": {
+   "name": "Lateral incisor tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:245577007",
+   "rgb": [
+    255,
+    250,
+    235
+   ],
+   "type": "Lateral incisor tooth",
+   "mod": "Right"
+  },
+  "upper_right_canine_fdi13": {
+   "name": "Canine tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:17505006",
+   "rgb": [
+    255,
+    245,
+    220
+   ],
+   "type": "Canine tooth",
+   "mod": "Right"
+  },
+  "upper_right_first_premolar_fdi14": {
+   "name": "First premolar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421456005",
+   "rgb": [
+    255,
+    240,
+    210
+   ],
+   "type": "First premolar tooth",
+   "mod": "Right"
+  },
+  "upper_right_second_premolar_fdi15": {
+   "name": "Second premolar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421004003",
+   "rgb": [
+    255,
+    235,
+    200
+   ],
+   "type": "Second premolar tooth",
+   "mod": "Right"
+  },
+  "upper_right_first_molar_fdi16": {
+   "name": "First molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421532009",
+   "rgb": [
+    255,
+    230,
+    190
+   ],
+   "type": "First molar tooth",
+   "mod": "Right"
+  },
+  "upper_right_second_molar_fdi17": {
+   "name": "Second molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421053003",
+   "rgb": [
+    255,
+    225,
+    180
+   ],
+   "type": "Second molar tooth",
+   "mod": "Right"
+  },
+  "upper_right_third_molar_fdi18": {
+   "name": "Third molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:422005005",
+   "rgb": [
+    255,
+    220,
+    170
+   ],
+   "type": "Third molar tooth",
+   "mod": "Right"
+  },
+  "upper_left_central_incisor_fdi21": {
+   "name": "Central incisor tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:245576003",
+   "rgb": [
+    255,
+    255,
+    240
+   ],
+   "type": "Central incisor tooth",
+   "mod": "Left"
+  },
+  "upper_left_lateral_incisor_fdi22": {
+   "name": "Lateral incisor tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:245577007",
+   "rgb": [
+    255,
+    250,
+    235
+   ],
+   "type": "Lateral incisor tooth",
+   "mod": "Left"
+  },
+  "upper_left_canine_fdi23": {
+   "name": "Canine tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:17505006",
+   "rgb": [
+    255,
+    245,
+    220
+   ],
+   "type": "Canine tooth",
+   "mod": "Left"
+  },
+  "upper_left_first_premolar_fdi24": {
+   "name": "First premolar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421456005",
+   "rgb": [
+    255,
+    240,
+    210
+   ],
+   "type": "First premolar tooth",
+   "mod": "Left"
+  },
+  "upper_left_second_premolar_fdi25": {
+   "name": "Second premolar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421004003",
+   "rgb": [
+    255,
+    235,
+    200
+   ],
+   "type": "Second premolar tooth",
+   "mod": "Left"
+  },
+  "upper_left_first_molar_fdi26": {
+   "name": "First molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421532009",
+   "rgb": [
+    255,
+    230,
+    190
+   ],
+   "type": "First molar tooth",
+   "mod": "Left"
+  },
+  "upper_left_second_molar_fdi27": {
+   "name": "Second molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421053003",
+   "rgb": [
+    255,
+    225,
+    180
+   ],
+   "type": "Second molar tooth",
+   "mod": "Left"
+  },
+  "upper_left_third_molar_fdi28": {
+   "name": "Third molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:422005005",
+   "rgb": [
+    255,
+    220,
+    170
+   ],
+   "type": "Third molar tooth",
+   "mod": "Left"
+  },
+  "lower_left_central_incisor_fdi31": {
+   "name": "Central incisor tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:245576003",
+   "rgb": [
+    245,
+    245,
+    230
+   ],
+   "type": "Central incisor tooth",
+   "mod": "Left"
+  },
+  "lower_left_lateral_incisor_fdi32": {
+   "name": "Lateral incisor tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:245577007",
+   "rgb": [
+    245,
+    240,
+    225
+   ],
+   "type": "Lateral incisor tooth",
+   "mod": "Left"
+  },
+  "lower_left_canine_fdi33": {
+   "name": "Canine tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:17505006",
+   "rgb": [
+    245,
+    235,
+    210
+   ],
+   "type": "Canine tooth",
+   "mod": "Left"
+  },
+  "lower_left_first_premolar_fdi34": {
+   "name": "First premolar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421456005",
+   "rgb": [
+    245,
+    230,
+    200
+   ],
+   "type": "First premolar tooth",
+   "mod": "Left"
+  },
+  "lower_left_second_premolar_fdi35": {
+   "name": "Second premolar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421004003",
+   "rgb": [
+    245,
+    225,
+    190
+   ],
+   "type": "Second premolar tooth",
+   "mod": "Left"
+  },
+  "lower_left_first_molar_fdi36": {
+   "name": "First molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421532009",
+   "rgb": [
+    245,
+    220,
+    180
+   ],
+   "type": "First molar tooth",
+   "mod": "Left"
+  },
+  "lower_left_second_molar_fdi37": {
+   "name": "Second molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:421053003",
+   "rgb": [
+    245,
+    215,
+    170
+   ],
+   "type": "Second molar tooth",
+   "mod": "Left"
+  },
+  "lower_left_third_molar_fdi38": {
+   "name": "Third molar tooth, left",
+   "system": "Alimentary system",
+   "code": "SCT:422005005",
+   "rgb": [
+    245,
+    210,
+    160
+   ],
+   "type": "Third molar tooth",
+   "mod": "Left"
+  },
+  "lower_right_central_incisor_fdi41": {
+   "name": "Central incisor tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:245576003",
+   "rgb": [
+    245,
+    245,
+    230
+   ],
+   "type": "Central incisor tooth",
+   "mod": "Right"
+  },
+  "lower_right_lateral_incisor_fdi42": {
+   "name": "Lateral incisor tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:245577007",
+   "rgb": [
+    245,
+    240,
+    225
+   ],
+   "type": "Lateral incisor tooth",
+   "mod": "Right"
+  },
+  "lower_right_canine_fdi43": {
+   "name": "Canine tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:17505006",
+   "rgb": [
+    245,
+    235,
+    210
+   ],
+   "type": "Canine tooth",
+   "mod": "Right"
+  },
+  "lower_right_first_premolar_fdi44": {
+   "name": "First premolar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421456005",
+   "rgb": [
+    245,
+    230,
+    200
+   ],
+   "type": "First premolar tooth",
+   "mod": "Right"
+  },
+  "lower_right_second_premolar_fdi45": {
+   "name": "Second premolar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421004003",
+   "rgb": [
+    245,
+    225,
+    190
+   ],
+   "type": "Second premolar tooth",
+   "mod": "Right"
+  },
+  "lower_right_first_molar_fdi46": {
+   "name": "First molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421532009",
+   "rgb": [
+    245,
+    220,
+    180
+   ],
+   "type": "First molar tooth",
+   "mod": "Right"
+  },
+  "lower_right_second_molar_fdi47": {
+   "name": "Second molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:421053003",
+   "rgb": [
+    245,
+    215,
+    170
+   ],
+   "type": "Second molar tooth",
+   "mod": "Right"
+  },
+  "lower_right_third_molar_fdi48": {
+   "name": "Third molar tooth, right",
+   "system": "Alimentary system",
+   "code": "SCT:422005005",
+   "rgb": [
+    245,
+    210,
+    160
+   ],
+   "type": "Third molar tooth",
+   "mod": "Right"
+  },
+  "left_mandibular_incisive_canal_fdi103": {
+   "name": "Inferior alveolar nerve, left",
+   "system": "Nervous system",
+   "code": "SCT:55636003",
+   "rgb": [
+    200,
+    180,
+    160
+   ],
+   "type": "Inferior alveolar nerve",
+   "mod": "Left"
+  },
+  "right_mandibular_incisive_canal_fdi104": {
+   "name": "Inferior alveolar nerve, right",
+   "system": "Nervous system",
+   "code": "SCT:55636003",
+   "rgb": [
+    200,
+    180,
+    160
+   ],
+   "type": "Inferior alveolar nerve",
+   "mod": "Right"
+  },
+  "lingual_canal": {
+   "name": "Lingual canal",
+   "system": "Alimentary system",
+   "code": "SCT:245615006",
+   "rgb": [
+    195,
+    175,
+    155
+   ],
+   "type": "Lingual canal"
+  },
+  "upper_right_central_incisor_pulp_fdi111": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    180,
+    180
+   ],
+   "type": "Dental pulp",
+   "region": "Central incisor tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_lateral_incisor_pulp_fdi112": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    178,
+    178
+   ],
+   "type": "Dental pulp",
+   "region": "Lateral incisor tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_canine_pulp_fdi113": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    176,
+    176
+   ],
+   "type": "Dental pulp",
+   "region": "Canine tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_first_premolar_pulp_fdi114": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    174,
+    174
+   ],
+   "type": "Dental pulp",
+   "region": "First premolar tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_second_premolar_pulp_fdi115": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    172,
+    172
+   ],
+   "type": "Dental pulp",
+   "region": "Second premolar tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_first_molar_pulp_fdi116": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    170,
+    170
+   ],
+   "type": "Dental pulp",
+   "region": "First molar tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_second_molar_pulp_fdi117": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    168,
+    168
+   ],
+   "type": "Dental pulp",
+   "region": "Second molar tooth",
+   "regionMod": "Right"
+  },
+  "upper_right_third_molar_pulp_fdi118": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    166,
+    166
+   ],
+   "type": "Dental pulp",
+   "region": "Third molar tooth",
+   "regionMod": "Right"
+  },
+  "upper_left_central_incisor_pulp_fdi121": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    180,
+    180
+   ],
+   "type": "Dental pulp",
+   "region": "Central incisor tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_lateral_incisor_pulp_fdi122": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    178,
+    178
+   ],
+   "type": "Dental pulp",
+   "region": "Lateral incisor tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_canine_pulp_fdi123": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    176,
+    176
+   ],
+   "type": "Dental pulp",
+   "region": "Canine tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_first_premolar_pulp_fdi124": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    174,
+    174
+   ],
+   "type": "Dental pulp",
+   "region": "First premolar tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_second_premolar_pulp_fdi125": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    172,
+    172
+   ],
+   "type": "Dental pulp",
+   "region": "Second premolar tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_first_molar_pulp_fdi126": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    170,
+    170
+   ],
+   "type": "Dental pulp",
+   "region": "First molar tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_second_molar_pulp_fdi127": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    168,
+    168
+   ],
+   "type": "Dental pulp",
+   "region": "Second molar tooth",
+   "regionMod": "Left"
+  },
+  "upper_left_third_molar_pulp_fdi128": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    220,
+    166,
+    166
+   ],
+   "type": "Dental pulp",
+   "region": "Third molar tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_central_incisor_pulp_fdi131": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    170,
+    170
+   ],
+   "type": "Dental pulp",
+   "region": "Central incisor tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_lateral_incisor_pulp_fdi132": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    168,
+    168
+   ],
+   "type": "Dental pulp",
+   "region": "Lateral incisor tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_canine_pulp_fdi133": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    166,
+    166
+   ],
+   "type": "Dental pulp",
+   "region": "Canine tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_first_premolar_pulp_fdi134": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    164,
+    164
+   ],
+   "type": "Dental pulp",
+   "region": "First premolar tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_second_premolar_pulp_fdi135": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    162,
+    162
+   ],
+   "type": "Dental pulp",
+   "region": "Second premolar tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_first_molar_pulp_fdi136": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    160,
+    160
+   ],
+   "type": "Dental pulp",
+   "region": "First molar tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_second_molar_pulp_fdi137": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    158,
+    158
+   ],
+   "type": "Dental pulp",
+   "region": "Second molar tooth",
+   "regionMod": "Left"
+  },
+  "lower_left_third_molar_pulp_fdi138": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    156,
+    156
+   ],
+   "type": "Dental pulp",
+   "region": "Third molar tooth",
+   "regionMod": "Left"
+  },
+  "lower_right_central_incisor_pulp_fdi141": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    170,
+    170
+   ],
+   "type": "Dental pulp",
+   "region": "Central incisor tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_lateral_incisor_pulp_fdi142": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    168,
+    168
+   ],
+   "type": "Dental pulp",
+   "region": "Lateral incisor tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_canine_pulp_fdi143": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    166,
+    166
+   ],
+   "type": "Dental pulp",
+   "region": "Canine tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_first_premolar_pulp_fdi144": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    164,
+    164
+   ],
+   "type": "Dental pulp",
+   "region": "First premolar tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_second_premolar_pulp_fdi145": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    162,
+    162
+   ],
+   "type": "Dental pulp",
+   "region": "Second premolar tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_first_molar_pulp_fdi146": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    160,
+    160
+   ],
+   "type": "Dental pulp",
+   "region": "First molar tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_second_molar_pulp_fdi147": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    158,
+    158
+   ],
+   "type": "Dental pulp",
+   "region": "Second molar tooth",
+   "regionMod": "Right"
+  },
+  "lower_right_third_molar_pulp_fdi148": {
+   "name": "Dental pulp",
+   "system": "Alimentary system",
+   "code": "SCT:26671002",
+   "rgb": [
+    210,
+    156,
+    156
+   ],
+   "type": "Dental pulp",
+   "region": "Third molar tooth",
+   "regionMod": "Right"
+  },
+  "abdominal_cavity": {
+   "name": "Abdominal cavity",
+   "system": "Body regions",
+   "code": "SCT:52731004",
+   "rgb": [
+    255,
+    228,
+    196
+   ],
+   "type": "Abdominal cavity"
+  },
+  "thoracic_cavity": {
+   "name": "Thoracic cavity",
+   "system": "Body regions",
+   "code": "SCT:43799004",
+   "rgb": [
+    200,
+    220,
+    240
+   ],
+   "type": "Thoracic cavity"
+  },
+  "pericardium": {
+   "name": "Pericardium",
+   "system": "Body regions",
+   "code": "SCT:76848001",
+   "rgb": [
+    255,
+    200,
+    200
+   ],
+   "type": "Pericardium"
+  },
+  "mediastinum": {
+   "name": "Mediastinum",
+   "system": "Body regions",
+   "code": "SCT:72410000",
+   "rgb": [
+    220,
+    210,
+    230
+   ],
+   "type": "Mediastinum"
+  },
+  "brain_aneurysm": {
+   "name": "Cerebral aneurysm",
+   "system": "Findings",
+   "code": "SCT:128059003",
+   "rgb": [
+    255,
+    50,
+    50
+   ],
+   "type": "Cerebral aneurysm",
+   "region": "Brain"
+  }
+ }
+}

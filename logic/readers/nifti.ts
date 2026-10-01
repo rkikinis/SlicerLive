@@ -5,6 +5,52 @@
 // sform (sform_code > 0) over qform (qform_code > 0) over pixdim-only.
 // Supports datatypes 2/4/8/16/64/256/512/768 (u8,i16,i32,f32,f64,i8,u16,u32); .nii.gz via DecompressionStream.
 
+/**
+ * Where a reader got the geometry, and what the format could not tell it.
+ *
+ * Every format in this directory has more than one way to say where a voxel is, and picking between
+ * them is a *decision* the reader makes on the caller's behalf. Until now none of them recorded
+ * which — so a NIfTI whose `sform` and `qform` disagree loaded silently from one of them, and a
+ * volume in micrometers loaded as millimeters because nobody looked at `xyzt_units`.
+ *
+ * `origin` uses the same three words as the coordinate work: **acquired** (the file said so),
+ * **derived** (computed from the file), **assumed** (a fallback nobody chose, and always suspect).
+ */
+export interface GeometrySource {
+  origin: "acquired" | "derived" | "assumed";
+  /** The mechanism, in the format's own vocabulary: `sform`, `qform`, `pixdim`, `slice positions`. */
+  mechanism: string;
+  /** Spatial unit as declared. Absent when the format has no way to state one. */
+  spaceUnit?: string;
+  /** Temporal unit as declared, where there is a time axis. */
+  timeUnit?: string;
+  /** True when the frame is anatomical, so `ijkToRAS` means RAS rather than a bare world frame. */
+  anatomical: boolean;
+  /**
+   * NIfTI only, and set only when **both** `qform` and `sform` are present: did they agree?
+   *
+   * The format allows both, carrying different transforms, with no normative rule for which wins —
+   * convention says prefer `sform`, and convention is not a specification. A disagreement means the
+   * file is ambiguous about where its own voxels are, which a caller should be able to find out
+   * rather than have silently resolved for it.
+   */
+  qformAgreesWithSform?: boolean;
+  /**
+   * What a sample stands for, as the source declares it: `cell` (the value of a small region, whose
+   * center the position names -- DICOM, and what Michael Halle's duckn writes for it) or `node` (the
+   * value at a point, as NRRD can declare). Absent when the source says nothing.
+   */
+  centering?: "cell" | "node";
+  /**
+   * WHERE EACH SLICE ACTUALLY IS, in slice order: its ImagePositionPatient projected onto the slice
+   * normal, in the source's unit (DICOM: millimeters, LPS), the way duckn's own converter states
+   * per-slice positions. The volume itself sits on a regular grid; these are the truth behind it,
+   * kept so a copy can describe a series with a gap or an overlap as it is (critic, 2026-09-23,
+   * finding 5). Absent for a single slice and for sources without per-slice positions.
+   */
+  slicePositions?: number[];
+}
+
 export interface Volume {
   dims: [number, number, number];        // [nx, ny, nz]
   ijkToRAS: number[];                    // 16, row-major
@@ -12,7 +58,28 @@ export interface Volume {
   dtype: string;                         // zarr dtype string, e.g. "<i2"
   name?: string;
   meta?: Record<string, unknown>;
+  /** How the geometry above was arrived at. @see {@linkcode GeometrySource} */
+  geometry?: GeometrySource;
+  /** A DICOM volume read with its headers (parseInstances with `headers`): each slice's header in slice order, in the
+   *  duckn copy's form (logic/readers/dicom-tags.ts). Only the copy's converter asks; the page's volumes never carry it. */
+  sliceHeaders?: { json: Record<string, { vr: string; Value?: unknown[]; InlineBinary?: string }>; tags: Record<string, unknown> }[];
+  /**
+   * THE PIECES ALREADY MADE, when the volume came from a series' duckn working copy
+   * (render/zarr-copy.ts): the descriptor with the page's own sha256 names, the uncompressed pieces
+   * under those names, and the display the converter computed. The ingest (logic/ingest.ts,
+   * `volumeNodes`) takes them instead of cutting, hashing and taking a histogram again -- which is
+   * the point of the copy -- and drops this field once used.
+   */
+  prebuilt?: {
+    desc: { shape: [number, number, number]; chunks: [number, number, number]; chunkGrid: [number, number, number]; dtype: string; bytes?: number; chunkHashes: Record<string, string>; compressor: "raw" };
+    blobs: Map<string, Uint8Array>;
+    display: { window: number; level: number; range: [number, number] };
+  };
 }
+
+/** NIfTI's `xyzt_units` byte: spatial unit in bits 0-2, temporal in bits 3-5. Six values, total. */
+const NIFTI_SPACE_UNITS: Record<number, string> = { 1: "m", 2: "mm", 3: "um" };
+const NIFTI_TIME_UNITS: Record<number, string> = { 8: "s", 16: "ms", 24: "us" };
 
 const DT: Record<number, { ctor: new (b: ArrayBuffer, o?: number, n?: number) => Volume["data"]; bytes: number; zarr: string }> = {
   2: { ctor: Uint8Array, bytes: 1, zarr: "|u1" }, 4: { ctor: Int16Array, bytes: 2, zarr: "<i2" }, 8: { ctor: Int32Array, bytes: 4, zarr: "<i4" },
@@ -47,6 +114,17 @@ export function quaternToMat(b: number, c: number, d: number, qfac: number, dx: 
 }
 
 export async function parseNifti(input: Uint8Array, name?: string): Promise<Volume> {
+  const all = await parseNiftiVolumes(input, name);
+  if (all.length !== 1) throw new Error(`4D NIfTI (${all.length} volumes) not supported here — a diffusion or time series goes through parseNiftiVolumes`);
+  return all[0];
+}
+
+/**
+ * EVERY VOLUME of a NIfTI file: one per index of the 4th dimension (a diffusion scan's gradients, a time series'
+ * frames), each a 3D Volume on the same grid. The voxels are read once; each volume's `data` is a view into that one
+ * buffer, not a copy. A 3D file gives one. (2026-09-28, the diffusion MRI work: dmri-review-2026-09-28.md.)
+ */
+export async function parseNiftiVolumes(input: Uint8Array, name?: string): Promise<Volume[]> {
   const bytes = isGzip(input) ? await gunzip(input) : input;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 348) throw new Error("not a NIfTI file (too short)");
@@ -55,6 +133,7 @@ export async function parseNifti(input: Uint8Array, name?: string): Promise<Volu
   let little = true;
   let dims: number[], datatype: number, pixdim: number[], voxOffset: number, qformCode: number, sformCode: number;
   let quat: number[], qoff: number[], srow: number[], sclSlope: number, sclInter: number;
+  let xyzt = 0;
   if (!isN2) {
     little = sizeof === 348; if (!little && dv.getInt32(0, false) !== 348) throw new Error("bad NIfTI-1 sizeof_hdr");
     const i16 = (o: number) => dv.getInt16(o, little), f32 = (o: number) => dv.getFloat32(o, little);
@@ -65,6 +144,7 @@ export async function parseNifti(input: Uint8Array, name?: string): Promise<Volu
     qformCode = i16(252); sformCode = i16(254);
     quat = [f32(256), f32(260), f32(264)]; qoff = [f32(268), f32(272), f32(276)];
     srow = Array.from({ length: 12 }, (_, i) => f32(280 + i * 4));
+    xyzt = bytes[123];                                   // xyzt_units
   } else {
     little = dv.getInt32(0, true) === 540;
     const i64 = (o: number) => Number(dv.getBigInt64(o, little)), f64 = (o: number) => dv.getFloat64(o, little), i32 = (o: number) => dv.getInt32(o, little);
@@ -75,13 +155,14 @@ export async function parseNifti(input: Uint8Array, name?: string): Promise<Volu
     qformCode = i32(344); sformCode = i32(348);
     quat = [f64(352), f64(360), f64(368)]; qoff = [f64(376), f64(384), f64(392)];
     srow = Array.from({ length: 12 }, (_, i) => f64(400 + i * 8));
+    xyzt = i32(500);                                     // xyzt_units
   }
   const nd = dims[0]; if (nd < 3 && nd !== 2) throw new Error(`unsupported NIfTI ndim ${nd}`);
   const nx = dims[1], ny = dims[2], nz = nd >= 3 ? dims[3] : 1;
   const nt = nd >= 4 ? Math.max(1, dims[4]) : 1;
-  if (nt !== 1) throw new Error(`4D NIfTI (${nt} volumes) not supported yet — load one volume at a time`);
   const dt = DT[datatype]; if (!dt) throw new Error(`unsupported NIfTI datatype ${datatype}`);
-  const n = nx * ny * nz;
+  const n3 = nx * ny * nz;
+  const n = n3 * nt;
   let data: Volume["data"];
   const off = Math.round(voxOffset);
   if (little || dt.bytes === 1) {
@@ -98,14 +179,59 @@ export async function parseNifti(input: Uint8Array, name?: string): Promise<Volu
     }
     data = out;
   }
-  // scl_slope/inter: apply only when it changes values (floats), else record in meta
+  // VALUE SCALING (scl_slope, scl_inter): the NIfTI standard says a stored value means slope·stored + inter whenever
+  // slope is non-zero. Applied here, into 32-bit floats, when it changes anything (slope not 1 or inter not 0); a slope
+  // of 0 or NaN means "no scaling" by the standard's own rule. Until 2026-09-28 this comment said so and the code did
+  // not: a tumor mask stored 0..255 with slope 1/255 read as 0..255, so a cut at one half took every voxel above zero
+  // (ds001226 PAT16: 62.2 cm³ instead of 45.4; the dataset's table says 50). Reading from the stored type's values
+  // keeps integer data exact where there is no scaling.
+  let dtypeOut = dt.zarr;
+  if (Number.isFinite(sclSlope) && sclSlope !== 0 && (sclSlope !== 1 || (Number.isFinite(sclInter) && sclInter !== 0))) {
+    const inter = Number.isFinite(sclInter) ? sclInter : 0;
+    const f = new Float32Array(n);
+    for (let i = 0; i < n; i++) f[i] = (data as ArrayLike<number>)[i] * sclSlope + inter;
+    data = f;
+    dtypeOut = "<f4";
+  }
   const meta: Record<string, unknown> = { datatype, qformCode, sformCode, sclSlope, sclInter };
-  // ijkToRAS: sform > qform > pixdim (NIfTI voxel->RAS; NO LPS flip here)
-  let M: number[];
-  if (sformCode > 0) M = [...srow.slice(0, 4), ...srow.slice(4, 8), ...srow.slice(8, 12), 0, 0, 0, 1];
-  else if (qformCode > 0) {
+  // ijkToRAS: sform > qform > pixdim (NIfTI voxel->RAS; NO LPS flip here). NIfTI mandates RAS+, so
+  // the frame is always anatomical — unlike NRRD, the format gives no way to say otherwise.
+  const sform = (): number[] => [...srow.slice(0, 4), ...srow.slice(4, 8), ...srow.slice(8, 12), 0, 0, 0, 1];
+  const qform = (): number[] => {
+    // pixdim[0] is qfac, ±1, smuggling handedness through a field documented as grid spacing. Many
+    // real files leave it 0, where the reader must take it as 1.
     const R = quaternToMat(quat[0], quat[1], quat[2], pixdim[0] === 0 ? 1 : pixdim[0], pixdim[1], pixdim[2], pixdim[3]);
-    M = [R[0], R[1], R[2], qoff[0], R[3], R[4], R[5], qoff[1], R[6], R[7], R[8], qoff[2], 0, 0, 0, 1];
-  } else M = [pixdim[1] || 1, 0, 0, 0, 0, pixdim[2] || 1, 0, 0, 0, 0, pixdim[3] || 1, 0, 0, 0, 0, 1];
-  return { dims: [nx, ny, nz], ijkToRAS: M, data, dtype: dt.zarr, name, meta };
+    return [R[0], R[1], R[2], qoff[0], R[3], R[4], R[5], qoff[1], R[6], R[7], R[8], qoff[2], 0, 0, 0, 1];
+  };
+
+  let M: number[];
+  const geometry: GeometrySource = {
+    origin: "acquired",
+    mechanism: "sform",
+    anatomical: true,
+    spaceUnit: NIFTI_SPACE_UNITS[xyzt & 0x07],
+    timeUnit: NIFTI_TIME_UNITS[xyzt & 0x38],
+  };
+  if (sformCode > 0) {
+    M = sform();
+    // Both mechanisms present is legal and the format does not say which wins. Compute the loser too
+    // and report whether it agreed, rather than resolving an ambiguity in silence.
+    if (qformCode > 0) {
+      const q = qform();
+      geometry.qformAgreesWithSform = M.every((v, i) => Math.abs(v - q[i]) < 1e-4);
+    }
+  } else if (qformCode > 0) {
+    M = qform();
+    geometry.mechanism = "qform";
+  } else {
+    // Method 1: ANALYZE 7.5. Spacing only, no orientation at all — an axis-aligned guess.
+    M = [pixdim[1] || 1, 0, 0, 0, 0, pixdim[2] || 1, 0, 0, 0, 0, pixdim[3] || 1, 0, 0, 0, 0, 1];
+    geometry.origin = "assumed";
+    geometry.mechanism = "pixdim (no orientation in the file)";
+  }
+  if (nt > 1) meta.volumes = nt;
+  return Array.from({ length: nt }, (_, t) => ({
+    dims: [nx, ny, nz] as [number, number, number], ijkToRAS: M, data: data.subarray(t * n3, (t + 1) * n3) as Volume["data"],
+    dtype: dtypeOut, name: nt > 1 ? `${name ?? "volume"} [${t}]` : name, meta: nt > 1 ? { ...meta, volume: t } : meta, geometry,
+  }));
 }

@@ -1,7 +1,9 @@
 // Slice-view geometry math ported from vtkMRMLSliceLogic (pure TS, RAS internal). Two functions W2 needs:
 //   fitFovToVolume  — vtkMRMLSliceLogic::FitSliceToVolumes: the field of view that frames a volume in a
-//                     viewport, fitting the volume to the SMALLER window dimension (the other axis fills by
-//                     aspect ratio). Validated against the live-Slicer fixture (harness/fixtures/slicer-startup).
+//                     viewport, covering BOTH in-plane extents and letterboxing the slack (the axis
+//                     with the larger extent-to-viewport ratio decides the scale; the other gains
+//                     margin). Validated against the live-Slicer fixture (harness/fixtures/slicer-startup)
+//                     and against the out-of-proportion cases the fixture does not reach.
 //   offsetRangeResolution — vtkMRMLSliceLogic::GetSliceOffsetRangeResolution: the slider [min,max] + step,
 //                     in Slicer's signed slice-offset convention (bounds along the normal, step = spacing).
 import type { Orientation } from "../render/slice-renderer.ts";
@@ -21,10 +23,21 @@ export function fitFovToVolume(orient: Orientation, rasLo: Vec3, rasHi: Vec3, ij
   const ex = Math.abs(rasHi[rx] - rasLo[rx]);          // volume extent along the slice row axis
   const ey = Math.abs(rasHi[cy] - rasLo[cy]);          // along the slice col axis
   const slab = sliceSpacingFor(orient, ijkToRAS);
-  let fovX: number, fovY: number;
-  if (viewH > viewW) { const px = ex / viewW; fovX = ex; fovY = px * viewH; }
-  else { const px = ey / viewH; fovY = ey; fovX = px * viewW; }
-  return [fovX, fovY, slab];
+  // FIT BOTH AXES, not whichever one the VIEWPORT happens to make smaller.
+  //
+  // This branched on the viewport's aspect alone (viewH > viewW ? fit width : fit height) and never
+  // consulted the volume's, so it framed one axis exactly and let the other fall where it may. When
+  // the volume is proportionally wider (or taller) than the cell, "where it may" is off-screen: a
+  // 350 x 100 mm extent in a 270 x 180 px cell took the height branch and produced a 150 mm wide
+  // field of view for a 350 mm volume -- more than half of it cut off, in every view at once. Ron:
+  // "The autozoom is not good. All the views do not show the entire extent."
+  //
+  // Scaling by the LARGER of the two ratios makes the field of view cover both extents and letterbox
+  // the slack, which is what "fit" has to mean. On the live-Slicer fixture (MRHead, all three
+  // orientations) this is identical to the old expression to within 0.01 mm -- there the height
+  // ratio dominates, which is why the parity test never caught the missing case.
+  const scale = Math.max(ex / Math.max(viewW, 1), ey / Math.max(viewH, 1));
+  return [scale * viewW, scale * viewH, slab];
 }
 
 export interface OffsetRange { min: number; max: number; step: number }

@@ -8,7 +8,7 @@ const g = () => globalThis as unknown as Hooks;
 
 export function registerSampleDataPanel(shell: AppShell, opts: { onStatus?: (s: string) => void }): void {
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
-  shell.registerPanel({ id: "sampledata", title: "Sample Data", order: 2, mount(el) {
+  shell.registerPanel({ id: "sampledata", title: "Sample Data", groups: ["Data"], order: 5, tip: "Download one of Slicer's sample datasets to try things on", mount(el) {
     el.innerHTML = `
       <h2>Sample Data</h2>
       <div class="sl-samples"></div>

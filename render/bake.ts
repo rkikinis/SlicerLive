@@ -62,7 +62,17 @@ export function bakeColorizeRGBA(dev: GPUDevice, labelmap: Uint8Array, dims: Vec
   const [dx, dy, dz] = dims;
   const storageUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
 
-  const labelTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  // COPY_SRC as well, so the data probe can read one texel back out of it. A 1x1x1
+  // copyTextureToBuffer is what answers "what structure is under the pointer" without keeping a
+  // second ~150 MB CPU copy of the labelmap -- and without this flag that copy throws, taking the
+  // whole view down with it: "sourceTexture usage does not contain CopySrc". The flag costs nothing;
+  // it only permits a copy that the driver would otherwise refuse.
+  const labelTex = dev.createTexture({
+    size: dims as [number, number, number],
+    dimension: "3d",
+    format: "r8uint",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+  });
   dev.queue.writeTexture({ texture: labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
   const texA = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "rgba16float", usage: storageUsage });
   const texB = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "rgba16float", usage: storageUsage });
@@ -137,14 +147,47 @@ export class ColorizeBaker {
    *  `algorithms/EditableSegmentation` — a compute effect writes the label texture on-GPU and the baker
    *  re-colorizes from it, no CPU round-trip). An external texture must be `r8uint` with at least
    *  TEXTURE_BINDING usage; the baker never writes or destroys it. */
-  constructor(private dev: GPUDevice, label: Uint8Array | GPUTexture, private dims: Vec3) {
+  constructor(
+    private dev: GPUDevice,
+    label: Uint8Array | GPUTexture,
+    private dims: Vec3,
+    /**
+     * THE CHUNKS THAT HOLD ANYTHING, to upload instead of the whole labelmap.
+     *
+     * 70 to 97% of a segmentation's 64x128x128 chunks are all zeros (Ron's scene, 2026-09-23), and a
+     * new texture is zeros already -- WebGPU guarantees it -- so sending them moves hundreds of
+     * megabytes into WebKit's graphics process for nothing. In Ron's window the page was blocked
+     * 9.5 s of a 12.0 s load, the longest block a 3.1 s frame with no surface uploads and no shader
+     * build in it: the page waiting on the graphics process. Each chunk goes from its own packed
+     * buffer, so exactly its bytes move.
+     */
+    sparse?: { shape: [number, number, number]; nonEmpty: { at: [number, number, number]; bytes: ArrayBuffer }[] },
+  ) {
     const [dx, dy, dz] = dims;
     if (label instanceof GPUTexture) {
       this.labelTex = label;
       this.ownsLabel = false;
     } else {
-      this.labelTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      dev.queue.writeTexture({ texture: this.labelTex }, label, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
+      // COPY_SRC: this is the texture the data probe reads one texel from (it is handed to the slice
+      // views as the label overlay). Without the flag the copy throws and the throw takes every view
+      // down -- "sourceTexture usage does not contain CopySrc". It permits a copy, and costs nothing.
+      this.labelTex = dev.createTexture({
+        size: dims as [number, number, number],
+        dimension: "3d",
+        format: "r8uint",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+      });
+      if (sparse && sparse.shape.length === 3) {
+        const [cz, cy, cx] = sparse.shape;
+        for (const c of sparse.nonEmpty) {
+          const z0 = c.at[0] * cz, y0 = c.at[1] * cy, x0 = c.at[2] * cx;
+          const zw = Math.min(cz, dz - z0), yw = Math.min(cy, dy - y0), xw = Math.min(cx, dx - x0);
+          if (zw <= 0 || yw <= 0 || xw <= 0) continue;
+          dev.queue.writeTexture({ texture: this.labelTex, origin: [x0, y0, z0] }, new Uint8Array(c.bytes), { bytesPerRow: cx, rowsPerImage: cy }, [xw, yw, zw]);
+        }
+      } else {
+        dev.queue.writeTexture({ texture: this.labelTex }, label, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
+      }
       this.ownsLabel = true;
     }
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -163,6 +206,10 @@ export class ColorizeBaker {
     const [dx, dy] = this.dims;
     this.dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, this.dims as [number, number, number]);
   }
+
+  /** The uploaded labelmap, for a consumer that can color FROM it rather than needing it baked.
+   *  Read-only by contract: the baker owns this texture and destroys it. */
+  labelTexture(): GPUTexture { return this.labelTex; }
 
   /** Allocate an output texture sized/typed for this baker's labelmap (caller owns it). */
   output(): GPUTexture {
@@ -207,6 +254,12 @@ export class ColorizeBaker {
     dev.queue.submit([enc.finish()]);
   }
 
+  /** Drop the blur ping-pong texture. It is the same size as an output -- rgba16float, so 8 bytes a
+   *  voxel, over a gigabyte on a full-body study -- and it exists only to serve smoothed bakes. When
+   *  the smoothed output is not being drawn there is nothing for it to serve, and holding it is pure
+   *  cost. The next smooth bake allocates it again, so this is a release, not a teardown. */
+  releaseScratch() { this.scratch?.destroy(); this.scratch = undefined; }
+
   destroy() { if (this.ownsLabel) this.labelTex.destroy(); this.scratch?.destroy(); this.palBuf.destroy(); this.dimsBuf.destroy(); }
 }
 
@@ -218,4 +271,56 @@ export function bakeSegmentPresence(dev: GPUDevice, mask: Uint8Array, dims: Vec3
   const palette = new Float32Array(256 * 4);
   palette.set([1, 1, 1, 1], 4);   // label 1 -> present, opacity 1
   return bakeColorizeRGBA(dev, mask, dims, palette, sigmaVoxels);
+}
+
+
+/**
+ * The 256x2 palette texture the slice renderer's LABEL-OVERLAY mode reads (row 1 = color+opacity,
+ * indexed by label value), from the same `Float32Array` palette `bakeInto` takes.
+ *
+ * This is the whole of what coloring a slice overlay requires. Baking it into an rgba16float
+ * volume produced exactly this answer per voxel and stored it: 8 bytes a voxel, 3.35 GB on a
+ * 768x768x709 study, per segmentation, for something a 2 KB lookup table computes in the shader.
+ */
+export function makeLabelPaletteTexture(dev: GPUDevice): GPUTexture {
+  return dev.createTexture({
+    size: [256, 2],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+}
+
+/**
+ * A palette (256*4 f32: rgb + presence*opacity) as the 256x2 rgba8unorm image the shader reads.
+ *
+ * ROW 1, not row 0 -- `ov_tex` does `textureLoad(t_palette, vec2<i32>(lab, 1), 0)`, sharing the
+ * two-row layout with the window/level LUTs. Writing row 0 would bind cleanly, sample zero, and
+ * draw nothing, which is why this is a separate pure function with a test on it rather than four
+ * lines inside a GPU call no test can reach.
+ *
+ * The column IS the label value: segPalette writes `p[labelValue*4]`, and the shader indexes by the
+ * value it read out of the labelmap. That correspondence is the entire mechanism.
+ */
+export function labelPaletteBytes(palette: Float32Array): Uint8Array<ArrayBuffer> {
+  const rows = new Uint8Array(new ArrayBuffer(256 * 2 * 4));   // row 0 unused by the shader, left transparent
+  const n = Math.min(256, Math.floor(palette.length / 4));
+  const u8 = (x: number) => Math.round(Math.min(1, Math.max(0, x)) * 255);
+  for (let i = 0; i < n; i++) {
+    const o = (256 + i) * 4;                     // row 1, column i
+    rows[o + 0] = u8(palette[i * 4 + 0]);
+    rows[o + 1] = u8(palette[i * 4 + 1]);
+    rows[o + 2] = u8(palette[i * 4 + 2]);
+    rows[o + 3] = u8(palette[i * 4 + 3]);
+  }
+  return rows;
+}
+
+/** Write a palette into row 1 of a palette texture. */
+export function writeLabelPaletteTexture(dev: GPUDevice, tex: GPUTexture, palette: Float32Array) {
+  dev.queue.writeTexture(
+    { texture: tex },
+    labelPaletteBytes(palette),
+    { bytesPerRow: 256 * 4, rowsPerImage: 2 },
+    [256, 2],
+  );
 }

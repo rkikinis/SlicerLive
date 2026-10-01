@@ -1,0 +1,1652 @@
+{
+ "source": "FreeSurferColorLUT.txt, as shipped with FastSurfer (FastSurferCNN/config). Names, colours and the 1000/2000 hemisphere offset are FreeSurfer's own; the lobe each Desikan-Killiany gyrus belongs to is from Desikan et al., NeuroImage 31(3), 2006.",
+ "generatedBy": "logic/anatomy/build-freesurfer.ts",
+ "structures": {
+  "Left-Cerebral-White-Matter": {
+   "name": "Cerebral white matter, left",
+   "system": "Cerebral white matter",
+   "rgb": [
+    245,
+    245,
+    245
+   ],
+   "type": "Cerebral white matter",
+   "mod": "Left",
+   "freesurfer": "Left-Cerebral-White-Matter",
+   "labelValue": 2
+  },
+  "Left-Cerebral-Cortex": {
+   "name": "Cerebral cortex, left",
+   "system": "Cerebral cortex",
+   "rgb": [
+    205,
+    62,
+    78
+   ],
+   "type": "Cerebral cortex",
+   "mod": "Left",
+   "freesurfer": "Left-Cerebral-Cortex",
+   "labelValue": 3
+  },
+  "Left-Lateral-Ventricle": {
+   "name": "Lateral ventricle, left",
+   "system": "Ventricular system",
+   "rgb": [
+    120,
+    18,
+    134
+   ],
+   "type": "Lateral ventricle",
+   "mod": "Left",
+   "freesurfer": "Left-Lateral-Ventricle",
+   "labelValue": 4
+  },
+  "Left-Inf-Lat-Vent": {
+   "name": "Inferior horn of the lateral ventricle, left",
+   "system": "Ventricular system",
+   "rgb": [
+    196,
+    58,
+    250
+   ],
+   "type": "Inferior horn of the lateral ventricle",
+   "mod": "Left",
+   "freesurfer": "Left-Inf-Lat-Vent",
+   "labelValue": 5
+  },
+  "Left-Cerebellum-Exterior": {
+   "name": "Cerebellar exterior, left",
+   "system": "Cerebellum",
+   "rgb": [
+    0,
+    148,
+    0
+   ],
+   "type": "Cerebellar exterior",
+   "mod": "Left",
+   "freesurfer": "Left-Cerebellum-Exterior",
+   "labelValue": 6
+  },
+  "Left-Cerebellum-White-Matter": {
+   "name": "Cerebellar white matter, left",
+   "system": "Cerebellum",
+   "rgb": [
+    220,
+    248,
+    164
+   ],
+   "type": "Cerebellar white matter",
+   "mod": "Left",
+   "freesurfer": "Left-Cerebellum-White-Matter",
+   "labelValue": 7
+  },
+  "Left-Cerebellum-Cortex": {
+   "name": "Cerebellar cortex, left",
+   "system": "Cerebellum",
+   "rgb": [
+    230,
+    148,
+    34
+   ],
+   "type": "Cerebellar cortex",
+   "mod": "Left",
+   "freesurfer": "Left-Cerebellum-Cortex",
+   "labelValue": 8
+  },
+  "Left-Thalamus": {
+   "name": "Thalamus, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    0,
+    118,
+    14
+   ],
+   "type": "Thalamus",
+   "mod": "Left",
+   "freesurfer": "Left-Thalamus",
+   "labelValue": 10
+  },
+  "Left-Caudate": {
+   "name": "Caudate nucleus, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    122,
+    186,
+    220
+   ],
+   "type": "Caudate nucleus",
+   "mod": "Left",
+   "freesurfer": "Left-Caudate",
+   "labelValue": 11
+  },
+  "Left-Putamen": {
+   "name": "Putamen, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    236,
+    13,
+    176
+   ],
+   "type": "Putamen",
+   "mod": "Left",
+   "freesurfer": "Left-Putamen",
+   "labelValue": 12
+  },
+  "Left-Pallidum": {
+   "name": "Globus pallidus, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    12,
+    48,
+    255
+   ],
+   "type": "Globus pallidus",
+   "mod": "Left",
+   "freesurfer": "Left-Pallidum",
+   "labelValue": 13
+  },
+  "3rd-Ventricle": {
+   "name": "Third ventricle",
+   "system": "Ventricular system",
+   "rgb": [
+    204,
+    182,
+    142
+   ],
+   "type": "Third ventricle",
+   "freesurfer": "3rd-Ventricle",
+   "labelValue": 14
+  },
+  "4th-Ventricle": {
+   "name": "Fourth ventricle",
+   "system": "Ventricular system",
+   "rgb": [
+    42,
+    204,
+    164
+   ],
+   "type": "Fourth ventricle",
+   "freesurfer": "4th-Ventricle",
+   "labelValue": 15
+  },
+  "Brain-Stem": {
+   "name": "Brainstem",
+   "system": "Brainstem",
+   "rgb": [
+    119,
+    159,
+    176
+   ],
+   "type": "Brainstem",
+   "freesurfer": "Brain-Stem",
+   "labelValue": 16
+  },
+  "Left-Hippocampus": {
+   "name": "Hippocampus, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    220,
+    216,
+    20
+   ],
+   "type": "Hippocampus",
+   "mod": "Left",
+   "freesurfer": "Left-Hippocampus",
+   "labelValue": 17
+  },
+  "Left-Amygdala": {
+   "name": "Amygdala, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    103,
+    255,
+    255
+   ],
+   "type": "Amygdala",
+   "mod": "Left",
+   "freesurfer": "Left-Amygdala",
+   "labelValue": 18
+  },
+  "CSF": {
+   "name": "Cerebrospinal fluid",
+   "system": "Arachnoid",
+   "rgb": [
+    60,
+    60,
+    60
+   ],
+   "type": "Cerebrospinal fluid",
+   "freesurfer": "CSF",
+   "labelValue": 24
+  },
+  "Left-Accumbens-area": {
+   "name": "Nucleus accumbens, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    255,
+    165,
+    0
+   ],
+   "type": "Nucleus accumbens",
+   "mod": "Left",
+   "freesurfer": "Left-Accumbens-area",
+   "labelValue": 26
+  },
+  "Left-Substancia-Nigra": {
+   "name": "Substantia nigra, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    0,
+    255,
+    127
+   ],
+   "type": "Substantia nigra",
+   "mod": "Left",
+   "freesurfer": "Left-Substancia-Nigra",
+   "labelValue": 27
+  },
+  "Left-VentralDC": {
+   "name": "Ventral diencephalon, left",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    145,
+    42,
+    42
+   ],
+   "type": "Ventral diencephalon",
+   "mod": "Left",
+   "freesurfer": "Left-VentralDC",
+   "labelValue": 28
+  },
+  "Left-undetermined": {
+   "name": "Undetermined, left",
+   "system": "Other brain structures",
+   "rgb": [
+    135,
+    206,
+    235
+   ],
+   "type": "Undetermined",
+   "mod": "Left",
+   "freesurfer": "Left-undetermined",
+   "labelValue": 29
+  },
+  "Left-vessel": {
+   "name": "Vessel, left",
+   "system": "Other brain structures",
+   "rgb": [
+    160,
+    32,
+    240
+   ],
+   "type": "Vessel",
+   "mod": "Left",
+   "freesurfer": "Left-vessel",
+   "labelValue": 30
+  },
+  "Left-choroid-plexus": {
+   "name": "Choroid plexus, left",
+   "system": "Walls of lateral ventricle",
+   "rgb": [
+    0,
+    200,
+    200
+   ],
+   "type": "Choroid plexus",
+   "mod": "Left",
+   "freesurfer": "Left-choroid-plexus",
+   "labelValue": 31
+  },
+  "Right-Cerebral-White-Matter": {
+   "name": "Cerebral white matter, right",
+   "system": "Cerebral white matter",
+   "rgb": [
+    245,
+    245,
+    245
+   ],
+   "type": "Cerebral white matter",
+   "mod": "Right",
+   "freesurfer": "Right-Cerebral-White-Matter",
+   "labelValue": 41
+  },
+  "Right-Cerebral-Cortex": {
+   "name": "Cerebral cortex, right",
+   "system": "Cerebral cortex",
+   "rgb": [
+    205,
+    62,
+    78
+   ],
+   "type": "Cerebral cortex",
+   "mod": "Right",
+   "freesurfer": "Right-Cerebral-Cortex",
+   "labelValue": 42
+  },
+  "Right-Lateral-Ventricle": {
+   "name": "Lateral ventricle, right",
+   "system": "Ventricular system",
+   "rgb": [
+    120,
+    18,
+    134
+   ],
+   "type": "Lateral ventricle",
+   "mod": "Right",
+   "freesurfer": "Right-Lateral-Ventricle",
+   "labelValue": 43
+  },
+  "Right-Inf-Lat-Vent": {
+   "name": "Inferior horn of the lateral ventricle, right",
+   "system": "Ventricular system",
+   "rgb": [
+    196,
+    58,
+    250
+   ],
+   "type": "Inferior horn of the lateral ventricle",
+   "mod": "Right",
+   "freesurfer": "Right-Inf-Lat-Vent",
+   "labelValue": 44
+  },
+  "Right-Cerebellum-Exterior": {
+   "name": "Cerebellar exterior, right",
+   "system": "Cerebellum",
+   "rgb": [
+    0,
+    148,
+    0
+   ],
+   "type": "Cerebellar exterior",
+   "mod": "Right",
+   "freesurfer": "Right-Cerebellum-Exterior",
+   "labelValue": 45
+  },
+  "Right-Cerebellum-White-Matter": {
+   "name": "Cerebellar white matter, right",
+   "system": "Cerebellum",
+   "rgb": [
+    220,
+    248,
+    164
+   ],
+   "type": "Cerebellar white matter",
+   "mod": "Right",
+   "freesurfer": "Right-Cerebellum-White-Matter",
+   "labelValue": 46
+  },
+  "Right-Cerebellum-Cortex": {
+   "name": "Cerebellar cortex, right",
+   "system": "Cerebellum",
+   "rgb": [
+    230,
+    148,
+    34
+   ],
+   "type": "Cerebellar cortex",
+   "mod": "Right",
+   "freesurfer": "Right-Cerebellum-Cortex",
+   "labelValue": 47
+  },
+  "Right-Thalamus": {
+   "name": "Thalamus, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    0,
+    118,
+    14
+   ],
+   "type": "Thalamus",
+   "mod": "Right",
+   "freesurfer": "Right-Thalamus",
+   "labelValue": 49
+  },
+  "Right-Caudate": {
+   "name": "Caudate nucleus, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    122,
+    186,
+    220
+   ],
+   "type": "Caudate nucleus",
+   "mod": "Right",
+   "freesurfer": "Right-Caudate",
+   "labelValue": 50
+  },
+  "Right-Putamen": {
+   "name": "Putamen, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    236,
+    13,
+    176
+   ],
+   "type": "Putamen",
+   "mod": "Right",
+   "freesurfer": "Right-Putamen",
+   "labelValue": 51
+  },
+  "Right-Pallidum": {
+   "name": "Globus pallidus, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    13,
+    48,
+    255
+   ],
+   "type": "Globus pallidus",
+   "mod": "Right",
+   "freesurfer": "Right-Pallidum",
+   "labelValue": 52
+  },
+  "Right-Hippocampus": {
+   "name": "Hippocampus, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    220,
+    216,
+    20
+   ],
+   "type": "Hippocampus",
+   "mod": "Right",
+   "freesurfer": "Right-Hippocampus",
+   "labelValue": 53
+  },
+  "Right-Amygdala": {
+   "name": "Amygdala, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    103,
+    255,
+    255
+   ],
+   "type": "Amygdala",
+   "mod": "Right",
+   "freesurfer": "Right-Amygdala",
+   "labelValue": 54
+  },
+  "Right-Accumbens-area": {
+   "name": "Nucleus accumbens, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    255,
+    165,
+    0
+   ],
+   "type": "Nucleus accumbens",
+   "mod": "Right",
+   "freesurfer": "Right-Accumbens-area",
+   "labelValue": 58
+  },
+  "Right-Substancia-Nigra": {
+   "name": "Substantia nigra, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    0,
+    255,
+    127
+   ],
+   "type": "Substantia nigra",
+   "mod": "Right",
+   "freesurfer": "Right-Substancia-Nigra",
+   "labelValue": 59
+  },
+  "Right-VentralDC": {
+   "name": "Ventral diencephalon, right",
+   "system": "Subcortical gray matter",
+   "rgb": [
+    165,
+    42,
+    42
+   ],
+   "type": "Ventral diencephalon",
+   "mod": "Right",
+   "freesurfer": "Right-VentralDC",
+   "labelValue": 60
+  },
+  "Right-undetermined": {
+   "name": "Undetermined, right",
+   "system": "Other brain structures",
+   "rgb": [
+    135,
+    206,
+    235
+   ],
+   "type": "Undetermined",
+   "mod": "Right",
+   "freesurfer": "Right-undetermined",
+   "labelValue": 61
+  },
+  "Right-vessel": {
+   "name": "Vessel, right",
+   "system": "Other brain structures",
+   "rgb": [
+    160,
+    32,
+    240
+   ],
+   "type": "Vessel",
+   "mod": "Right",
+   "freesurfer": "Right-vessel",
+   "labelValue": 62
+  },
+  "Right-choroid-plexus": {
+   "name": "Choroid plexus, right",
+   "system": "Walls of lateral ventricle",
+   "rgb": [
+    0,
+    200,
+    221
+   ],
+   "type": "Choroid plexus",
+   "mod": "Right",
+   "freesurfer": "Right-choroid-plexus",
+   "labelValue": 63
+  },
+  "5th-Ventricle": {
+   "name": "Fifth ventricle",
+   "system": "Septum pellucidum",
+   "rgb": [
+    120,
+    190,
+    150
+   ],
+   "type": "Fifth ventricle",
+   "freesurfer": "5th-Ventricle",
+   "labelValue": 72
+  },
+  "WM-hypointensities": {
+   "name": "White matter hypointensities",
+   "system": "Other brain structures",
+   "rgb": [
+    200,
+    70,
+    255
+   ],
+   "type": "White matter hypointensities",
+   "freesurfer": "WM-hypointensities",
+   "labelValue": 77
+  },
+  "Left-WM-hypointensities": {
+   "name": "White matter hypointensities, left",
+   "system": "Other brain structures",
+   "rgb": [
+    255,
+    148,
+    10
+   ],
+   "type": "White matter hypointensities",
+   "mod": "Left",
+   "freesurfer": "Left-WM-hypointensities",
+   "labelValue": 78
+  },
+  "Right-WM-hypointensities": {
+   "name": "White matter hypointensities, right",
+   "system": "Other brain structures",
+   "rgb": [
+    255,
+    148,
+    10
+   ],
+   "type": "White matter hypointensities",
+   "mod": "Right",
+   "freesurfer": "Right-WM-hypointensities",
+   "labelValue": 79
+  },
+  "non-WM-hypointensities": {
+   "name": "Non-white-matter hypointensities",
+   "system": "Other brain structures",
+   "rgb": [
+    164,
+    108,
+    226
+   ],
+   "type": "Non-white-matter hypointensities",
+   "freesurfer": "non-WM-hypointensities",
+   "labelValue": 80
+  },
+  "Left-non-WM-hypointensities": {
+   "name": "Non-white-matter hypointensities, left",
+   "system": "Other brain structures",
+   "rgb": [
+    164,
+    108,
+    226
+   ],
+   "type": "Non-white-matter hypointensities",
+   "mod": "Left",
+   "freesurfer": "Left-non-WM-hypointensities",
+   "labelValue": 81
+  },
+  "Right-non-WM-hypointensities": {
+   "name": "Non-white-matter hypointensities, right",
+   "system": "Other brain structures",
+   "rgb": [
+    164,
+    108,
+    226
+   ],
+   "type": "Non-white-matter hypointensities",
+   "mod": "Right",
+   "freesurfer": "Right-non-WM-hypointensities",
+   "labelValue": 82
+  },
+  "Optic-Chiasm": {
+   "name": "Optic chiasm",
+   "system": "Other brain structures",
+   "rgb": [
+    234,
+    169,
+    30
+   ],
+   "type": "Optic chiasm",
+   "freesurfer": "Optic-Chiasm",
+   "labelValue": 85
+  },
+  "ctx-lh-bankssts": {
+   "name": "Banks of the superior temporal sulcus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    25,
+    100,
+    40
+   ],
+   "type": "Banks of the superior temporal sulcus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-bankssts",
+   "labelValue": 1001
+  },
+  "ctx-lh-caudalanteriorcingulate": {
+   "name": "Caudal anterior cingulate cortex, left",
+   "system": "Cingulate cortex",
+   "rgb": [
+    125,
+    100,
+    160
+   ],
+   "type": "Caudal anterior cingulate cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-caudalanteriorcingulate",
+   "labelValue": 1002
+  },
+  "ctx-lh-caudalmiddlefrontal": {
+   "name": "Caudal middle frontal gyrus, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    100,
+    25,
+    0
+   ],
+   "type": "Caudal middle frontal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-caudalmiddlefrontal",
+   "labelValue": 1003
+  },
+  "ctx-lh-cuneus": {
+   "name": "Cuneus, left",
+   "system": "Occipital lobe",
+   "rgb": [
+    220,
+    20,
+    100
+   ],
+   "type": "Cuneus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-cuneus",
+   "labelValue": 1005
+  },
+  "ctx-lh-entorhinal": {
+   "name": "Entorhinal cortex, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    220,
+    20,
+    10
+   ],
+   "type": "Entorhinal cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-entorhinal",
+   "labelValue": 1006
+  },
+  "ctx-lh-fusiform": {
+   "name": "Fusiform gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    180,
+    220,
+    140
+   ],
+   "type": "Fusiform gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-fusiform",
+   "labelValue": 1007
+  },
+  "ctx-lh-inferiorparietal": {
+   "name": "Inferior parietal cortex, left",
+   "system": "Parietal lobe",
+   "rgb": [
+    220,
+    60,
+    220
+   ],
+   "type": "Inferior parietal cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-inferiorparietal",
+   "labelValue": 1008
+  },
+  "ctx-lh-inferiortemporal": {
+   "name": "Inferior temporal gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    180,
+    40,
+    120
+   ],
+   "type": "Inferior temporal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-inferiortemporal",
+   "labelValue": 1009
+  },
+  "ctx-lh-isthmuscingulate": {
+   "name": "Isthmus of the cingulate gyrus, left",
+   "system": "Cingulate cortex",
+   "rgb": [
+    140,
+    20,
+    140
+   ],
+   "type": "Isthmus of the cingulate gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-isthmuscingulate",
+   "labelValue": 1010
+  },
+  "ctx-lh-lateraloccipital": {
+   "name": "Lateral occipital cortex, left",
+   "system": "Occipital lobe",
+   "rgb": [
+    20,
+    30,
+    140
+   ],
+   "type": "Lateral occipital cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-lateraloccipital",
+   "labelValue": 1011
+  },
+  "ctx-lh-lateralorbitofrontal": {
+   "name": "Lateral orbitofrontal cortex, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    35,
+    75,
+    50
+   ],
+   "type": "Lateral orbitofrontal cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-lateralorbitofrontal",
+   "labelValue": 1012
+  },
+  "ctx-lh-lingual": {
+   "name": "Lingual gyrus, left",
+   "system": "Occipital lobe",
+   "rgb": [
+    225,
+    140,
+    140
+   ],
+   "type": "Lingual gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-lingual",
+   "labelValue": 1013
+  },
+  "ctx-lh-medialorbitofrontal": {
+   "name": "Medial orbitofrontal cortex, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    200,
+    35,
+    75
+   ],
+   "type": "Medial orbitofrontal cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-medialorbitofrontal",
+   "labelValue": 1014
+  },
+  "ctx-lh-middletemporal": {
+   "name": "Middle temporal gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    160,
+    100,
+    50
+   ],
+   "type": "Middle temporal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-middletemporal",
+   "labelValue": 1015
+  },
+  "ctx-lh-parahippocampal": {
+   "name": "Parahippocampal gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    20,
+    220,
+    60
+   ],
+   "type": "Parahippocampal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-parahippocampal",
+   "labelValue": 1016
+  },
+  "ctx-lh-paracentral": {
+   "name": "Paracentral lobule, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    60,
+    220,
+    60
+   ],
+   "type": "Paracentral lobule",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-paracentral",
+   "labelValue": 1017
+  },
+  "ctx-lh-parsopercularis": {
+   "name": "Pars opercularis, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    220,
+    180,
+    140
+   ],
+   "type": "Pars opercularis",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-parsopercularis",
+   "labelValue": 1018
+  },
+  "ctx-lh-parsorbitalis": {
+   "name": "Pars orbitalis, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    20,
+    100,
+    50
+   ],
+   "type": "Pars orbitalis",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-parsorbitalis",
+   "labelValue": 1019
+  },
+  "ctx-lh-parstriangularis": {
+   "name": "Pars triangularis, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    220,
+    60,
+    20
+   ],
+   "type": "Pars triangularis",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-parstriangularis",
+   "labelValue": 1020
+  },
+  "ctx-lh-pericalcarine": {
+   "name": "Pericalcarine cortex, left",
+   "system": "Occipital lobe",
+   "rgb": [
+    120,
+    100,
+    60
+   ],
+   "type": "Pericalcarine cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-pericalcarine",
+   "labelValue": 1021
+  },
+  "ctx-lh-postcentral": {
+   "name": "Postcentral gyrus, left",
+   "system": "Parietal lobe",
+   "rgb": [
+    220,
+    20,
+    20
+   ],
+   "type": "Postcentral gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-postcentral",
+   "labelValue": 1022
+  },
+  "ctx-lh-posteriorcingulate": {
+   "name": "Posterior cingulate cortex, left",
+   "system": "Cingulate cortex",
+   "rgb": [
+    220,
+    180,
+    220
+   ],
+   "type": "Posterior cingulate cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-posteriorcingulate",
+   "labelValue": 1023
+  },
+  "ctx-lh-precentral": {
+   "name": "Precentral gyrus, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    60,
+    20,
+    220
+   ],
+   "type": "Precentral gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-precentral",
+   "labelValue": 1024
+  },
+  "ctx-lh-precuneus": {
+   "name": "Precuneus, left",
+   "system": "Parietal lobe",
+   "rgb": [
+    160,
+    140,
+    180
+   ],
+   "type": "Precuneus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-precuneus",
+   "labelValue": 1025
+  },
+  "ctx-lh-rostralanteriorcingulate": {
+   "name": "Rostral anterior cingulate cortex, left",
+   "system": "Cingulate cortex",
+   "rgb": [
+    80,
+    20,
+    140
+   ],
+   "type": "Rostral anterior cingulate cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-rostralanteriorcingulate",
+   "labelValue": 1026
+  },
+  "ctx-lh-rostralmiddlefrontal": {
+   "name": "Rostral middle frontal gyrus, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    75,
+    50,
+    125
+   ],
+   "type": "Rostral middle frontal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-rostralmiddlefrontal",
+   "labelValue": 1027
+  },
+  "ctx-lh-superiorfrontal": {
+   "name": "Superior frontal gyrus, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    20,
+    220,
+    160
+   ],
+   "type": "Superior frontal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-superiorfrontal",
+   "labelValue": 1028
+  },
+  "ctx-lh-superiorparietal": {
+   "name": "Superior parietal cortex, left",
+   "system": "Parietal lobe",
+   "rgb": [
+    20,
+    180,
+    140
+   ],
+   "type": "Superior parietal cortex",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-superiorparietal",
+   "labelValue": 1029
+  },
+  "ctx-lh-superiortemporal": {
+   "name": "Superior temporal gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    140,
+    220,
+    220
+   ],
+   "type": "Superior temporal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-superiortemporal",
+   "labelValue": 1030
+  },
+  "ctx-lh-supramarginal": {
+   "name": "Supramarginal gyrus, left",
+   "system": "Parietal lobe",
+   "rgb": [
+    80,
+    160,
+    20
+   ],
+   "type": "Supramarginal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-supramarginal",
+   "labelValue": 1031
+  },
+  "ctx-lh-frontalpole": {
+   "name": "Frontal pole, left",
+   "system": "Frontal lobe",
+   "rgb": [
+    100,
+    0,
+    100
+   ],
+   "type": "Frontal pole",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-frontalpole",
+   "labelValue": 1032
+  },
+  "ctx-lh-temporalpole": {
+   "name": "Temporal pole, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    70,
+    70,
+    70
+   ],
+   "type": "Temporal pole",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-temporalpole",
+   "labelValue": 1033
+  },
+  "ctx-lh-transversetemporal": {
+   "name": "Transverse temporal gyrus, left",
+   "system": "Temporal lobe",
+   "rgb": [
+    150,
+    150,
+    200
+   ],
+   "type": "Transverse temporal gyrus",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-transversetemporal",
+   "labelValue": 1034
+  },
+  "ctx-lh-insula": {
+   "name": "Insula, left",
+   "system": "Insula",
+   "rgb": [
+    255,
+    192,
+    32
+   ],
+   "type": "Insula",
+   "mod": "Left",
+   "freesurfer": "ctx-lh-insula",
+   "labelValue": 1035
+  },
+  "ctx-rh-bankssts": {
+   "name": "Banks of the superior temporal sulcus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    25,
+    100,
+    40
+   ],
+   "type": "Banks of the superior temporal sulcus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-bankssts",
+   "labelValue": 2001
+  },
+  "ctx-rh-caudalanteriorcingulate": {
+   "name": "Caudal anterior cingulate cortex, right",
+   "system": "Cingulate cortex",
+   "rgb": [
+    125,
+    100,
+    160
+   ],
+   "type": "Caudal anterior cingulate cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-caudalanteriorcingulate",
+   "labelValue": 2002
+  },
+  "ctx-rh-caudalmiddlefrontal": {
+   "name": "Caudal middle frontal gyrus, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    100,
+    25,
+    0
+   ],
+   "type": "Caudal middle frontal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-caudalmiddlefrontal",
+   "labelValue": 2003
+  },
+  "ctx-rh-cuneus": {
+   "name": "Cuneus, right",
+   "system": "Occipital lobe",
+   "rgb": [
+    220,
+    20,
+    100
+   ],
+   "type": "Cuneus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-cuneus",
+   "labelValue": 2005
+  },
+  "ctx-rh-entorhinal": {
+   "name": "Entorhinal cortex, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    220,
+    20,
+    10
+   ],
+   "type": "Entorhinal cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-entorhinal",
+   "labelValue": 2006
+  },
+  "ctx-rh-fusiform": {
+   "name": "Fusiform gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    180,
+    220,
+    140
+   ],
+   "type": "Fusiform gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-fusiform",
+   "labelValue": 2007
+  },
+  "ctx-rh-inferiorparietal": {
+   "name": "Inferior parietal cortex, right",
+   "system": "Parietal lobe",
+   "rgb": [
+    220,
+    60,
+    220
+   ],
+   "type": "Inferior parietal cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-inferiorparietal",
+   "labelValue": 2008
+  },
+  "ctx-rh-inferiortemporal": {
+   "name": "Inferior temporal gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    180,
+    40,
+    120
+   ],
+   "type": "Inferior temporal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-inferiortemporal",
+   "labelValue": 2009
+  },
+  "ctx-rh-isthmuscingulate": {
+   "name": "Isthmus of the cingulate gyrus, right",
+   "system": "Cingulate cortex",
+   "rgb": [
+    140,
+    20,
+    140
+   ],
+   "type": "Isthmus of the cingulate gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-isthmuscingulate",
+   "labelValue": 2010
+  },
+  "ctx-rh-lateraloccipital": {
+   "name": "Lateral occipital cortex, right",
+   "system": "Occipital lobe",
+   "rgb": [
+    20,
+    30,
+    140
+   ],
+   "type": "Lateral occipital cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-lateraloccipital",
+   "labelValue": 2011
+  },
+  "ctx-rh-lateralorbitofrontal": {
+   "name": "Lateral orbitofrontal cortex, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    35,
+    75,
+    50
+   ],
+   "type": "Lateral orbitofrontal cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-lateralorbitofrontal",
+   "labelValue": 2012
+  },
+  "ctx-rh-lingual": {
+   "name": "Lingual gyrus, right",
+   "system": "Occipital lobe",
+   "rgb": [
+    225,
+    140,
+    140
+   ],
+   "type": "Lingual gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-lingual",
+   "labelValue": 2013
+  },
+  "ctx-rh-medialorbitofrontal": {
+   "name": "Medial orbitofrontal cortex, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    200,
+    35,
+    75
+   ],
+   "type": "Medial orbitofrontal cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-medialorbitofrontal",
+   "labelValue": 2014
+  },
+  "ctx-rh-middletemporal": {
+   "name": "Middle temporal gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    160,
+    100,
+    50
+   ],
+   "type": "Middle temporal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-middletemporal",
+   "labelValue": 2015
+  },
+  "ctx-rh-parahippocampal": {
+   "name": "Parahippocampal gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    20,
+    220,
+    60
+   ],
+   "type": "Parahippocampal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-parahippocampal",
+   "labelValue": 2016
+  },
+  "ctx-rh-paracentral": {
+   "name": "Paracentral lobule, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    60,
+    220,
+    60
+   ],
+   "type": "Paracentral lobule",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-paracentral",
+   "labelValue": 2017
+  },
+  "ctx-rh-parsopercularis": {
+   "name": "Pars opercularis, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    220,
+    180,
+    140
+   ],
+   "type": "Pars opercularis",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-parsopercularis",
+   "labelValue": 2018
+  },
+  "ctx-rh-parsorbitalis": {
+   "name": "Pars orbitalis, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    20,
+    100,
+    50
+   ],
+   "type": "Pars orbitalis",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-parsorbitalis",
+   "labelValue": 2019
+  },
+  "ctx-rh-parstriangularis": {
+   "name": "Pars triangularis, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    220,
+    60,
+    20
+   ],
+   "type": "Pars triangularis",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-parstriangularis",
+   "labelValue": 2020
+  },
+  "ctx-rh-pericalcarine": {
+   "name": "Pericalcarine cortex, right",
+   "system": "Occipital lobe",
+   "rgb": [
+    120,
+    100,
+    60
+   ],
+   "type": "Pericalcarine cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-pericalcarine",
+   "labelValue": 2021
+  },
+  "ctx-rh-postcentral": {
+   "name": "Postcentral gyrus, right",
+   "system": "Parietal lobe",
+   "rgb": [
+    220,
+    20,
+    20
+   ],
+   "type": "Postcentral gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-postcentral",
+   "labelValue": 2022
+  },
+  "ctx-rh-posteriorcingulate": {
+   "name": "Posterior cingulate cortex, right",
+   "system": "Cingulate cortex",
+   "rgb": [
+    220,
+    180,
+    220
+   ],
+   "type": "Posterior cingulate cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-posteriorcingulate",
+   "labelValue": 2023
+  },
+  "ctx-rh-precentral": {
+   "name": "Precentral gyrus, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    60,
+    20,
+    220
+   ],
+   "type": "Precentral gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-precentral",
+   "labelValue": 2024
+  },
+  "ctx-rh-precuneus": {
+   "name": "Precuneus, right",
+   "system": "Parietal lobe",
+   "rgb": [
+    160,
+    140,
+    180
+   ],
+   "type": "Precuneus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-precuneus",
+   "labelValue": 2025
+  },
+  "ctx-rh-rostralanteriorcingulate": {
+   "name": "Rostral anterior cingulate cortex, right",
+   "system": "Cingulate cortex",
+   "rgb": [
+    80,
+    20,
+    140
+   ],
+   "type": "Rostral anterior cingulate cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-rostralanteriorcingulate",
+   "labelValue": 2026
+  },
+  "ctx-rh-rostralmiddlefrontal": {
+   "name": "Rostral middle frontal gyrus, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    75,
+    50,
+    125
+   ],
+   "type": "Rostral middle frontal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-rostralmiddlefrontal",
+   "labelValue": 2027
+  },
+  "ctx-rh-superiorfrontal": {
+   "name": "Superior frontal gyrus, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    20,
+    220,
+    160
+   ],
+   "type": "Superior frontal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-superiorfrontal",
+   "labelValue": 2028
+  },
+  "ctx-rh-superiorparietal": {
+   "name": "Superior parietal cortex, right",
+   "system": "Parietal lobe",
+   "rgb": [
+    20,
+    180,
+    140
+   ],
+   "type": "Superior parietal cortex",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-superiorparietal",
+   "labelValue": 2029
+  },
+  "ctx-rh-superiortemporal": {
+   "name": "Superior temporal gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    140,
+    220,
+    220
+   ],
+   "type": "Superior temporal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-superiortemporal",
+   "labelValue": 2030
+  },
+  "ctx-rh-supramarginal": {
+   "name": "Supramarginal gyrus, right",
+   "system": "Parietal lobe",
+   "rgb": [
+    80,
+    160,
+    20
+   ],
+   "type": "Supramarginal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-supramarginal",
+   "labelValue": 2031
+  },
+  "ctx-rh-frontalpole": {
+   "name": "Frontal pole, right",
+   "system": "Frontal lobe",
+   "rgb": [
+    100,
+    0,
+    100
+   ],
+   "type": "Frontal pole",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-frontalpole",
+   "labelValue": 2032
+  },
+  "ctx-rh-temporalpole": {
+   "name": "Temporal pole, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    70,
+    70,
+    70
+   ],
+   "type": "Temporal pole",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-temporalpole",
+   "labelValue": 2033
+  },
+  "ctx-rh-transversetemporal": {
+   "name": "Transverse temporal gyrus, right",
+   "system": "Temporal lobe",
+   "rgb": [
+    150,
+    150,
+    200
+   ],
+   "type": "Transverse temporal gyrus",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-transversetemporal",
+   "labelValue": 2034
+  },
+  "ctx-rh-insula": {
+   "name": "Insula, right",
+   "system": "Insula",
+   "rgb": [
+    255,
+    192,
+    32
+   ],
+   "type": "Insula",
+   "mod": "Right",
+   "freesurfer": "ctx-rh-insula",
+   "labelValue": 2035
+  }
+ },
+ "byLabel": {
+  "2": "Left-Cerebral-White-Matter",
+  "3": "Left-Cerebral-Cortex",
+  "4": "Left-Lateral-Ventricle",
+  "5": "Left-Inf-Lat-Vent",
+  "6": "Left-Cerebellum-Exterior",
+  "7": "Left-Cerebellum-White-Matter",
+  "8": "Left-Cerebellum-Cortex",
+  "10": "Left-Thalamus",
+  "11": "Left-Caudate",
+  "12": "Left-Putamen",
+  "13": "Left-Pallidum",
+  "14": "3rd-Ventricle",
+  "15": "4th-Ventricle",
+  "16": "Brain-Stem",
+  "17": "Left-Hippocampus",
+  "18": "Left-Amygdala",
+  "24": "CSF",
+  "26": "Left-Accumbens-area",
+  "27": "Left-Substancia-Nigra",
+  "28": "Left-VentralDC",
+  "29": "Left-undetermined",
+  "30": "Left-vessel",
+  "31": "Left-choroid-plexus",
+  "41": "Right-Cerebral-White-Matter",
+  "42": "Right-Cerebral-Cortex",
+  "43": "Right-Lateral-Ventricle",
+  "44": "Right-Inf-Lat-Vent",
+  "45": "Right-Cerebellum-Exterior",
+  "46": "Right-Cerebellum-White-Matter",
+  "47": "Right-Cerebellum-Cortex",
+  "49": "Right-Thalamus",
+  "50": "Right-Caudate",
+  "51": "Right-Putamen",
+  "52": "Right-Pallidum",
+  "53": "Right-Hippocampus",
+  "54": "Right-Amygdala",
+  "58": "Right-Accumbens-area",
+  "59": "Right-Substancia-Nigra",
+  "60": "Right-VentralDC",
+  "61": "Right-undetermined",
+  "62": "Right-vessel",
+  "63": "Right-choroid-plexus",
+  "72": "5th-Ventricle",
+  "77": "WM-hypointensities",
+  "78": "Left-WM-hypointensities",
+  "79": "Right-WM-hypointensities",
+  "80": "non-WM-hypointensities",
+  "81": "Left-non-WM-hypointensities",
+  "82": "Right-non-WM-hypointensities",
+  "85": "Optic-Chiasm",
+  "1001": "ctx-lh-bankssts",
+  "1002": "ctx-lh-caudalanteriorcingulate",
+  "1003": "ctx-lh-caudalmiddlefrontal",
+  "1005": "ctx-lh-cuneus",
+  "1006": "ctx-lh-entorhinal",
+  "1007": "ctx-lh-fusiform",
+  "1008": "ctx-lh-inferiorparietal",
+  "1009": "ctx-lh-inferiortemporal",
+  "1010": "ctx-lh-isthmuscingulate",
+  "1011": "ctx-lh-lateraloccipital",
+  "1012": "ctx-lh-lateralorbitofrontal",
+  "1013": "ctx-lh-lingual",
+  "1014": "ctx-lh-medialorbitofrontal",
+  "1015": "ctx-lh-middletemporal",
+  "1016": "ctx-lh-parahippocampal",
+  "1017": "ctx-lh-paracentral",
+  "1018": "ctx-lh-parsopercularis",
+  "1019": "ctx-lh-parsorbitalis",
+  "1020": "ctx-lh-parstriangularis",
+  "1021": "ctx-lh-pericalcarine",
+  "1022": "ctx-lh-postcentral",
+  "1023": "ctx-lh-posteriorcingulate",
+  "1024": "ctx-lh-precentral",
+  "1025": "ctx-lh-precuneus",
+  "1026": "ctx-lh-rostralanteriorcingulate",
+  "1027": "ctx-lh-rostralmiddlefrontal",
+  "1028": "ctx-lh-superiorfrontal",
+  "1029": "ctx-lh-superiorparietal",
+  "1030": "ctx-lh-superiortemporal",
+  "1031": "ctx-lh-supramarginal",
+  "1032": "ctx-lh-frontalpole",
+  "1033": "ctx-lh-temporalpole",
+  "1034": "ctx-lh-transversetemporal",
+  "1035": "ctx-lh-insula",
+  "2001": "ctx-rh-bankssts",
+  "2002": "ctx-rh-caudalanteriorcingulate",
+  "2003": "ctx-rh-caudalmiddlefrontal",
+  "2005": "ctx-rh-cuneus",
+  "2006": "ctx-rh-entorhinal",
+  "2007": "ctx-rh-fusiform",
+  "2008": "ctx-rh-inferiorparietal",
+  "2009": "ctx-rh-inferiortemporal",
+  "2010": "ctx-rh-isthmuscingulate",
+  "2011": "ctx-rh-lateraloccipital",
+  "2012": "ctx-rh-lateralorbitofrontal",
+  "2013": "ctx-rh-lingual",
+  "2014": "ctx-rh-medialorbitofrontal",
+  "2015": "ctx-rh-middletemporal",
+  "2016": "ctx-rh-parahippocampal",
+  "2017": "ctx-rh-paracentral",
+  "2018": "ctx-rh-parsopercularis",
+  "2019": "ctx-rh-parsorbitalis",
+  "2020": "ctx-rh-parstriangularis",
+  "2021": "ctx-rh-pericalcarine",
+  "2022": "ctx-rh-postcentral",
+  "2023": "ctx-rh-posteriorcingulate",
+  "2024": "ctx-rh-precentral",
+  "2025": "ctx-rh-precuneus",
+  "2026": "ctx-rh-rostralanteriorcingulate",
+  "2027": "ctx-rh-rostralmiddlefrontal",
+  "2028": "ctx-rh-superiorfrontal",
+  "2029": "ctx-rh-superiorparietal",
+  "2030": "ctx-rh-superiortemporal",
+  "2031": "ctx-rh-supramarginal",
+  "2032": "ctx-rh-frontalpole",
+  "2033": "ctx-rh-temporalpole",
+  "2034": "ctx-rh-transversetemporal",
+  "2035": "ctx-rh-insula"
+ }
+}

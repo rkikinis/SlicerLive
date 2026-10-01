@@ -36,8 +36,10 @@ const MAX_GRID_CELLS = 1 << 23;
 
 export type RGBA = [number, number, number, number];
 
-/** One streamline: flat xyz triples (RAS mm) and a bundle id in [1, 255] selecting its palette colour. */
-export interface Strand { points: ArrayLike<number>; bundle?: number }
+/** One streamline: flat xyz triples (RAS mm) and a bundle id in [1, 255] selecting its palette colour.
+ *  `pointBundles`, when given, colours each piece separately: the piece ending at point i takes pointBundles[i]
+ *  (orientation colouring, as SlicerDMRI's "colour by orientation"); absent, the whole strand takes `bundle`. */
+export interface Strand { points: ArrayLike<number>; bundle?: number; pointBundles?: ArrayLike<number> }
 
 export interface FiberFieldOpts {
   /** Tube radius (mm). Default 0.2, as SlicerWGPU's add_fiber_strands. */
@@ -179,7 +181,8 @@ export class FiberField implements Field {
         if (Math.hypot(bx - ax, by - ay, bz - az) < 1e-6) continue;   // repeated point
         const o = n * 8;
         seg[o] = ax; seg[o + 1] = ay; seg[o + 2] = az;
-        seg[o + 4] = bx; seg[o + 5] = by; seg[o + 6] = bz; seg[o + 7] = bundle;
+        seg[o + 4] = bx; seg[o + 5] = by; seg[o + 6] = bz;
+        seg[o + 7] = s.pointBundles ? Math.min(PAL - 1, Math.max(1, Math.round(s.pointBundles[i]))) : bundle;
         grow(ax, ay, az); grow(bx, by, bz);
         ax = bx; ay = by; az = bz; n++;
       }

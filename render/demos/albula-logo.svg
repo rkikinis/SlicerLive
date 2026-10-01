@@ -1,0 +1,117 @@
+<!-- AUTO-GENERATED (do not hand-edit; see brand/regenerate.py): verbatim copy of the master.
+     The master is brand/albula-logo.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 650" width="100%" height="100%">
+  <defs>
+    <!-- Background Canvas Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#323232"/>
+      <stop offset="100%" stop-color="#242424"/>
+    </linearGradient>
+
+    <!-- Warm Dark Espresso Rock Surface -->
+    <linearGradient id="darkBrown" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4A3F34"/>
+      <stop offset="100%" stop-color="#2E261E"/>
+    </linearGradient>
+
+    <!-- Medium Brown Mountain Highlight Facet -->
+    <linearGradient id="medBrown" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#6E5E4E"/>
+      <stop offset="100%" stop-color="#4A3F34"/>
+    </linearGradient>
+
+    <!-- Gold Accent Gradient for Pass Road & Highlights -->
+    <linearGradient id="goldAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFE485"/>
+      <stop offset="60%" stop-color="#F8D764"/>
+      <stop offset="100%" stop-color="#DDAF32"/>
+    </linearGradient>
+
+    <!-- Soft Alpine Snow Cap Gradient -->
+    <linearGradient id="snowGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FBF9F5"/>
+      <stop offset="100%" stop-color="#E3DCCB"/>
+    </linearGradient>
+
+    <filter id="dropShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Dark Background Canvas -->
+  <rect width="800" height="650" rx="32" fill="url(#bgGrad)"/>
+
+  <!-- Main Logo Group -->
+  <g transform="translate(0, 20)">
+
+    <!-- Emblem Circular Base -->
+    <circle cx="400" cy="240" r="175" fill="#2A2724" stroke="#4A3F34" stroke-width="4" filter="url(#dropShadow)"/>
+
+    <!-- MOUNTAIN MASSIF GRAPHIC -->
+    <g id="mountain-group">
+      <!-- Background Peak Left -->
+      <path d="M 270,300 L 330,180 L 390,300 Z" fill="#3A3128"/>
+      <path d="M 330,180 L 390,300 L 330,300 Z" fill="#29221C"/>
+
+      <!-- Background Peak Right -->
+      <path d="M 410,300 L 470,170 L 530,300 Z" fill="#3A3128"/>
+      <path d="M 470,170 L 530,300 L 470,300 Z" fill="#29221C"/>
+
+      <!-- Main Center Peak (Albula Massif) - Light Side -->
+      <path d="M 400,100 L 260,340 L 350,230 Z" fill="url(#medBrown)"/>
+      <path d="M 400,100 L 350,230 L 400,340 Z" fill="url(#medBrown)"/>
+
+      <!-- Main Center Peak - Dark Side -->
+      <path d="M 400,100 L 400,340 L 470,240 Z" fill="url(#darkBrown)"/>
+      <path d="M 400,100 L 470,240 L 540,340 Z" fill="#2E261E"/>
+
+      <!-- Foreground Left Ridge -->
+      <path d="M 230,350 L 310,220 L 370,350 Z" fill="url(#medBrown)"/>
+      <path d="M 310,220 L 370,350 L 320,350 Z" fill="url(#darkBrown)"/>
+
+      <!-- Foreground Right Ridge -->
+      <path d="M 430,350 L 490,230 L 570,350 Z" fill="url(#darkBrown)"/>
+
+      <!-- Snow Caps -->
+      <path d="M 400,100 L 370,150 L 400,142 L 420,148 Z" fill="url(#snowGrad)"/>
+      <path d="M 400,100 L 420,148 L 400,142 Z" fill="#D6CCB8"/>
+
+      <path d="M 310,220 L 292,248 L 310,242 L 322,248 Z" fill="url(#snowGrad)"/>
+      <path d="M 470,170 L 452,198 L 470,192 L 485,198 Z" fill="url(#snowGrad)"/>
+
+      <!-- Winding Albula Pass Road (#F8D764) -->
+      <path d="M 400,200 
+               C 375,230 335,240 335,260 
+               C 335,280 465,290 465,315 
+               C 465,340 310,348 280,365
+               L 315,365
+               C 345,352 495,342 495,315
+               C 495,280 365,270 365,260
+               C 365,248 395,235 418,208 Z" 
+            fill="url(#goldAccent)"/>
+
+      <!-- Hairpin Pass Dash Dividers -->
+      <path d="M 395,212 C 382,226 358,240 355,252" stroke="#323232" stroke-width="3" stroke-linecap="round" fill="none"/>
+      <path d="M 360,266 C 380,275 440,285 445,302" stroke="#323232" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+      <path d="M 435,320 C 395,332 340,345 305,360" stroke="#323232" stroke-width="4" stroke-linecap="round" fill="none"/>
+    </g>
+
+    <!-- Accent Divider Line -->
+    <line x1="280" y1="440" x2="520" y2="440" stroke="#F8D764" stroke-width="2" stroke-linecap="round" opacity="0.8"/>
+
+    <!-- LOGO TEXT: ALBULA -->
+    <text x="400" y="505" 
+          font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" 
+          font-size="46" 
+          font-weight="800" 
+          letter-spacing="14" 
+          fill="#F8D764" 
+          text-anchor="middle">
+      ALBULA
+    </text>
+
+    <!-- Accent Dot -->
+    <circle cx="400" cy="535" r="4" fill="#4A3F34"/>
+
+  </g>
+</svg>

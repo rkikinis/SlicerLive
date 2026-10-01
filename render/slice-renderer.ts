@@ -31,6 +31,18 @@ struct U {
   fgParams : vec4<f32>,  // win, lev, opacity (0 = no foreground), compositing (0 alpha,1 reverse alpha,2 add,3 subtract)
   p2tLabel : mat4x4<f32>,// RAS -> label texture[0,1]
   labelParams : vec4<f32>, // opacity (0 = no label layer), lutEntries, fgLutMode (0 gray, 1 LUT row 1), _
+  // ── A SECOND segmentation overlay, so two networks' results can be read against each other in one
+  //    slice instead of by toggling between them. Each slot carries its OWN RAS->texture matrix: a
+  //    specialized network (ts:abdominal_muscles) segments only part of the study, so its labelmap
+  //    shares neither the dims nor the origin of the background volume, and addressing it through
+  //    the background's matrix would draw it in the wrong place.
+  p2tSegA : mat4x4<f32>,   // RAS -> overlay A texture[0,1]
+  p2tSegB : mat4x4<f32>,   // RAS -> overlay B texture[0,1]
+  segParams : vec4<f32>,   // modeB (0 = no second overlay), fillB, outlineB, transparentOutside
+  // ── MORE THAN TWO SEGMENTATIONS. The pass is drawn again per further pair, over the frame already
+  //    drawn, in overlay-only mode: no background, no foreground, no label layer, just the two
+  //    overlays as premultiplied color + alpha for the blend. mode.x = 1 selects it.
+  mode : vec4<f32>,        // overlayOnly, _, _, _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
@@ -47,6 +59,8 @@ struct U {
 @group(0) @binding(8) var t_lut : texture_2d<f32>;      // 256x2 colour LUTs: row 0 background, row 1 foreground (sampled over the W/L ramp)
 @group(0) @binding(9) var t_labelVol : texture_3d<f32>; // label volume (integer values stored as float)
 @group(0) @binding(10) var t_labelLut : texture_2d<f32>;// Nx1 colour table indexed by label value
+@group(0) @binding(11) var t_labelsB : texture_3d<u32>;  // second segmentation's labelmap
+@group(0) @binding(12) var t_paletteB : texture_2d<f32>; // and its own 256x2 palette
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -59,21 +73,50 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
-/** The overlay colour at a texture coordinate, from whichever source is configured. */
-fn ov_tex(t : vec3<f32>) -> vec4<f32> {
+/** Overlay A at a RAS point: label mode reads its own labelmap through its own matrix, otherwise
+ *  the pre-colored rgba volume through the background's. 0 outside that volume. */
+fn ovA_at(ras : vec3<f32>) -> vec4<f32> {
   if (u.size.z > 0.5) {
+    let t = (u.p2tSegA * vec4<f32>(ras, 1.0)).xyz;
+    if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
     let d = vec3<f32>(textureDimensions(t_labels));
     let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
     let lab = i32(textureLoad(t_labels, vi, 0).r);
     if (lab == 0) { return vec4<f32>(0.0); }
     return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
   }
-  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
-}
-fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return ov_tex(t);
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+}
+/** Overlay B: label mode only — the rgba form was never more than one binding. */
+fn ovB_at(ras : vec3<f32>) -> vec4<f32> {
+  if (u.segParams.x < 0.5) { return vec4<f32>(0.0); }
+  let t = (u.p2tSegB * vec4<f32>(ras, 1.0)).xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let d = vec3<f32>(textureDimensions(t_labelsB));
+  let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
+  let lab = i32(textureLoad(t_labelsB, vi, 0).r);
+  if (lab == 0) { return vec4<f32>(0.0); }
+  return textureLoad(t_paletteB, vec2<i32>(lab, 1), 0);
+}
+/** Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary OUTLINE
+ *  with independent opacities. The outline is screen-space (constant pixel width under zoom), drawn
+ *  in the segment's own color along its inner edge, at both label<->label and label<->background
+ *  boundaries -- hence the four neighbor samples the caller passes in. */
+fn seg_alpha(c : vec4<f32>, n0 : vec4<f32>, n1 : vec4<f32>, n2 : vec4<f32>, n3 : vec4<f32>, fillO : f32, outO : f32) -> f32 {
+  let fillA = clamp(c.a * fillO, 0.0, 1.0);
+  var outA = 0.0;
+  if (outO > 0.0) {
+    let e = max(max(distance(n0.rgb, c.rgb) + abs(n0.a - c.a), distance(n1.rgb, c.rgb) + abs(n1.a - c.a)),
+                max(distance(n2.rgb, c.rgb) + abs(n2.a - c.a), distance(n3.rgb, c.rgb) + abs(n3.a - c.a)));
+    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
+    outA = clamp(c.a * outO * edge, 0.0, 1.0);
+  }
+  return max(fillA, outA);
+}
+fn blend_seg(col : vec3<f32>, c : vec4<f32>, n0 : vec4<f32>, n1 : vec4<f32>, n2 : vec4<f32>, n3 : vec4<f32>, fillO : f32, outO : f32) -> vec3<f32> {
+  return mix(col, c.rgb, seg_alpha(c, n0, n1, n2, n3, fillO, outO));
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -81,21 +124,51 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let ras = u.origin.xyz + u.uvec.xyz * (uv.x - 0.5) + u.vvec.xyz * (0.5 - uv.y);
   let t4 = u.p2t * vec4<f32>(ras, 1.0);
   let tex = t4.xyz;
-  if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-  let val = textureSampleLevel(t_scalar, s_lin, tex, 0.0).r;
+  // OUTSIDE THE VOLUME. A 2D view wants opaque black -- it is the view's own background. The texture
+  // for the 3D slice quad wants alpha 0, so the quad's empty corners can be discarded instead of
+  // standing in front of the volume as a black rectangle. segParams.w picks which.
+  if (u.mode.x > 0.5) {
+    // OVERLAY-ONLY: the two overlays as premultiplied color and alpha, B over A, to be blended
+    // over the frame that is already there. Outside the volume nothing is drawn.
+    if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+    let du2 = u.uvec.xyz / u.size.x * 1.5;
+    let dv2 = u.vvec.xyz / u.size.y * 1.5;
+    var rgb = vec3<f32>(0.0);
+    var alpha = 0.0;
+    let a2 = ovA_at(ras);
+    if (a2.a > 0.0) {
+      alpha = seg_alpha(a2, ovA_at(ras + du2), ovA_at(ras - du2), ovA_at(ras + dv2), ovA_at(ras - dv2), u.params.z, u.params.w);
+      rgb = a2.rgb * alpha;
+    }
+    if (u.segParams.x > 0.5) {
+      let b2 = ovB_at(ras);
+      if (b2.a > 0.0) {
+        let ab = seg_alpha(b2, ovB_at(ras + du2), ovB_at(ras - du2), ovB_at(ras + dv2), ovB_at(ras - dv2), u.segParams.y, u.segParams.z);
+        rgb = b2.rgb * ab + rgb * (1.0 - ab);
+        alpha = ab + alpha * (1.0 - ab);
+      }
+    }
+    return vec4<f32>(srgb2physical(rgb), alpha);
+  }
+  if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, 1.0 - u.segParams.w); }
+  let s4 = textureSampleLevel(t_scalar, s_lin, tex, 0.0);
+  let val = s4.r;
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
+  if (u.size.w > 1.5) { col = s4.rgb; }                               // a color background (setBackgroundRGB)
+  else if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
   // ── foreground layer (Slicer's vtkImageBlend semantics per compositing mode) ──
   if (u.fgParams.z > 0.0) {
     let tf = (u.p2tFg * vec4<f32>(ras, 1.0)).xyz;
     if (all(tf >= vec3<f32>(0.0)) && all(tf <= vec3<f32>(1.0))) {
-      let fv = textureSampleLevel(t_fg, s_lin, tf, 0.0).r;
+      let f4 = textureSampleLevel(t_fg, s_lin, tf, 0.0);
+      let fv = f4.r;
       let fwin = max(u.fgParams.x, 1e-6);
       let fg = clamp((fv - (u.fgParams.y - fwin * 0.5)) / fwin, 0.0, 1.0);
       var fcol = vec3<f32>(fg);
-      if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
+      if (u.labelParams.z > 1.5) { fcol = f4.rgb; }                  // a color foreground (setForegroundRGB)
+      else if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
       let a = u.fgParams.z;
       let mode = i32(u.fgParams.w + 0.5);
       if (mode == 0) { col = mix(col, fcol, a); }                       // alpha: fg over bg
@@ -116,23 +189,23 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
       }
     }
   }
-  let ov = ov_tex(tex);
-  // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
-  // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
-  // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
-  // inner edge — at both label↔label and label↔background boundaries.
-  let fillA = clamp(ov.a * u.params.z, 0.0, 1.0);
-  var outA = 0.0;
-  if (u.params.w > 0.0) {
-    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
-    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
-    let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
-    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
-                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
-    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
-    outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
+  // ── segmentation overlays: A first, then B over it, each with its own opacities. Drawing them in
+  //    order rather than letting one win means a structure that only the second network found reads
+  //    against the first one's neighbors instead of replacing them.
+  let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
+  let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
+  // A transparent center contributes neither fill nor outline (both scale by c.a), so the four
+  // neighbor samples are only worth taking inside a segment.
+  let a = ovA_at(ras);
+  if (a.a > 0.0) {
+    col = blend_seg(col, a, ovA_at(ras + du), ovA_at(ras - du), ovA_at(ras + dv), ovA_at(ras - dv), u.params.z, u.params.w);
   }
-  col = mix(col, ov.rgb, max(fillA, outA));
+  if (u.segParams.x > 0.5) {
+    let b = ovB_at(ras);
+    if (b.a > 0.0) {
+      col = blend_seg(col, b, ovB_at(ras + du), ovB_at(ras - du), ovB_at(ras + dv), ovB_at(ras - dv), u.segParams.y, u.segParams.z);
+    }
+  }
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `;
@@ -201,10 +274,14 @@ export class SliceRenderer {
   private dev: GPUDevice;
   private format: GPUTextureFormat;
   private pipeline: GPURenderPipeline;
+  private overlayPipeline: GPURenderPipeline;
+  private overlayBind?: GPUBindGroup;
   private sampler: GPUSampler;
   private nnSampler: GPUSampler;
   private ubuf: GPUBuffer;
-  private u = new Float32Array(80);  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
+  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
+  // | p2tSegA(16) p2tSegB(16) segParams(4) -- 112 floats; every mat4 lands on a 16-byte boundary.
+  private u = new Float32Array(116);   // ...+ mode [112..115]
   private bind?: GPUBindGroup;
   // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
   // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
@@ -218,6 +295,13 @@ export class SliceRenderer {
   private overlay?: GPUTexture;
   private labels?: GPUTexture;
   private palette?: GPUTexture;
+  private labelsB?: GPUTexture;
+  private paletteB?: GPUTexture;
+  // Each overlay's own RAS->texture map, or undefined to borrow the background volume's. A
+  // segmentation of the whole study shares the background's geometry and can borrow it; one that
+  // covers a sub-volume cannot.
+  private segAp2t?: Mat4;
+  private segBp2t?: Mat4;
   private scalarTex?: GPUTexture;
   private fgTex?: GPUTexture;
   private lutTex?: GPUTexture;       // 256x2 rgba8: row 0 bg LUT, row 1 fg LUT
@@ -254,6 +338,14 @@ export class SliceRenderer {
       layout: "auto",
       vertex: { module: m, entryPoint: "vs_main" },
       fragment: { module: m, entryPoint: "fs_main", targets: [{ format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+    });
+    // The overlay-only pipeline: same shader in mode.x = 1, blended over what the frame pass drew.
+    // Premultiplied over, so a segment at 50% fill leaves half of the CT beneath it, as in the frame.
+    this.overlayPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: m, entryPoint: "vs_main" },
+      fragment: { module: m, entryPoint: "fs_main", targets: [{ format, blend: { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha" } } }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
@@ -309,25 +401,38 @@ export class SliceRenderer {
   /** Colour LUTs over the W/L ramp for the background (row 0) and foreground (row 1): 256 rgba8 entries
    *  each, or null for the grayscale ramp. */
   setLayerLUTs(bg: Uint8Array | null, fg: Uint8Array | null) {
-    if (!bg && !fg) { this.lutTex = undefined; this.u[35] = 0; this.u[58] = 0; if (this.scalarTex) this.rebind(); return; }
+    if (!bg && !fg) { this.lutTex = undefined; this.u[35] = 0; this.u[74] = 0; if (this.scalarTex) this.rebind(); return; }
     if (!this.lutTex) this.lutTex = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     const gray = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i; gray[i * 4 + 3] = 255; }
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.u[35] = bg ? 1 : 0; this.u[58] = fg ? 1 : 0;
+    this.u[35] = bg ? 1 : 0; this.u[74] = fg ? 1 : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  /** A COLOR BACKGROUND (fields.ts ImageFieldOpts.rgb24): its texture's red, green and blue are drawn as they are,
+   *  not windowed. Call after setLayerLUTs, which it overrides for the background; false leaves that as it was. */
+  setBackgroundRGB(on: boolean) {
+    if (!on) return;
+    this.u[35] = 2;
+    if (this.scalarTex) this.rebind();
+  }
+  /** A COLOR FOREGROUND, as setBackgroundRGB for the background. Call after setLayerLUTs. */
+  setForegroundRGB(on: boolean) {
+    if (!on) return;
+    this.u[74] = 2;
     if (this.scalarTex) this.rebind();
   }
   /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
    *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
   setLabelLayer(tex: GPUTexture | null, p2t: Mat4 | null, table: Uint8Array | null, opacity: number) {
     this.labelVolTex = tex ?? undefined;
-    if (p2t) this.u.set(p2t, 60);
+    if (p2t) this.u.set(p2t, 56);
     const n = table ? table.length / 4 : 0;
     if (table && n > 0) {
       if (!this.labelLutTex || this.labelLutTex.width !== n) { this.labelLutTex?.destroy(); this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }); }
       this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
     }
-    this.u[76] = tex && table ? opacity : 0; this.u[77] = n;
+    this.u[72] = tex && table ? opacity : 0; this.u[73] = n;
     if (this.scalarTex) this.rebind();
   }
 
@@ -386,6 +491,14 @@ export class SliceRenderer {
   setVolume(p2t: Mat4, rasLo: Vec3, rasHi: Vec3) {
     this.p2t = p2t; this.rasLo = rasLo; this.rasHi = rasHi;
     this.u.set(p2t, 0);
+    this.writeSegMats();
+  }
+
+  /** Publish both overlay matrices, falling back to the background volume's for an overlay that
+   *  did not bring one. Re-run whenever either side changes, so a borrowed matrix stays current. */
+  private writeSegMats() {
+    this.u.set(this.segAp2t ?? this.p2t, 76);
+    this.u.set(this.segBp2t ?? this.p2t, 92);
   }
 
   /** Set the grayscale scalar (r32float 3d) and, optionally, a colored overlay
@@ -400,18 +513,33 @@ export class SliceRenderer {
   /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
    *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
    *  nulls to go back to the rgba overlay. */
-  setLabelOverlay(labels: GPUTexture | null, palette: GPUTexture | null) {
+  setLabelOverlay(labels: GPUTexture | null, palette: GPUTexture | null, p2t?: Mat4 | null) {
     this.labels = labels ?? undefined;
     this.palette = palette ?? undefined;
+    this.segAp2t = p2t ?? undefined;
     this.u[34] = labels && palette ? 1 : 0;      // size.z = label-overlay mode
+    this.writeSegMats();
+    if (this.scalarTex) this.rebind();
+  }
+
+  /** A SECOND label overlay, drawn over the first with its own geometry and its own fill/outline
+   *  opacities. Two segmentations of one study -- a general network and a specialized one -- are
+   *  read against each other, and toggling between them is not reading them against each other.
+   *  Pass nulls to clear. Label form only: the rgba overlay was always a single binding. */
+  setLabelOverlayB(labels: GPUTexture | null, palette: GPUTexture | null, p2t?: Mat4 | null, fill = 0.5, outline = 1.0) {
+    this.labelsB = labels ?? undefined;
+    this.paletteB = palette ?? undefined;
+    this.segBp2t = p2t ?? undefined;
+    this.u[108] = labels && palette ? 1 : 0;    // segParams.x = second overlay present
+    this.u[109] = fill;
+    this.u[110] = outline;
+    this.writeSegMats();
     if (this.scalarTex) this.rebind();
   }
 
   private rebind() {
     if (!this.scalarTex) return;
-    this.bind = this.dev.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
+    const entries: GPUBindGroupEntry[] = [
         { binding: 0, resource: { buffer: this.ubuf } },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: this.scalarTex.createView() },
@@ -423,11 +551,15 @@ export class SliceRenderer {
         { binding: 8, resource: (this.lutTex ?? this.noLut()).createView() },
         { binding: 9, resource: (this.labelVolTex ?? this.noScalar()).createView() },
         { binding: 10, resource: (this.labelLutTex ?? this.noPalette()).createView() },
-      ],
-    });
+        { binding: 11, resource: (this.labelsB ?? this.noLabels()).createView() },
+        { binding: 12, resource: (this.paletteB ?? this.noPalette()).createView() },
+      ];
+    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries });
+    this.overlayBind = this.dev.createBindGroup({ layout: this.overlayPipeline.getBindGroupLayout(0), entries });
   }
 
   // Uniform float layout: p2t[0..15] origin[16..19] uvec[20..23] vvec[24..27] params[28..31] size[32..35]
+  //   p2tFg[36..51] fgParams[52..55] p2tLabel[56..71] labelParams[72..75] p2tSegA[76..91] p2tSegB[92..107] segParams[108..111]
   /** Select the anatomical plane and scrub position (0..1 along the plane normal, RAS bbox). */
   setPlane(orient: Orientation, offset01: number) {
     this.orient = orient;
@@ -619,17 +751,124 @@ export class SliceRenderer {
     // Aspect-correct so pixels are ISOTROPIC on a non-square viewport: the fitted span fills
     // the SMALLER dimension, the larger dimension shows more (letterbox). Pan/zoom fold in via
     // frameFor. Square viewports at zoom=1 with no pan reproduce the original fitted view exactly.
-    const { b, c, uS, vS } = this.frameFor(this.orient, this.offset01, w / h);
-    this.uSpanMm = uS; this.vSpanMm = vS; this.cX = c;
+    const f = this.frameFor(this.orient, this.offset01, w / h);
+    this.uSpanMm = f.uS; this.vSpanMm = f.vS; this.cX = f.c;
+    this.drawFrame(view, w, h, f, 0);
+  }
+
+  /**
+   * Allocate a texture that `renderPatientFrameInto` can draw into.
+   *
+   * THE CALLER DOES NOT CHOOSE THE FORMAT, because a caller that chooses it can choose wrong: the
+   * pipeline is built for one format, and an attachment in another fails validation and takes every
+   * view down ("color and depth targets from pass do not match pipeline"). That shipped once -- the
+   * app's cells use the canvas's preferred format, bgra8unorm-srgb on a Mac, and the call site had
+   * hardcoded rgba8unorm-srgb. A GPU test did not catch it, because the test picked both formats
+   * itself and they agreed with each other. So the choice is gone rather than documented.
+   */
+  makeSliceTarget(w: number, h: number): GPUTexture {
+    return this.dev.createTexture({
+      size: [w, h], format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+
+  /**
+   * The plane's frame in PATIENT space: the volume's own in-plane extent, centered on the scrubbed
+   * plane, with no pan and no zoom.
+   *
+   * This is the frame for the 3D slice quad, and it is deliberately NOT the 2D view's frame. The 2D
+   * view shows whatever the user zoomed to; the slice in 3D spans the volume. (Slicer keeps a second
+   * reslice/blend stack for its 3D slice model, but that began as a way to run the 3D texture at a
+   * lower resolution on the hardware of the time -- the reason here is only that the two have
+   * different extents.)
+   */
+  patientFrame(): { origin: Vec3; uvec: Vec3; vvec: Vec3 } {
+    const f = this.patientFrameFor(this.orient, this.offset01);
+    return {
+      origin: f.c,
+      uvec: [f.b.uDir[0] * f.uS, f.b.uDir[1] * f.uS, f.b.uDir[2] * f.uS],
+      vvec: [f.b.vDir[0] * f.vS, f.b.vDir[1] * f.vS, f.b.vDir[2] * f.vS],
+    };
+  }
+
+  private patientFrameFor(orient: Orientation, offset01: number): { b: PlaneBasis; c: Vec3; uS: number; vS: number } {
+    const b = this.basisOf(orient);
+    const eu = this.extentAlong(b.uDir), ev = this.extentAlong(b.vDir), en = this.extentAlong(b.nDir);
+    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const want = en.lo + Math.max(0, Math.min(1, offset01)) * (en.hi - en.lo);
+    const have = dot3(c, b.nDir);
+    for (let i = 0; i < 3; i++) c[i] += b.nDir[i] * (want - have);
+    // Re-center in plane on the volume's own extent (frameFor centers on the bbox, which for an
+    // oblique basis is not the same point).
+    const cu = dot3(c, b.uDir), cv = dot3(c, b.vDir);
+    const midU = (eu.lo + eu.hi) / 2, midV = (ev.lo + ev.hi) / 2;
+    for (let i = 0; i < 3; i++) c[i] += b.uDir[i] * (midU - cu) + b.vDir[i] * (midV - cv);
+    return { b, c, uS: eu.hi - eu.lo, vS: ev.hi - ev.lo };
+  }
+
+  /**
+   * Render the composite for the 3D slice quad and return the frame it used.
+   *
+   * ONE call for the picture and its geometry, because they must agree: the quad derives its texture
+   * coordinates by projecting world positions onto this same frame, so a frame computed separately
+   * is a misregistration waiting to happen.
+   */
+  renderPatientFrameInto(view: GPUTextureView, w: number, h: number): { origin: Vec3; uvec: Vec3; vvec: Vec3 } {
+    const f = this.patientFrameFor(this.orient, this.offset01);
+    this.drawFrame(view, w, h, f, 1);
+    return {
+      origin: f.c,
+      uvec: [f.b.uDir[0] * f.uS, f.b.uDir[1] * f.uS, f.b.uDir[2] * f.uS],
+      vvec: [f.b.vDir[0] * f.vS, f.b.vDir[1] * f.vS, f.b.vDir[2] * f.vS],
+    };
+  }
+
+  /** The frame the last draw used, so an overlay-only pass draws exactly over it. */
+  private lastFrame?: { frame: { b: PlaneBasis; c: Vec3; uS: number; vS: number }; transparentOutside: number };
+
+  /**
+   * MORE THAN TWO SEGMENTATIONS: draw the overlays currently set as A and B again, over the frame
+   * the last renderToView / renderPatientFrameInto drew into `view`, and nothing else. The caller
+   * sets the next pair with setLabelOverlay / setLabelOverlayB, calls this, and repeats. Ron, with
+   * four MOOSE results on one CT and the slices showing two of them: "the segmentations are messed
+   * up." The frame pass draws the first two; every further pair is one more of these.
+   */
+  renderOverlayPassInto(view: GPUTextureView, w: number, h: number) {
+    if (!this.lastFrame || !this.bind) return;
+    const { b, c, uS, vS } = this.lastFrame.frame;
+    this.u.set(this.p2t, 0);
+    this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;
+    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0;
+    this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0;
+    this.u[32] = w; this.u[33] = h;
+    this.u[111] = this.lastFrame.transparentOutside;
+    this.u[112] = 1;                                                                           // mode.x = overlay only
+    this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
+    this.u[112] = 0;
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "load", storeOp: "store" }] });
+    pass.setPipeline(this.overlayPipeline);
+    // The bind group was made for the main pipeline's layout; both pipelines are `layout: "auto"`
+    // over the same shader, so a bind group for the overlay pipeline's layout is made from the same
+    // entries. rebind() keeps both current.
+    pass.setBindGroup(0, this.overlayBind ?? this.bind); pass.draw(3); pass.end();
+    this.dev.queue.submit([enc.finish()]);
+  }
+
+  private drawFrame(view: GPUTextureView, w: number, h: number, frame: { b: PlaneBasis; c: Vec3; uS: number; vS: number }, transparentOutside: number) {
+    this.lastFrame = { frame, transparentOutside };
+    const { b, c, uS, vS } = frame;
     this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
     this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0; // uvec [20..23]
     this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0; // vvec [24..27]
     // params[28..30] set via setWindowLevel/setOverlayOpacity
     this.u[32] = w; this.u[33] = h;                                                            // size [32..35]
+    this.u[111] = transparentOutside;                                                          // segParams.w
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 - transparentOutside } }] });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bind!); pass.draw(3); pass.end();
     this.dev.queue.submit([enc.finish()]);
   }
@@ -685,9 +924,12 @@ struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     // from the low-res aspect, which matches (aspect is rw/rh ≈ vw/vh), so no correction is needed.
   }
 
-  async renderToRGBA(w: number, h: number): Promise<Uint8Array> {
+  /** `after`: more drawing into the same target before it is read (the app's further overlay passes). */
+  async renderToRGBA(w: number, h: number, after?: (view: GPUTextureView) => void): Promise<Uint8Array> {
     const target = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-    this.drawInto(target.createView(), w, h);
+    const tv = target.createView();
+    this.drawInto(tv, w, h);
+    after?.(tv);
     const bpr = Math.ceil((w * 4) / 256) * 256;
     const buf = this.dev.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.dev.createCommandEncoder();

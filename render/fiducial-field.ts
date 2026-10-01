@@ -24,6 +24,10 @@ export interface FiducialOpts {
   screenSpace?: boolean;
   /** GHOST compositing: the handle dims what's in front of it so it shines through. */
   ghost?: boolean;
+  /** A FLAT RING instead of a shaded ball (Ron, 2026-09-25, a point on the pancreas "barely visible. Make it a tiny black
+   *  ring"): the sphere's color as a band, a thin white rim outside it so it reads on dark slices and dark tissue, and a
+   *  clear center so what the point marks stays visible. */
+  ring?: boolean;
 }
 
 export class FiducialField implements Field {
@@ -36,6 +40,7 @@ export class FiducialField implements Field {
   private active = -1;                  // hovered/active sphere index (ghost mode: it goes full opacity)
   readonly clippable: boolean;
   readonly ghost: boolean;
+  readonly ring: boolean;
   readonly providesSkip: boolean;      // off in screen-space mode (radius varies with the camera)
   private screen: boolean;
   private sh: number;
@@ -53,6 +58,7 @@ export class FiducialField implements Field {
     this.light = opts.lightColor ?? [1, 1, 1];
     this.clippable = opts.clippable ?? true;
     this.ghost = opts.ghost ?? false;
+    this.ring = opts.ring ?? false;
     this.screen = opts.screenSpace ?? false;
     this.providesSkip = true;   // both modes provide a skip (screen-space uses the camera)
   }
@@ -80,6 +86,7 @@ export class FiducialField implements Field {
   uniformFloats(): number { return 12 + MAX * 4 * 2; } // params(4)+params2(4)+light(4) + spheres + colors
   sampleStep(): number { return 1.0; }
 
+  /** A field with no points has no place in the scene's bounds (`count` above says how many). */
   aabb(): [Vec3, Vec3] {
     if (this.n === 0) return [[-1, -1, -1], [1, 1, 1]];
     const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
@@ -176,6 +183,16 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   if (!found || best_depth <= 0.0) { return vec4<f32>(0.0); }
 
+  ${this.ring ? `
+  // RING: how close this RAY passes to the center, as a share of the radius -- the same for every sample along the ray,
+  // so the ring is flat on screen. Clear center, the markup's color as the band, a white rim outside.
+  ${this.screen ? `let rr = u_material.fid${s}_spheres[best_k].w * length(u_cam.eye.xyz - best_center) / max(u_cam.size.z, 1.0);` : `let rr = u_material.fid${s}_spheres[best_k].w;`}
+  let q = length(cross(best_center - wp_r, normalize(rd))) / max(rr, 1e-6);
+  if (q < 0.55) { return vec4<f32>(0.0); }
+  let ringRgb = select(vec3<f32>(1.0), best_color.rgb, q < 0.8);
+  ${this.ghost ? `let ringGhost = select(0.5, 1.0, best_k == i32(u_material.fid${s}_params2.w));` : `let ringGhost = 1.0;`}
+  let ringA = clamp(best_color.a, 0.0, 1.0) * ringGhost;
+  return vec4<f32>(srgb2physical(ringRgb) * ringA, ringA);` : ""}
   let to_wp = wp_r - best_center;
   var n_hat = to_wp / max(length(to_wp), 1e-6);
   if (dot(n_hat, -rd) < 0.0) { n_hat = -n_hat; }

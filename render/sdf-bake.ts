@@ -373,7 +373,18 @@ export class JfaSdfBaker {
    *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
    *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
    *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
-  refine() { this.sweep([2, 1], this.smoothSigma, 1.0); }
+  /**
+   * Settle-refine: extra JFA steps, the distance blur, and a COLOR-SEAM blur.
+   *
+   * `colorSigma` is separable from the geometry on purpose. The seam blur softens the step where two
+   * regions meet, which is right for a handful of large segments and too much for a parcellation
+   * where a hundred parcels all border each other -- Ron, on the FreeSurfer surface: "A little too
+   * washed together, but that is the direction I wanted to go." Lowering it sharpens the boundaries
+   * between parcels while leaving the surface just as smooth, because the distance blur is untouched.
+   *
+   * Default unchanged at 1.0, so SEGRoulette and the segmentation logic behave exactly as before.
+   */
+  refine(colorSigma = 1.0) { this.sweep([2, 1], this.smoothSigma, colorSigma); }
 
   /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
    *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the

@@ -148,7 +148,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // of the 3D view (opts.anchor) like the legacy demo — readable, and the hover target for the popup.
   const logo = document.createElement("div");
   logo.id = "sl-badge";
-  logo.title = "SlicerLive — visualization";
+  logo.title = "SlicerLive — visualization (click to pin the panel open)";
   logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;" +
     "align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;" +
     "border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);" +
@@ -436,8 +436,15 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // The opening state (openOnLoad): ends the first time the pointer leaves the popup, and until then
   // nothing else closes it.
   let startOpen = false;
+  // Pinning is invisible without this: the badge looks the same whether or not the panel is held open, so the
+  // border, glow and tooltip carry the state (Albula's d9c6e60, kept through the 2026-09-24 merge).
+  const setPinnedVisual = () => {
+    logo.style.borderColor = pinned ? "#9fe9ff" : "rgba(255,255,255,.12)";
+    logo.style.boxShadow = pinned ? "0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06),0 0 0 2px rgba(159,233,255,.55),0 0 16px rgba(159,233,255,.45)" : "0 10px 30px rgba(0,0,0,.55)";
+    logo.title = pinned ? "SlicerLive — pinned open (click to unpin)" : "SlicerLive — visualization (click to pin the panel open)";
+  };
   logo.onmouseenter = () => { logo.style.transform = "scale(1.08)"; show(); };
-  logo.onclick = () => { startOpen = false; pinned = !pinned; pinned ? show() : hide(); };
+  logo.onclick = () => { startOpen = false; pinned = !pinned; setPinnedVisual(); pinned ? show() : hide(); };
   logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned && !startOpen) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
   pop.onmouseleave = () => { startOpen = false; if (!pinned) hide(); };
   // A click ANYWHERE outside the badge/popup dismisses it (and unpins). Capture phase + contains()
@@ -446,7 +453,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     const t = e.target as Node;
     if (logo.contains(t) || pop.contains(t)) return;
     if (startOpen) return;      // the opening state survives a drag on the scene
-    pinned = false; hide();
+    pinned = false; setPinnedVisual(); hide();
   };
   document.addEventListener("pointerdown", onDocDown, true);
 

@@ -25,7 +25,7 @@ export async function readVolume(bytes: Uint8Array, fileName = ""): Promise<Volu
     const n = await parseNrrd(raw);
     return { dims: n.dims, ijkToRAS: n.ijkToRAS, data: n.data, dtype: zarrDtype(n.data), name: fileName.replace(/\.nrrd$/i, "") };
   }
-  throw new Error(fmt === "dicom" ? "DICOM: load the series through the DICOM browser" : `unrecognised volume format: ${fileName || "(bytes)"}`);
+  throw new Error(fmt === "dicom" ? "DICOM: load the series through the DICOM browser" : `unrecognized volume format: ${fileName || "(bytes)"}`);
 }
 
 export function zarrDtype(a: ArrayBufferView): string {
