@@ -15,6 +15,7 @@ import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
 import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
 import { invertRowMajor } from "./transforms.ts";
 import { frameIsCurrent, joinSequence } from "./sequences.ts";
+import { growDevice, growFromSeeds } from "./grow-from-seeds.ts";
 
 let segSeq = 0;
 // Slicer default new-segment colours (GenericAnatomyColors sequence, from vtkSegment defaults).
@@ -79,14 +80,29 @@ export interface EffectParams {
 }
 
 /** Apply an effect, materialize the new labelmap, patch the segmentation node. Returns the segment's voxel count. */
-export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId: string, effect: "threshold" | "autoThreshold" | "islands" | "smoothing" | "margin" | "logical", params: EffectParams): Promise<{ voxels: number; threshold?: number }> {
+export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId: string, effect: "threshold" | "autoThreshold" | "islands" | "smoothing" | "margin" | "logical" | "growFromSeeds", params: EffectParams): Promise<{ voxels: number; threshold?: number; ms?: number }> {
   const seg = live.nodes.get(segId); if (!seg?.zarr) throw new Error("no segmentation " + segId);
   const dims = seg.dims as [number, number, number];
   const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
   const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
 
-  let out: Uint8Array, threshold: number | undefined;
-  if (effect === "threshold" || effect === "autoThreshold") {
+  let out: Uint8Array, threshold: number | undefined, ms: number | undefined;
+  if (effect === "growFromSeeds") {
+    // EVERY SEGMENT'S STROKES COMPETE (logic/grow-from-seeds.ts), inside a box around them; outside it nothing changes.
+    // Undo puts the strokes back (Ron, 2026-10-01: "Do we have grow from seed in the editor? That would do the job.").
+    const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
+    const srcNode = srcId ? live.nodes.get(srcId) : undefined;
+    if (!srcNode?.zarr) throw new Error("grow from seeds needs the scan the segmentation was drawn on");
+    const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
+    const r = await growFromSeeds(await growDevice(), labelmap, src.data as ArrayLike<number>, dims);
+    out = new Uint8Array(labelmap);
+    const [nx, ny] = dims, { lo, hi } = r.box;
+    for (let z = lo[2]; z < hi[2]; z++) for (let y = lo[1]; y < hi[1]; y++) {
+      const row = (z * ny + y) * nx;
+      for (let x = lo[0]; x < hi[0]; x++) out[row + x] = r.labels[row + x];
+    }
+    ms = r.ms;
+  } else if (effect === "threshold" || effect === "autoThreshold") {
     const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
     const srcNode = srcId ? live.nodes.get(srcId) : undefined;
     if (!srcNode?.zarr) throw new Error("threshold needs a source volume");
@@ -110,7 +126,7 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
   markEdited(live, segId);
   invalidatePaintCache(segId);
   let voxels = 0; for (let i = 0; i < out.length; i++) if (out[i] === params.segment) voxels++;
-  return { voxels, threshold };
+  return { voxels, threshold, ms };
 }
 
 function spacingFromIjkToRAS(m: number[]): [number, number, number] {
@@ -397,4 +413,37 @@ export function createSegmentationFromBuilt(
   live.write({ op: "put", id: segId, node });
   joinSequence(live, segId);
   return { segId, segments: built.segments.length };
+}
+
+/**
+ * GROW AN OUTLINE FROM STROKES INTO A SEGMENTATION OF ITS OWN -- the Diffusion module's tumor outline (Ron, 2026-10-01:
+ * "Do we have grow from seed in the editor? That would do the job"; mockup diffusion-workflow-v4). Every segment of
+ * `seedsId` competes (logic/grow-from-seeds.ts), and the grown `keep` segment becomes the label map of the result: made
+ * on the first call, replaced on the next. The strokes stay as they are, so more strokes and another grow start again
+ * from all of them -- which an in-place grow (applyEffect "growFromSeeds") cannot do, since it turns strokes into fill.
+ */
+export async function growIntoSegmentation(live: LiveScene, store: LocalBlobStore, seedsId: string, keep: number,
+  o: { resultId?: string; name: string; color: [number, number, number] }): Promise<{ segId: string; voxels: number; ms: number }> {
+  const seeds = live.nodes.get(seedsId); if (!seeds?.zarr) throw new Error("the strokes are gone (their segmentation was removed)");
+  const srcId = ((seeds.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
+  const srcNode = srcId ? live.nodes.get(srcId) : undefined;
+  if (!srcNode?.zarr) throw new Error("growing needs the scan the strokes were drawn on");
+  const dims = seeds.dims as [number, number, number];
+  const lab = await fetchZarrVolumeNative(live.blobBase(), seeds.zarr as ZarrDesc);
+  const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
+  const r = await growFromSeeds(await growDevice(), lab.data as ArrayLike<number>, src.data as ArrayLike<number>, dims);
+  const out = new Uint8Array(r.labels.length);
+  let voxels = 0;
+  for (let i = 0; i < out.length; i++) if (r.labels[i] === keep) { out[i] = 1; voxels++; }
+  if (o.resultId && live.nodes.get(o.resultId)) {
+    const { desc, blobs } = await volumeToZarr(out, dims, "|u1");
+    store.add(blobs);
+    live.write({ op: "patch", id: o.resultId, path: "#/zarr", value: desc });
+    markEdited(live, o.resultId);
+    invalidatePaintCache(o.resultId);
+    return { segId: o.resultId, voxels, ms: r.ms };
+  }
+  const made = await createSegmentationFromLabelmap(live, store, srcId, out, [{ labelValue: 1, name: o.name, color: o.color }], { name: o.name });
+  markEdited(live, made.segId);
+  return { segId: made.segId, voxels, ms: r.ms };
 }

@@ -26,7 +26,7 @@ import { invalidatePaintCache } from "../../logic/segmentation-editor.ts";
 interface Hooks {
   __createSegmentation: (sourceImageId: string) => Promise<{ segId: string; segment: number }>;
   __addSegment: (segId: string) => number;
-  __applyEffect: (segId: string, effect: string, params: Record<string, unknown>) => Promise<{ voxels: number; threshold?: number }>;
+  __applyEffect: (segId: string, effect: string, params: Record<string, unknown>) => Promise<{ voxels: number; threshold?: number; ms?: number }>;
   __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => void;
   __volumeList: () => { imageId: string; name: string }[];
   __segmentStats: (segId: string) => Promise<{ labelValue: number; voxels: number; volumeMm3: number }[]>;
@@ -111,9 +111,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   }
   async function effect(name: string, params: Record<string, unknown>) {
     const id = await ensureSeg(); if (!id) return;
-    status(`${name}…`);
+    status(name === "growFromSeeds" ? "Growing from the strokes…" : `${name}…`);
     const r = await g().__applyEffect(id, name, { segment: active, ...params });
-    status(`${name}: ${r.voxels.toLocaleString()} voxels${r.threshold !== undefined ? ` (threshold ${r.threshold.toFixed(0)})` : ""}`);
+    const said = name === "growFromSeeds" ? "Grown from the strokes" : name;
+    status(`${said}: ${r.voxels.toLocaleString()} voxels${r.threshold !== undefined ? ` (threshold ${r.threshold.toFixed(0)})` : ""}${r.ms !== undefined ? ` in ${(r.ms / 1000).toFixed(1)} s` : ""}`);
     render();
   }
   /** Every effect button reports on itself (Ron, 2026-09-22: "immediate visual feedback … for every button"). */
@@ -188,6 +189,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <div class="sl-row"><label>Islands</label><button class="sl-eff-largest" title="Keep the largest connected piece of this structure; remove the rest">Keep largest</button><button class="sl-eff-small" title="Remove pieces smaller than 10 voxels">Remove small</button></div>
       <div class="sl-row"><label>Smoothing</label><button class="sl-eff-median">Median</button><button class="sl-eff-open">Open</button><button class="sl-eff-close">Close</button></div>
       <div class="sl-row"><label>Margin (voxels)</label><input class="sl-margin" type="number" value="2" step="1" style="width:48px" title="How far to grow or shrink, in voxels of this volume"><button class="sl-eff-grow">Grow</button><button class="sl-eff-shrink">Shrink</button></div>
+      <div class="sl-row"><label>From strokes</label><button class="sl-eff-seeds" title="Fills each structure out to its edges from a few painted strokes. Paint strokes inside the structure, and with a second segment in what surrounds it, then press. Undo puts the strokes back.">Grow from seeds</button></div>
       <details class="sl-advanced"><summary>Advanced</summary>
         <div class="sl-row"><label>Logical (label no.)</label><input class="sl-other" type="number" value="2" step="1" style="width:60px"><button class="sl-eff-union">∪</button><button class="sl-eff-sub">−</button><button class="sl-eff-int">∩</button></div>
         <div class="sl-row"><button class="sl-eff-stats">Statistics</button></div><div class="sl-seg-stats"></div>
@@ -222,6 +224,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     onEffect($(".sl-eff-close"), "smoothing", () => ({ smooth: "close", radiusVoxels: 1 }));
     onEffect($(".sl-eff-grow"), "margin", () => ({ marginMm: Math.abs(num(".sl-margin")) * sp }));
     onEffect($(".sl-eff-shrink"), "margin", () => ({ marginMm: -Math.abs(num(".sl-margin")) * sp }));
+    onEffect($(".sl-eff-seeds"), "growFromSeeds", () => ({}));
     onEffect($(".sl-eff-union"), "logical", () => ({ logical: "union", other: num(".sl-other") }));
     onEffect($(".sl-eff-sub"), "logical", () => ({ logical: "subtract", other: num(".sl-other") }));
     onEffect($(".sl-eff-int"), "logical", () => ({ logical: "intersect", other: num(".sl-other") }));

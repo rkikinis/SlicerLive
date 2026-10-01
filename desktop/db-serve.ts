@@ -33,6 +33,9 @@ import { picturesFolder } from "./pictures.ts";
 import { isAbsolute, join, normalize } from "jsr:@std/path@1";
 import { parseIni } from "../logic/settings.ts";
 import { readSettings, resolveSettingsPath, writeSettings } from "./settings-file.ts";
+import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
+import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
+import { chooseFolder, chosenFolder } from "./choose-folder.ts";
 
 const SECTION = "Database";
 
@@ -42,6 +45,8 @@ export interface RegisteredDb {
   path: string;
   exists: boolean;
   current: boolean;
+  /** What the database says about itself (desktop/db-create.ts), when it has said anything. */
+  description?: DbDescription;
 }
 
 async function ini(galleryRoot?: string) {
@@ -67,7 +72,8 @@ export async function registeredDatabases(galleryRoot?: string): Promise<Registe
     try {
       exists = Deno.statSync(join(path, "ctkDICOM.sql")).isFile;
     } catch { /* not there, or not readable */ }
-    out.push({ id, path, exists, current: id === current });
+    const description = exists ? await readDescription(path) : undefined;
+    out.push({ id, path, exists, current: id === current, ...(description ? { description } : {}) });
   }
   // A single registered database is current whether or not anything said so.
   if (out.length === 1) out[0].current = true;
@@ -128,11 +134,156 @@ const FEATURES = [
   "cohorts",       // GET /_db/<id>/_cohorts; PUT /_db/<id>/_cohort/<name> {add, remove}; DELETE /_db/<id>/_cohort/<name>
   "audit",
   "checkpoints",
+  "create",        // POST /_db/_create {name, token?, ...description}; POST /_db/_register {token, name?}
+  "describe",      // GET/PUT /_db/<id>/_description
+  "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
+  "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
+  "import",        // POST /_db/<id>/_import {token} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
 ];
+
+/** Imports running or finished in this process, by job id: their progress, then their result. Finished ones go after an hour. */
+const imports = new Map<string, { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number }>();
+/** ONE IMPORT AT A TIME PER DATABASE (critic, 2026-10-01, findings 1 and 15): the second waits, then sees what the first added. */
+const importQueue = new Map<string, Promise<unknown>>();
+const JOB = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function startImport(dbId: string, dbPath: string, files: () => Promise<{ files: string[]; left: { file: string; reason: string }[] }>, opts: { move?: boolean; after?: () => Promise<void> } = {}): string {
+  const now = Date.now();
+  for (const [k, r] of imports) if (r.ended && now - r.ended > 3600_000) imports.delete(k);
+  const job = crypto.randomUUID();
+  const rec: { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number } =
+    { db: dbId, progress: { phase: "reading", files: 0, read: 0, dicom: 0, series: 0, seriesDone: 0 }, started: now };
+  imports.set(job, rec);
+  const prev = importQueue.get(dbPath) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(async () => {
+    try {
+      const { files: list, left } = await files();
+      rec.progress.files = list.length;
+      rec.result = await importFiles(dbPath, list, { move: opts.move, left, onProgress: (p) => { rec.progress = p; } });
+      const w = icloudWarning(dbPath);
+      if (w && rec.result.series.length) rec.result.notes.push(w);
+    } catch (e) {
+      rec.error = (e as Error).message;
+    } finally {
+      await opts.after?.().catch(() => {});
+      rec.progress.phase = "done";
+      rec.ended = Date.now();
+    }
+  });
+  importQueue.set(dbPath, run);
+  run.finally(() => { if (importQueue.get(dbPath) === run) importQueue.delete(dbPath); });
+  return job;
+}
+
+/** Staging folders of uploads never followed by an import, older than a day: patient files nobody would find (finding 17). */
+async function clearStaleUploads(dbPath: string): Promise<void> {
+  try {
+    for await (const e of Deno.readDir(`${dbPath}/${IMPORT_FOLDER}`)) {
+      const p = `${dbPath}/${IMPORT_FOLDER}/${e.name}`;
+      const st = await Deno.stat(p).catch(() => null);
+      if (st?.mtime && Date.now() - st.mtime.getTime() > 86400_000) await Deno.remove(p, { recursive: true }).catch(() => {});
+    }
+  } catch { /* no staging folder */ }
+}
 
 export async function handleDbRequest(req: Request, galleryRoot?: string): Promise<Response | null> {
   const url = new URL(req.url);
   if (url.pathname !== "/_db" && !url.pathname.startsWith("/_db/")) return null;
+
+  const jsonBody = async () => await req.json().catch(() => ({})) as Record<string, unknown>;
+  const noStore = { headers: { "cache-control": "no-store" } };
+
+  // POST /_db/_choose-folder {prompt} -- macOS's folder dialog (desktop/choose-folder.ts); a token, never a path in.
+  if (url.pathname === "/_db/_choose-folder" && req.method === "POST") {
+    try {
+      const b = await jsonBody();
+      const c = await chooseFolder(String(b.prompt ?? "Choose a folder"));
+      if (!c) return Response.json({ cancelled: true }, noStore);
+      const hasDatabase = await Deno.stat(`${c.path}/ctkDICOM.sql`).then((x) => x.isFile, () => false);
+      return Response.json({ ...c, hasDatabase }, noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+
+  // GET /_db/_folder/<token>/_list | /_db/_folder/<token>/<rel> -- the files of a chosen folder, read only, for viewing
+  // without adding (Load / Save with "Also add to" unticked).
+  const fv = /^\/_db\/_folder\/([0-9a-f-]{36})\/(.+)$/.exec(url.pathname);
+  if (fv && req.method === "GET") {
+    const c = chosenFolder(fv[1]);
+    if (!c) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+    try {
+      if (fv[2] === "_list") {
+        const { files, left } = await filesUnder(c.path);
+        return Response.json({ name: c.name, path: c.path, files: files.map((f) => f.slice(c.path.length + 1)), left }, noStore);
+      }
+      const safe = normalize("/" + decodeURIComponent(fv[2])).slice(1);
+      if (!safe || safe.startsWith("..")) return Response.json({ error: "bad path" }, { status: 400 });
+      // THE REAL PATH, not the written one: a link inside the chosen folder must not serve a file outside it (finding 13).
+      const real = await Deno.realPath(`${c.path}/${safe}`);
+      const root = await Deno.realPath(c.path);
+      if (!real.startsWith(root + "/")) return Response.json({ error: "outside the chosen folder" }, { status: 403 });
+      return await serveDir(new Request(new URL("/" + safe.split("/").map(encodeURIComponent).join("/"), url.origin), req), { fsRoot: c.path, quiet: true });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: e instanceof Deno.errors.NotFound ? 404 : 400 });
+    }
+  }
+
+  // POST /_db/_create {name, token?, holds, patientData, approval, contact, source} -- a new, empty database, registered.
+  // Without a token it goes to "Albula Databases" in the home folder (Ron, 2026-10-01), in a folder named after it.
+  // POST /_db/_register {token, name?} -- a folder that already holds a database, registered as it is.
+  if ((url.pathname === "/_db/_create" || url.pathname === "/_db/_register") && req.method === "POST") {
+    try {
+      const b = await jsonBody();
+      const taken = (await registeredDatabases(galleryRoot)).map((d) => d.id);
+      const chosen = b.token ? chosenFolder(String(b.token)) : undefined;
+      if (b.token && !chosen) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+      const registered = await registeredDatabases(galleryRoot);
+      const hasIndex = (p: string) => Deno.stat(`${p}/ctkDICOM.sql`).then((x) => x.isFile, () => false);
+      let path: string, description: DbDescription | undefined, warning: string | undefined;
+      if (url.pathname === "/_db/_register") {
+        if (!chosen) return Response.json({ error: "choose the database folder first" }, { status: 400 });
+        path = chosen.path;
+        if (!(await hasIndex(path))) return Response.json({ error: "that folder holds no DICOM database (no ctkDICOM.sql)" }, { status: 400 });
+        if (registered.some((d) => d.path === path)) return Response.json({ error: "that database is already in the list" }, { status: 409 });
+        // ITS DESCRIPTION IS LEFT AS IT IS (critic, 2026-10-01, finding 3): one that does not pass the checker is not
+        // replaced -- the person's approval number and contact were lost that way -- and only a database with no
+        // description file at all gets one, naming it.
+        description = await readDescription(path);
+        const fileThere = await Deno.stat(`${path}/${DESCRIPTION_FILE}`).then(() => true, () => false);
+        if (!description) {
+          description = cleanDescription({ name: String(b.name ?? chosen.name) });
+          if (fileThere) warning = "Its description file could not be read and was left as it is; Edit shows a new one.";
+          else await writeDescription(path, description).catch(() => {});
+        }
+      } else {
+        description = cleanDescription(b);
+        const folderName = description.name.replace(/[\/:]/g, "-").replace(/^\.+/, "").trim() || "Database";
+        // NOT INSIDE ANOTHER DATABASE (finding 10): its audit would count the new one's files as orphans from then on.
+        if (chosen && await hasIndex(chosen.path)) return Response.json({ error: "that folder already holds a DICOM database; use “Add an existing database folder” for it, or choose another folder" }, { status: 400 });
+        path = chosen ? chosen.path : `${defaultDatabasesFolder()}/${folderName}`;
+        if (chosen && (await Array.fromAsync(Deno.readDir(path))).some((e) => !e.name.startsWith("."))) path = `${path}/${folderName}`;
+        const inside = registered.find((d) => path.startsWith(d.path.replace(/\/+$/, "") + "/"));
+        if (inside) return Response.json({ error: `that folder is inside the database “${inside.description?.name ?? inside.id}”; choose a folder outside it` }, { status: 400 });
+        await createDatabase(path, description);
+      }
+      if (registered.some((d) => d.path === path)) return Response.json({ error: "that database is already in the list" }, { status: 409 });
+      const id = idFor(description.name, taken);
+      const list = await updateDatabases(galleryRoot, { register: { id, path } });
+      const w = [warning, icloudWarning(path)].filter(Boolean).join(" ");
+      return Response.json({ id, path, databases: list, features: FEATURES, ...(w ? { warning: w } : {}) }, noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 400 });
+    }
+  }
+
+  // GET /_db/_import/<job> -- an import's progress, then its result.
+  const ij = /^\/_db\/_import\/([0-9a-f-]{36})$/.exec(url.pathname);
+  if (ij && req.method === "GET") {
+    const rec = imports.get(ij[1]);
+    if (!rec) return Response.json({ error: "no such import" }, { status: 404 });
+    return Response.json({ db: rec.db, progress: rec.progress, result: rec.result, error: rec.error, seconds: Math.round((Date.now() - rec.started) / 1000) }, noStore);
+  }
 
   if (url.pathname === "/_db") {
     if (req.method === "PUT" || req.method === "POST") {
@@ -265,6 +416,61 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       await Deno.remove(`${dir}/${d.file}`).catch(() => {});
       await Deno.remove(`${dir}/${d.file}.json`).catch(() => {});
     }
+  }
+
+  // GET/PUT /_db/<id>/_description -- what the database says about itself (Ron: "option to edit might be nice").
+  const desc = /^\/_db\/([^/]+)\/_description$/.exec(url.pathname);
+  if (desc && (req.method === "GET" || req.method === "PUT")) {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(desc[1]));
+    // Only where a database IS: a path registered by hand that holds none gets no file written into it (finding 14).
+    if (!db || !db.exists) return Response.json({ error: "no such database" }, { status: 404 });
+    if (req.method === "GET") return Response.json({ description: db.description ?? null }, noStore);
+    try {
+      await writeDescription(db.path, cleanDescription(await jsonBody()));
+      return Response.json({ description: await readDescription(db.path) }, noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 400 });
+    }
+  }
+
+  // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (DICOM files…, a drop), waiting in the staging folder.
+  // POST /_db/<id>/_import {token} | {upload: <job>} -- add a chosen folder, or the uploads, to this database.
+  const up = /^\/_db\/([^/]+)\/_upload\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([0-9]{1,7})$/.exec(url.pathname);
+  const im = /^\/_db\/([^/]+)\/_import$/.exec(url.pathname);
+  if ((up || im) && req.method === "POST") {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent((up ?? im)![1]));
+    if (!db || !db.exists) return Response.json({ error: "no such database" }, { status: 404 });
+    if (up) {
+      const dir = `${db.path}/${IMPORT_FOLDER}/${up[2]}`;
+      try {
+        await Deno.mkdir(dir, { recursive: true });
+        if (req.body) await Deno.writeFile(`${dir}/${up[3]}`, req.body);   // streamed to disk, not held whole in memory
+        else await Deno.writeFile(`${dir}/${up[3]}`, new Uint8Array());
+        return Response.json({ ok: true });
+      } catch (e) {
+        return Response.json({ error: (e as Error).message }, { status: 500 });
+      }
+    }
+    const b = await jsonBody();
+    if (b.token) {
+      const c = chosenFolder(String(b.token));
+      if (!c) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+      if (c.path === db.path || c.path.startsWith(db.path + "/")) return Response.json({ error: "that folder is inside the database already" }, { status: 400 });
+      // EVERY DATABASE'S OWN FOLDER IS LEFT OUT of the walk (finding 11): a chosen folder that holds one (the home
+      // folder, "Albula Databases") would otherwise read it whole and pull another database's scans in.
+      const dbFolders = (await registeredDatabases(galleryRoot)).map((d) => d.path);
+      await clearStaleUploads(db.path);
+      return Response.json({ job: startImport(db.id, db.path, () => filesUnder(c.path, dbFolders)) }, noStore);
+    }
+    if (typeof b.upload === "string" && JOB.test(b.upload)) {
+      const dir = `${db.path}/${IMPORT_FOLDER}/${b.upload}`;
+      await clearStaleUploads(db.path);
+      return Response.json({ job: startImport(db.id, db.path, () => filesUnder(dir), { move: true, after: async () => {
+        await Deno.remove(dir, { recursive: true });
+        await Deno.remove(`${db.path}/${IMPORT_FOLDER}`).catch(() => {});   // the staging folder too, when no other upload waits in it
+      } }) }, noStore);
+    }
+    return Response.json({ error: "a chosen folder's token, or an upload, is required" }, { status: 400 });
   }
 
   // THE SCENE STORE: /_db/<id>/_scenes and /_db/<id>/_scene/<uid> (desktop/scenes.ts).

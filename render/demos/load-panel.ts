@@ -25,6 +25,8 @@ import { volumeForSeg } from "../../logic/seg-placement.ts";
 import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../../logic/segmentation-editor.ts";
 import { keepScroll } from "./panel-scroll.ts";
 import { openFloatingWindow } from "./floating-window.ts";
+import { chooseFolder, dbName, listDatabases, openDatabasesWindow } from "./databases-window.ts";
+import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { freesurferStructureByName, lookupStructure, usesFreesurferNumbering } from "../../logic/segment-naming.ts";
 import { segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
@@ -210,6 +212,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const b = rasBounds(vol.dims, vol.ijkToRAS);
     opts.onLoaded?.({ name: vol.name ?? fileName, imageId: r.imageId, source, rasLo: b.lo, rasHi: b.hi, ijkToRAS: vol.ijkToRAS });
   }
+  // FOR EXTENSIONS (sdk/albula.ts openDicomDatabase, openLoadFromDisk): the Diffusion module's checklist sends the resident
+  // here rather than repeating these controls (Ron, 2026-10-01: "load save module has all that is needed"). Registered
+  // when the app starts, not when this panel is first shown: a resident who goes straight to Diffusion has never opened
+  // Load / Save (found in the browser pane, 2026-10-01). They show the panel first, which mounts it.
+  let openDatabaseFromOutside: (() => void) | undefined, showLoadFromDisk: (() => void) | undefined;
+  (globalThis as unknown as { __openDicomDatabase?: () => void }).__openDicomDatabase = () => { void shell.showPanel("add-data").then(() => openDatabaseFromOutside?.()); };
+  (globalThis as unknown as { __openLoadFromDisk?: () => void }).__openLoadFromDisk = () => { void shell.showPanel("add-data").then(() => showLoadFromDisk?.()); };
+  /** DICOM files that arrived (a dropped folder): viewed, and added to the database when "Also add to" is ticked. Set by the panel. */
+  let dicomFilesArrived: ((files: File[]) => Promise<void>) | undefined;
   async function loadFiles(files: FileList | File[]): Promise<void> {
     const list = Array.from(files);
     // A SCENE FILE DROPPED IN -- `scene.mrson.json` out of a transport folder (SCENE-DESIGN §7), with
@@ -383,12 +394,17 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <div class="sl-row">
         <button class="sl-primary" data-act="open" title="Open a single volume file already on disk: NRRD or NIfTI, gzipped or not.">Volume file…</button>
         <button data-act="dicom-files" title="Pick individual DICOM files — useful for one series, or when a folder holds more than you want.">DICOM files…</button>
-        <button data-act="dicom-dir" title="Read a folder of DICOM files that is not in the database. The folder is scanned; nothing is imported or indexed.">DICOM folder…</button>
+        <button data-act="dicom-dir" title="A folder of DICOM scans (from a disc, a USB stick, an export): the scans in it are listed to look at, and added to the database below when that is ticked.">DICOM folder…</button>
+      </div>
+      <div class="sl-row sl-add-row" title="DICOM scans loaded from disk are also copied into this database, so they are there next time, after the disc or stick is gone. Volume files (NRRD, NIfTI) are not DICOM and are not added.">
+        <label><input type="checkbox" class="sl-add-db" checked> Also add to</label>
+        <select class="sl-add-db-which" style="min-width:0;flex:1"></select>
       </div>
       </div>
       <div class="sl-load-db" hidden>
       <div class="sl-row">
         <button class="sl-primary" data-act="dicom-db" title="Browse the indexed DICOM database and load a series. This is the usual way in when working on a study.">DICOM database…</button>
+        <button data-act="databases" title="Which databases there are, what each holds, which one opens by default; make a new one.">Databases…</button>
         <span class="sl-scene-slot"></span>
       </div>
       <div class="sl-row"><span class="sl-hint sl-db-hint">reopens the last database</span></div>
@@ -497,6 +513,18 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     };
     const indexProgress = (p: { scanned: number; dicom: number; note?: string }) => status(`scanning: ${p.dicom} DICOM / ${p.scanned} files${p.note ? " — " + p.note : ""}`);
     (el.querySelector('[data-act="dicom-dir"]') as HTMLButtonElement).addEventListener("click", async () => {
+      // THE APPLICATION'S WAY: macOS's folder dialog through the server (the web view has no folder picker), then the
+      // server adds the folder to the database, or serves its files to look at when "Also add to" is unticked.
+      if ((await listDatabases()).features.includes("choose-folder")) {
+        try {
+          const c = await chooseFolder("Choose the folder with the scans (a disc, a USB stick, an export)");
+          if (!c) return;
+          const target = addTarget();
+          if (target) { await reportImport(target, () => addFolderToDatabase(target.id, c.token, target.name, status)); return; }
+          showSeries(await indexFiles(await filesOfChosenFolder(c.token, status), indexProgress));
+        } catch (e) { status((e as Error).message); }
+        return;
+      }
       const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
       if (!picker) { status("directory picker unavailable — use ‘DICOM files…’"); return; }
       try { const dir = await picker({ id: "slicerlive-dicom" }); status("scanning folder…"); showSeries(await indexDirectory(dir, indexProgress)); }
@@ -2758,6 +2786,56 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       picker({ id: "slicerlive-dicom-db" }).then(browseDatabase).catch(failed);
     };
     (el.querySelector('[data-act="dicom-db"]') as HTMLButtonElement).addEventListener("click", () => openDatabase(false));
+
+    // ---- "Also add to [database]" and the Databases window (Ron, 2026-10-01; desktop/db-import.ts) ----
+    const addBox = el.querySelector(".sl-add-db") as HTMLInputElement, addWhich = el.querySelector(".sl-add-db-which") as HTMLSelectElement;
+    const afterDatabasesChanged = async (madeId?: string) => {
+      await loadRegistered();
+      await fillAddWhich(madeId);
+    };
+    const fillAddWhich = async (select?: string) => {
+      const { databases, features } = await listDatabases();
+      const keep = select ?? addWhich.value;
+      addWhich.innerHTML = "";
+      const usable = databases.filter((d) => d.exists);
+      for (const d of usable) {
+        const o = document.createElement("option");
+        o.value = d.id; o.textContent = dbName(d) + (d.description?.patientData ? " (patient data)" : "");
+        addWhich.appendChild(o);
+      }
+      if (features.includes("create")) {
+        const n = document.createElement("option"); n.value = "_new"; n.textContent = "New database…"; addWhich.appendChild(n);
+      }
+      const all = document.createElement("option"); all.value = "_all"; all.textContent = "All databases…"; addWhich.appendChild(all);
+      addWhich.value = usable.some((d) => d.id === keep) ? keep : (usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
+      (el.querySelector(".sl-add-row") as HTMLElement).hidden = !features.includes("import");
+    };
+    addWhich.addEventListener("change", () => {
+      if (addWhich.value !== "_new" && addWhich.value !== "_all") return;
+      const startWithNew = addWhich.value === "_new";
+      void fillAddWhich();   // back to a real database while the window is open
+      openDatabasesWindow({ startWithNew, onChanged: (id) => void afterDatabasesChanged(id) });
+    });
+    void fillAddWhich();
+    (el.querySelector('[data-act="databases"]') as HTMLButtonElement).addEventListener("click", () => openDatabasesWindow({ onChanged: (id) => void afterDatabasesChanged(id) }));
+    /** The database DICOM loaded from disk is added to, or null when "Also add to" is unticked. */
+    const addTarget = (): { id: string; name: string } | null =>
+      addBox.checked && addWhich.value && !addWhich.value.startsWith("_") ? { id: addWhich.value, name: addWhich.selectedOptions[0]?.textContent ?? addWhich.value } : null;
+    /** Run an import, then say what happened where the person looks, with a button to see the result. */
+    const reportImport = async (target: { id: string; name: string }, run: () => Promise<ImportResult>) => {
+      let r: ImportResult;
+      try { r = await run(); }
+      catch (e) { shell.notify({ title: "The scans were not added", body: esc((e as Error).message) }); status((e as Error).message); return; }
+      const { title, lines } = describeImport(r, target.name);
+      status(lines[0] ?? title);
+      (globalThis as unknown as { __forgetProvenance?: () => void }).__forgetProvenance?.();
+      shell.notify({ title, body: lines.map(esc).join("<br>"), actions: r.series.length || r.already ? [{ label: "Open the DICOM database", primary: true, onClick: async () => {
+        const cur = registered.find((d) => d.current);
+        if (cur?.id !== target.id) await fetch("/_db", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ current: target.id }) });
+        await loadRegistered();
+        openDatabase(false);
+      } }] : [] });
+    };
     // LOAD SCENE: the store's list in its own window, one Open per row (Ron, 2026-09-20: "Can you
     // add a Load scene button which provides a listing of the scenes available in the db?"). The
     // same rows the DICOM browser files under their studies, here in one place, newest first.
@@ -2816,7 +2894,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // exist, so all it ever did here was offer the same registered list. Loading is this panel's
     // business; choosing a database is a setting. `openDatabase(true)` stays for the browser build.
     (globalThis as unknown as { __pickDatabase?: () => void }).__pickDatabase = () => openDatabase(true);
-    dicomInput.addEventListener("change", async () => { if (dicomInput.files?.length) { status("scanning files…"); showSeries(await indexFiles(Array.from(dicomInput.files), indexProgress)); } dicomInput.value = ""; });
+    openDatabaseFromOutside = () => { void (servedDb ? Promise.resolve() : loadRegistered()).then(() => openDatabase(false)); };   // a fresh panel has not yet asked which database is current
+    showLoadFromDisk = () => showPane("load-files");
+    dicomFilesArrived = async (files: File[]) => {
+      status("scanning files…");
+      showSeries(await indexFiles(files, indexProgress));
+      const target = addTarget();
+      if (target) await reportImport(target, () => addFilesToDatabase(target.id, files, target.name, status));
+    };
+    dicomInput.addEventListener("change", async () => { const files = Array.from(dicomInput.files ?? []); dicomInput.value = ""; if (files.length) await dicomFilesArrived?.(files); });
   } });
 
   // DATA — what is currently in the scene, and nothing about how it got there.
@@ -3294,7 +3380,24 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }
     }
     if (picked.some((f) => /\.mrson\.json$/i.test(f.name))) { await loadFiles(picked); return; }
-    shell.notify({ title: "No scene in that folder", body: "A transport folder holds scene.mrson.json and provenance.json beside a dicom/ folder. A folder of DICOM files is read with Load Data › DICOM folder…" });
+    // NOT A SCENE: a folder of scans (a disc, a stick). Every file in it, viewed and -- with "Also add to" ticked --
+    // added to the database (Ron, 2026-10-01: "Drag and drop?").
+    const all: File[] = [];
+    const walk = async (dir: FileSystemDirectoryEntry) => {
+      const reader = dir.createReader();
+      for (;;) {   // readEntries answers in batches; an empty batch is the end
+        const batch = await new Promise<FileSystemEntry[]>((resolve) => reader.readEntries((r) => resolve(r), () => resolve([])));
+        if (!batch.length) return;
+        for (const en of batch) {
+          if (en.name.startsWith(".")) continue;
+          if (en.isDirectory) await walk(en as FileSystemDirectoryEntry);
+          else { const f = await new Promise<File | null>((resolve) => (en as FileSystemFileEntry).file((x) => resolve(x), () => resolve(null))); if (f) all.push(f); }
+        }
+      }
+    };
+    for (const dir of dirs) await walk(dir);
+    if (all.length && dicomFilesArrived) { await dicomFilesArrived(all); return; }
+    shell.notify({ title: "Nothing to load in that folder", body: "It holds no files Albula can read." });
   }
   // programmatic entry for tests and the desktop shell
   /** Numeric oracle for parity tests: dims, ijkToRAS and the exact voxel sum of an image node (re-read from its chunks). */

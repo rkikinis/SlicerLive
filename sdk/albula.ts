@@ -9,7 +9,7 @@
 // Version 2 (2026-10-01, critic finding 4): the scene's and the shell's types, the DICOM files of a series, starting
 // placement, and an extension's own files by name -- what the module had reached through globals or by convention.
 
-export const SDK_VERSION = 2;
+export const SDK_VERSION = 3;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -33,6 +33,30 @@ export function startPlacing(markupType: "fiducial" | string, persistent = false
   const g = globalThis as unknown as { __startPlace?: (type: string, persistent: boolean) => void };
   if (!g.__startPlace) return false;
   g.__startPlace(markupType, persistent);
+  return true;
+}
+
+// ── getting a patient's scans in, and outlining on them (SDK 3, 2026-10-01: the Diffusion module's checklist) ──────────
+/** Open the DICOM database window (the default database), as Load / Save's "DICOM database…" does. False: not in this app. */
+export function openDicomDatabase(): boolean {
+  const g = globalThis as unknown as { __openDicomDatabase?: () => void };
+  if (!g.__openDicomDatabase) return false;
+  g.__openDicomDatabase();
+  return true;
+}
+/** Show Load / Save at "From disk" (files, a folder, a drop; "Also add to" a database). False: not in this app. */
+export function openLoadFromDisk(): boolean {
+  const g = globalThis as unknown as { __openLoadFromDisk?: () => void };
+  if (!g.__openLoadFromDisk) return false;
+  g.__openLoadFromDisk();
+  return true;
+}
+export { addSegment, createSegmentation, growIntoSegmentation } from "../logic/segmentation-editor.ts";
+/** Paint with the brush in the slice views, into one segment of a segmentation (null: brush off). */
+export function paintInto(segId: string, segment: number | null, diameterMm = 5): boolean {
+  const g = globalThis as unknown as { __setSegTool?: (segId: string, tool: string, p: { diameterMm?: number; sphere?: boolean; segment?: number }) => void };
+  if (!g.__setSegTool) return false;
+  g.__setSegTool(segId, segment === null ? "" : "paint", segment === null ? {} : { diameterMm, sphere: false, segment });
   return true;
 }
 

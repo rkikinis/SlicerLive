@@ -23,6 +23,9 @@ export { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
 
 const SQLITE = "/usr/bin/sqlite3";
 
+/** Where a page's uploads wait inside a database folder until desktop/db-import.ts adds them; the audit does not count them. */
+export const IMPORT_FOLDER = "SlicerAlbula-Import";
+
 /** DICOM UIDs are digits and dots and nothing else; anything else never reaches the SQL. */
 const UID = /^[0-9][0-9.]{0,63}$/;
 /** SQLite string literal: the only escape it has is a doubled single quote. */
@@ -204,6 +207,7 @@ export async function auditDatabase(
         if (!ok) orphans.push(p);
         continue;
       }
+      if (e.isDirectory && p === `${dbDir}/${IMPORT_FOLDER}`) continue;   // uploads waiting to be imported, not the database's yet
       if (e.isDirectory) { await walk(p); continue; }
       if (!e.isFile || referenced.has(p)) continue;
       // DICOM files carry "DICM" at byte 128; anything else here is support material.
@@ -228,6 +232,91 @@ export async function auditDatabase(
   backups.sort();
 
   return { indexRows: rows.length, zombies, orphans, unverifiable, scope, ok: zombies.length === 0 && orphans.length === 0, ...(backups.length ? { backups } : {}) };
+}
+
+/** Which of these instances the database already holds (by SOPInstanceUID). */
+export async function knownInstances(dbDir: string, sops: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const valid = [...new Set(sops)].filter((u) => UID.test(u));
+  for (let i = 0; i < valid.length; i += 500) {
+    const part = valid.slice(i, i + 500);
+    const raw = await sqlite(`${dbDir}/ctkDICOM.sql`, `SELECT SOPInstanceUID FROM Images WHERE SOPInstanceUID IN (${part.map(q).join(",")});`);
+    for (const line of raw.split("\n")) if (line.trim()) out.add(line.trim());
+  }
+  return out;
+}
+
+/** One series an import adds (desktop/db-import.ts): its files, and what its header says, column by column. */
+export interface ImportSeries {
+  seriesUID: string;
+  studyUID: string;
+  files: { file: string; sop: string }[];
+  patient: { name: string; id: string; birthDate?: string; sex?: string; age?: string };
+  study: { date?: string; time?: string; description?: string; id?: string; accession?: string; institution?: string; referring?: string; performing?: string };
+  series: { modality: string; number?: string; date?: string; time?: string; description?: string; bodyPart?: string; frameOfReference?: string;
+    acquisitionNumber?: string; contrastAgent?: string; scanningSequence?: string; echoNumber?: string; temporalPosition?: string; displayedSize?: string; numberOfFrames?: string };
+}
+
+/** DICOM's 20260907 as ctkDICOM writes a birth date, 2026-09-07 (critic, 2026-10-01, finding 5: Slicer's own row). */
+const dashedDate = (d: string | undefined) => d && /^\d{8}$/.test(d) ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : d;
+
+/**
+ * ADD AN IMPORT'S SERIES TO THE INDEX: one lock, one backup and one audit for the whole import, one transaction per
+ * series (so one bad series does not take the disc's others with it). Returns, per series, whether it went in.
+ *
+ * Unlike the save path above, the inputs come from OUTSIDE, so (critic, 2026-10-01, findings 2, 4, 5, 16):
+ * - a patient is the same patient when ID AND name agree, as Slicer's indexer decides: anonymized discs give every
+ *   patient the same ID ("ANON", "0"), and filing one person's scans under another's name is the worst error here;
+ * - the columns are the ones Slicer's indexer fills from the header, and only from the header (no invented Study ID,
+ *   no study date standing in for a series date);
+ * - a series already in the index keeps its row, and its image count is recounted rather than replaced;
+ * - the backup and the whole-database audit are paid once, not per series: 160 series took 46 s that way.
+ */
+export function indexImportedSeries(dbDir: string, list: ImportSeries[], onSeries?: () => void): Promise<{ results: { seriesUID: string; error?: string }[]; audit: AuditResult; backup?: string }> {
+  return withIndexLock(dbDir, async () => {
+    const dbPath = `${dbDir}/ctkDICOM.sql`;
+    if (await busy(dbPath)) throw new Error("the DICOM index is open by another program (a -wal/-journal file is present); close it and try again");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backup = `${dbPath}.backup-${stamp}`;
+    await Deno.copyFile(dbPath, backup);
+    const s = (v: string | undefined) => `'${String(v ?? "").replace(/'/g, "''")}'`;   // always a string, '' for none (for matching)
+    const results: { seriesUID: string; error?: string }[] = [];
+    for (const it of list) {
+      try {
+        for (const u of [it.seriesUID, it.studyUID, ...it.files.map((f) => f.sop)]) if (!UID.test(u)) throw new Error(`not a DICOM UID: ${u}`);
+        for (const f of it.files) if (!insideDatabase(f.file)) throw new Error(`not a path inside the database: ${f.file}`);
+        const now = new Date().toISOString().slice(0, 23);
+        const p = it.patient, st = it.study, se = it.series;
+        const patientMatch = `PatientID=${s(p.id)} AND COALESCE(PatientsName,'')=${s(p.name)}`;
+        const studyThere = (await sqlite(dbPath, `SELECT COUNT(*) FROM Studies WHERE StudyInstanceUID=${q(it.studyUID)};`)).trim() !== "0";
+        // .bail on: the sqlite3 program otherwise carries on past a failed statement to the COMMIT, and half a series
+        // would be in; stopped there, the open transaction is rolled back when it exits.
+        const sql = `.bail on
+BEGIN IMMEDIATE;
+${studyThere ? "" : `INSERT INTO Patients (PatientsName, PatientID, PatientsBirthDate, PatientsBirthTime, PatientsSex, PatientsAge, PatientsComments, InsertTimestamp, DisplayedPatientsName, DisplayedNumberOfStudies, DisplayedLastStudyDate, DisplayedFieldsUpdatedTimestamp)
+ SELECT ${q(p.name)}, ${s(p.id)}, ${q(dashedDate(p.birthDate))}, NULL, ${q(p.sex)}, ${q(p.age)}, NULL, ${q(now)}, ${q(p.name)}, 1, ${q(st.date)}, ${q(now)}
+ WHERE NOT EXISTS (SELECT 1 FROM Patients WHERE ${patientMatch});
+INSERT INTO Studies (StudyInstanceUID, PatientsUID, StudyID, StudyDate, StudyTime, StudyDescription, AccessionNumber, ModalitiesInStudy, InstitutionName, ReferringPhysician, PerformingPhysiciansName, InsertTimestamp, DisplayedNumberOfSeries, DisplayedFieldsUpdatedTimestamp)
+ VALUES (${q(it.studyUID)}, (SELECT UID FROM Patients WHERE ${patientMatch} ORDER BY UID LIMIT 1), ${q(st.id)}, ${q(st.date)}, ${q(st.time)}, ${q(st.description)}, ${q(st.accession)}, ${q(se.modality)}, ${q(st.institution)}, ${q(st.referring)}, ${q(st.performing)}, ${q(now)}, 1, ${q(now)});`}
+INSERT OR IGNORE INTO Series (SeriesInstanceUID, StudyInstanceUID, SeriesNumber, SeriesDate, SeriesTime, SeriesDescription, Modality, BodyPartExamined, FrameOfReferenceUID,
+  AcquisitionNumber, ContrastAgent, ScanningSequence, EchoNumber, TemporalPosition, InsertTimestamp, DisplayedCount, DisplayedSize, DisplayedNumberOfFrames)
+ VALUES (${q(it.seriesUID)}, ${q(it.studyUID)}, ${q(se.number)}, ${q(ctkSeriesDate(se.date))}, ${q(se.time)}, ${q(se.description)}, ${q(se.modality)}, ${q(se.bodyPart)}, ${q(se.frameOfReference)},
+  ${q(se.acquisitionNumber)}, ${q(se.contrastAgent)}, ${q(se.scanningSequence)}, ${q(se.echoNumber)}, ${q(se.temporalPosition)}, ${q(now)}, 0, ${q(se.displayedSize)}, ${q(se.numberOfFrames)});
+${it.files.map((f) => `INSERT OR IGNORE INTO Images (SOPInstanceUID, Filename, URL, SeriesInstanceUID, InsertTimestamp) VALUES (${q(f.sop)}, ${q(f.file)}, '', ${q(it.seriesUID)}, ${q(now)});`).join("\n")}
+UPDATE Series SET DisplayedCount = (SELECT COUNT(*) FROM Images WHERE SeriesInstanceUID=${q(it.seriesUID)}) WHERE SeriesInstanceUID=${q(it.seriesUID)};
+COMMIT;
+`;
+        await sqlite(dbPath, sql, false);
+        results.push({ seriesUID: it.seriesUID });
+      } catch (e) {
+        results.push({ seriesUID: it.seriesUID, error: `not indexed: ${(e as Error).message}` });
+      }
+      onSeries?.();
+    }
+    const audit = await auditDatabase(dbDir);
+    if (audit.zombies.length === 0) { await Deno.remove(backup).catch(() => {}); return { results, audit }; }
+    return { results, audit, backup };
+  });
 }
 
 /**
@@ -315,7 +404,9 @@ async function indexFilesLocked(
   await Deno.copyFile(dbPath, backup);
 
   const now = new Date().toISOString().slice(0, 23);
-  const sql = `
+  // .bail on: without it the sqlite3 program carries on past a failed statement to the COMMIT (found 2026-10-01 with
+  // the import's critic round), so "one transaction, a failure leaves nothing behind" held only with it.
+  const sql = `.bail on
 BEGIN IMMEDIATE;
 ${makeStudy}INSERT OR REPLACE INTO Series (SeriesInstanceUID, StudyInstanceUID, SeriesNumber, SeriesDate, SeriesTime,
   SeriesDescription, Modality, AcquisitionNumber, EchoNumber, TemporalPosition, FrameOfReferenceUID,
