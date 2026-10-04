@@ -55,13 +55,40 @@ async function signature(): Promise<string> {
   const { name: _n, v: _v, source: _s, ...rest } = w.doc as Record<string, unknown>;
   return JSON.stringify(rest);
 }
+// ── markups as saved ──
+// Markups and name cards live only in a saved scene (nothing else keeps them), so each one is remembered as it was when
+// the scene was saved or opened; one not in a saved scene, or changed since, is unsaved work and closing asks first
+// (critic 2026-10-02, finding 4: four cards with typed titles went with Close scene without a question). The crop box is
+// left out: it is a tool's setting, made again in a click.
+// A card list is remembered card by card, so the question names what would be lost: "1 name card", not the whole list
+// (critic round 2, finding 7).
+let savedMarkups = new Map<string, string>();
+const markupPrint = (n: Record<string, unknown>) => JSON.stringify([n.name ?? null, n.controlPoints ?? null]);
+const holdsWork = (n: Record<string, unknown>) => n.type === "markup" && n.markupType !== "roi" && ((n.controlPoints as unknown[] | undefined) ?? []).length > 0;
+const prints = (n: Record<string, unknown>): [string, string][] => n.drawAs === "cards"
+  ? ((n.controlPoints as Record<string, unknown>[] | undefined) ?? []).map((c) => [`${n.id}#${c.id}`, JSON.stringify(c)])
+  : [[n.id as string, markupPrint(n)]];
+/** The markups (and name cards) not in a saved scene or changed since, named for the person to decide. */
+export function unsavedMarkups(): string[] {
+  if (!live) return [];
+  const out: string[] = [];
+  for (const n of live.nodes.values()) {
+    if (!holdsWork(n)) continue;
+    const changed = prints(n).filter(([k, v]) => savedMarkups.get(k) !== v).length;
+    if (!changed) continue;
+    const k = ((n.controlPoints as unknown[] | undefined) ?? []).length;
+    out.push(n.drawAs === "cards" ? `${changed} name card${changed === 1 ? "" : "s"}` : `${String(n.name ?? "markup")} (${k} point${k === 1 ? "" : "s"})`);
+  }
+  return out;
+}
+const rememberMarkups = () => { savedMarkups = new Map([...(live?.nodes.values() ?? [])].filter(holdsWork).flatMap(prints)); };
 async function check(): Promise<void> {
   const cur = g.__currentScene?.();
-  if (!cur || !loaded()) { if (dirty) { dirty = false; repaintAll(); } baseline = null; return; }
+  if (!cur || !loaded()) { if (dirty) { dirty = false; repaintAll(); } baseline = null; if (!cur) savedMarkups.clear(); return; }
   const s = await signature();
   // A scene that has just been saved or opened keeps settling for a moment (its segmentations arrive, its views are
   // put back): whatever it looks like then is what "saved" means.
-  if (baseline === null || performance.now() < settleUntil) { baseline = s; if (dirty) { dirty = false; repaintAll(); } return; }
+  if (baseline === null || performance.now() < settleUntil) { baseline = s; rememberMarkups(); if (dirty) { dirty = false; repaintAll(); } return; }
   const d = s !== baseline;
   if (d !== dirty) { dirty = d; repaintAll(); }
 }
@@ -117,12 +144,7 @@ async function doOpen(btn: HTMLButtonElement | null, uid: string): Promise<void>
   repaintAll();
 }
 async function doClose(): Promise<void> {
-  if (dirty) {
-    const cur = g.__currentScene?.();
-    const ok = await shellRef?.confirm({ title: "Close the scene?", ok: "Close anyway", destructive: true, cancel: "Cancel",
-      body: `<p>The scene “${esc(cur?.name ?? "")}” has changes that are not saved. Closing loses them; what is saved stays in the DICOM database.</p>` });
-    if (!ok) return;
-  }
+  // ONE QUESTION (critic round 2, finding 7): __closeScene asks, naming what is not saved and whether the scene has changed.
   const closed = await g.__closeScene?.();
   if (closed) { dirty = false; baseline = null; }
   repaintAll();

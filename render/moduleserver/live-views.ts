@@ -44,6 +44,8 @@ import { type Field, halfToFloat, type ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
 import { cssToken, withAlpha } from "../css-token.ts";
 import { LiveSync } from "../livesync.ts";
+import { addCardOps, cardsOf, findCardList, isCardList, removeCardOp, segmentCodeLine, setShowInOp, showInOf, updateCardOp, type NameCard } from "../../logic/markups/name-cards.ts";
+import { cardDrawn, menuOnRelease, mountNameCards, openCardEditor, openViewMenu, pressIsControlClick, type CardEditor, type CardStructure, type ViewMenuItem } from "../name-cards-view.ts";
 import { WsTransport } from "../transport.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { attachSliceControls, type SliceControls } from "../demos/slice-control.ts";
@@ -75,7 +77,7 @@ export let last3DFields: { volume: string | null; keys: string[]; suppressed: st
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
 export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[]; fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]): void }
 
-const SLAB_MM = 1.5;                  // overlay items within this distance of the plane are "in plane"
+const SLAB_MM = 1.5;                  // overlay items within this distance of the plane are "in plane" (at least; see slabMm)
 // THE VIEW COLORS ARE THE THEME'S -- the same token the view bar and the Red / Yellow / Green
 // buttons use, read once for the canvases, which cannot use var(). These were literals here
 // (#f05a5a, #f0d24a, #5ad07a) beside different literals in theme.css (Slicer's own #F34A33,
@@ -129,7 +131,7 @@ export interface ProbeReading {
   rows: ProbeRow[];
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void; connect?: boolean }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void; connect?: boolean; /** Click to outline (render/click-outline-tool.ts): a click at a point (+1 adds, -1 takes away), or null to end the tool. */ onClickOutline?: (ras: Vec3 | null, sign: 1 | -1) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -260,6 +262,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const ov = threeOverlay, g = ov.getContext("2d")!;
     if (ov.width !== three.canvas.width || ov.height !== three.canvas.height) { ov.width = three.canvas.width; ov.height = three.canvas.height; }
     g.clearRect(0, 0, ov.width, ov.height);
+    drawCards();
     if (!threeVisible) return;
     // AN EMPTY 3D VIEW SAYS SO, for the same reason an empty slice cell does: nothing is wrong, every
     // volume and segmentation is simply switched off here, and a bare gradient does not distinguish
@@ -790,8 +793,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const key = (p: ProbeReading | null) =>
         p ? p.cell + "|" + p.rows.map((r) => `${r.id}:${r.label ?? r.value ?? r.rgb?.join("/")}:${r.ijk.join(",")}`).join("|") : "";
       if (key(next) !== key(probe)) { probe = next; emitProbe(); }
+      return next;                                                         // for a caller that asks (the name cards' menu)
     } catch { /* a readback that fails is a probe that says nothing, not a broken view */ }
     finally { probeBusy = false; }
+  };
+  /** What is at `ras` in `cell`, waiting for a hover reading in flight first (probeAtRas skips while busy). */
+  const readProbeAt = async (cell: string, ras: Vec3): Promise<ProbeReading | undefined> => {
+    for (let i = 0; i < 50 && probeBusy; i++) await new Promise((r) => setTimeout(r, 20));
+    return (await probeAtRas(cell, ras, true)) ?? undefined;
   };
   /** Bind this cell's renderer to the current overlay list (or to the legacy single overlay). */
   /** Bind one PAIR of the overlay list (index i and i+1) as the renderer's A and B. */
@@ -938,12 +947,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const proj = (ras: Vec3) => { const r = c.slice.rasToView(c.orientKey, off, ras, aspect); return { x: r.u * ov.width, y: r.v * ov.height, d: r.distMm }; };
     const rgba = (col: number[], a = 1) => `rgba(${Math.round(col[0] * 255)},${Math.round(col[1] * 255)},${Math.round(col[2] * 255)},${a})`;
     g.lineWidth = 2 * dpr; g.font = `${11 * dpr}px system-ui`;
+    const slab = slabMm(c);
     for (const [key, items] of overlays) {
       const at = key.lastIndexOf("@");
       if (at > 0 && key.slice(at + 1) !== c.name) continue;      // another view's layer
       for (const it of items) {
         if (it.kind === "point") {
-          const p = proj(it.ras); const inPlane = Math.abs(p.d) <= SLAB_MM;
+          const p = proj(it.ras); const inPlane = Math.abs(p.d) <= slab;
           if (it.inPlaneOnly && !inPlane) continue;      // a control, not a projection (see OverlayItem)
           const rad = (it.radiusPx ?? 5) * dpr * (inPlane ? 1 : 0.7);
           if (it.ring) {
@@ -1649,6 +1659,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       if (threeVisible) parts.push({ el: three.el, draw: async (ctx, x, y, w, h) => {
         const cv = await render3dTo(w, h); if (cv) ctx.drawImage(cv, x, y);
         ctx.drawImage(threeOverlay, x, y, w, h);
+        // The name cards as on screen (critic 2026-10-02, finding 7: the picture left them out).
+        cardsView?.paint(ctx, w / Math.max(1, three.el.clientWidth), x, y);
       } });
       if (!opts.only3d) for (const c of shown) parts.push({ el: c.el, draw: async (ctx, x, y, w, h) => {
         // An empty cell has no reslicer state to draw with (renderSlice clears it instead); the
@@ -2210,6 +2222,22 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   const xy3d = (e: PointerEvent) => { const r = three.canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   three.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  // RIGHT-CLICK WITHOUT MOVING, as Slicer does it (Ron, 2026-09-25: "I like the right click option"): while placing it ends
+  // placement; otherwise the view's menu ("Add name card: <structure>", …). Any movement makes it the zoom drag, no menu.
+  // Control-click is the same right-click (macOS; critic 2026-10-02, finding 9), as in the slice views.
+  let right3d: { x: number; y: number } | null = null;
+  const isRight = (e: PointerEvent) => e.button === 2 || (e.button === 0 && e.ctrlKey);
+  // A press handed over from a name card opens the CARD's menu on release, not the view's (name-cards-view.ts forward).
+  three.canvas.addEventListener("pointerdown", (e) => { right3d = isRight(e) && !(e as PointerEvent & { fromCard?: boolean }).fromCard ? { x: e.clientX, y: e.clientY } : null; });
+  three.canvas.addEventListener("pointerup", (e) => {
+    const d = right3d; right3d = null;
+    if (!d || !isRight(e) || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 1) return;
+    const inter = live.nodes.get(INTERACTION_ID);
+    if (inter?.mode === "place") { endPlace(); cfg.onStatus?.("Placing ended"); return; }
+    if (clickOutlineOn()) { cfg.onClickOutline?.(null, 1); return; }   // a right-click ends Click to outline
+    const { x, y } = xy3d(e), cx = e.clientX, cy = e.clientY;
+    void pickRas3d(x, y).then((ras) => viewMenu("3D", ras, cx, cy));
+  });
   // Touching the camera hands framing to the user: no automatic re-fit after this, ever.
   // NOT A BROWSER DRAG. Ron, 2026-09-23: "When I click in the render window, it moves the entire
   // view. click again and the pointer is stuck to rotation of the model, even without the left
@@ -2374,6 +2402,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   three.canvas.addEventListener("pointerup", (e) => {
     const d = down3d; down3d = null;
     if (!d || e.button !== 0 || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) return;
+    // CLICK TO OUTLINE on what the 3D view shows there (the same point the probe names); shift takes away.
+    if (clickOutlineOn() && !e.ctrlKey) { const sign = e.shiftKey ? -1 : 1; const { x, y } = xy3d(e); void pickRas3d(x, y).then((ras) => { if (ras) cfg.onClickOutline?.(ras, sign); else cfg.onStatus?.("Nothing is shown at that point in 3D — click on the anatomy, or in a slice view"); }); return; }
     const inter = live.nodes.get(INTERACTION_ID); if (!inter || inter.mode !== "place" || !inter.markupType) return;
     const { x, y } = xy3d(e);
     void pickRas3d(x, y).then((ras) => {
@@ -2400,14 +2430,23 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   /** RAS of a cell pixel (u,v in [0,1]) on the cell's current plane. */
   const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return c.slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
   /** Nearest markup control point to a cell pixel within `px`, among in-plane points. */
+  /** "ON THIS SLICE": within half a slice step of the volume shown (half a voxel along the slice's normal), and never
+   *  less than SLAB_MM -- a pin on a 5 mm series is then on the slice the wheel reaches (critic round 2, finding 11). */
+  const slabMm = (c: SliceCell) => Math.max(SLAB_MM, (sliceOffsetRange(c.name)?.step ?? 0) / 2);
   const pickMarkup = (c: SliceCell, u: number, v: number, w: number, h: number, px = 12) => {
     applyPlane(c);
     const off = planeOffset01(c), aspect = w / h;
     let best: { id: string; index: number; ras: Vec3 } | null = null, bestD = px * dpr;
+    const slab = slabMm(c);
     for (const hd of markupsDM.handles()) {
-      if (live.nodes.get(hd.id)?.locked) continue;                       // locked markups aren't grabbable
+      const mk = live.nodes.get(hd.id);
+      if (mk?.locked) continue;                                            // locked markups aren't grabbable
+      // A NAME CARD'S PIN only where it is drawn -- Show in Slices on, the card and its structure shown -- and not locked
+      // (critic 2026-10-02, finding 1: a window/level drag grabbed an undrawn pin and moved it 125 mm).
+      // Only a pin the slices DREW (the same build as the picture), and not locked (round 2, finding 1).
+      if (mk && isCardList(mk)) { const cd = cardsOf(mk)[hd.index]; if (!cd || cd.locked || !markupsDM.cardPinDrawn(mk.id as string, hd.index)) continue; }
       const r = c.slice.rasToView(c.orientKey, off, hd.ras, aspect);
-      if (Math.abs(r.distMm) > SLAB_MM) continue;
+      if (Math.abs(r.distMm) > slab) continue;
       const d = Math.hypot((r.u - u) * w, (r.v - v) * h);
       if (d < bestD) { bestD = d; best = { id: hd.id, index: hd.index, ras: hd.ras }; }
     }
@@ -2537,11 +2576,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     onHover: (h) => {
       const d = h?.data as { roi: string } | undefined;
       for (const { id, widget } of markupsDM.cropWidgets()) widget.setHover(d && d.roi === id ? h!.id : null);
-      draw3d();
+      a3d.refresh();   // was draw3d(), which this file never defined: a ReferenceError on every handle hover (critic 2026-10-02, round 2, finding 13)
     },
-    onChange: () => draw3d(),
+    onChange: () => a3d.refresh(),
   });
   // ── segment editor: brush cursor + strokes sent to the app (Paint / Erase active in the streamed editor) ──
+  /** The Segment Editor's tool that takes clicks (Click to outline), or false. */
+  const clickOutlineOn = () => ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase() === "clickoutline";
   const brushEffect = (): "add" | "remove" | null => {
     const e = ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase();
     return e === "paint" ? "add" : e === "erase" ? "remove" : null;
@@ -2698,14 +2739,16 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       hooks: {
         onZoom: () => branch(c),
         onLeftGrab: (u, v, w, h) => {
+          if (clickOutlineOn() && !pressIsControlClick()) { cfg.onClickOutline?.(cellRas(c, u, v), shiftHeld ? -1 : 1); return true; }   // Click to outline
           if (brushEffect()) {                                          // Segment Editor Paint/Erase: stroke in this cell
             brushStroke = { cell: c, points: [cellRas(c, u, v)], seq: 0, lastSent: 0, lastPt: cellRas(c, u, v) };
             sendStroke();                                               // the initial dab paints immediately
             return true;
           }
           if (interactionMode() === "place") {                          // Slicer's Place mode: a click places
+            if (pressIsControlClick()) return true;                     // a control-click is the right-click: it ends placing (round 2, finding 9)
             const ras = cellRas(c, u, v);
-            if (placeAtNative(ras)) return true;                          // native placer (standalone)
+            if (placeAtNative(ras, c.name)) return true;                  // native placer (standalone)
             const id = stateNode("interaction")?.id; if (!id) return true;
             live.write({ op: "cmd", id, cmd: "placeAt", args: { ras, view: c.name } });   // peer path
             sync.flush();
@@ -2816,14 +2859,21 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const id = crosshairId(); if (id) live.write({ op: "cmd", id, cmd: "setCursor", args: { ras: null, view: c.name } });
       if (intersectHover?.in === c) { intersectHover = null; drawOverlay(c); }
     });
-    c.canvas.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
+    // A RIGHT-CLICK, NOT A RIGHT-DRAG (critic 2026-10-02, finding 8): macOS fires `contextmenu` at the PRESS, so a right-drag
+    // zoom opened the menu and ended placing. The menu waits for the release and opens only if the pointer did not move
+    // (mockup: "any movement at all makes it a drag, and no menu opens"), as in the 3D view.
+    c.canvas.addEventListener("contextmenu", (e) => menuOnRelease(e, (cx, cy) => {
       const id = sliceNodeId(c.name); if (!id) return;
       const r = c.canvas.getBoundingClientRect();
-      const ras = cellRas(c, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
-      live.write({ op: "cmd", id, cmd: "viewContextMenu", args: { ras, x: Math.round(e.clientX - r.left), y: Math.round(e.clientY - r.top) } });
+      const ras = cellRas(c, (cx - r.left) / r.width, (cy - r.top) / r.height);
+      live.write({ op: "cmd", id, cmd: "viewContextMenu", args: { ras, x: Math.round(cx - r.left), y: Math.round(cy - r.top) } });
       sync.flush();
-    });
+      // THE MENU HERE TOO (a Slicer peer builds its own from the cmd above): while placing, a right-click ends it.
+      const inter = live.nodes.get(INTERACTION_ID);
+      if (inter?.mode === "place") { endPlace(); cfg.onStatus?.("Placing ended"); return; }
+      if (clickOutlineOn()) { cfg.onClickOutline?.(null, 1); return; }   // a right-click ends Click to outline
+      void viewMenu(c.name, ras, cx, cy);
+    }));
   }
   let sliceIntersections = true;
   let shiftHeld = false;
@@ -3432,8 +3482,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     if (ms.length) live.write({ op: "patch", id, path: "#/measurements", value: ms });
   };
   /** Native placement click: create/extend the markup via the placer, update the interaction node. */
-  const placeAtNative = (ras: Vec3): boolean => {
+  const placeAtNative = (ras: Vec3, cell = "3D"): boolean => {
     const inter = live.nodes.get(INTERACTION_ID); if (!inter || inter.mode !== "place" || !inter.markupType) return false;
+    if ((inter.markupType as string) === "nameCard") {                 // NAME CARDS: one card a click (name-cards.ts)
+      void placeCardAt(ras, cell, undefined).then(() => { if (!inter.placeModePersistence) endPlace(); });
+      return true;
+    }
     const markupType = inter.markupType as MarkupType;
     const placeId = (inter.placeNodeId as string) || "";
     const node = placeId ? live.nodes.get(placeId) ?? null : null;
@@ -3449,6 +3503,213 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     }
     renderSlices();
     return true;
+  };
+
+  // ── NAME CARDS (logic/markups/name-cards.ts, render/name-cards-view.ts; Ron, 2026-09-24/25, 10-01) ──
+  let cardSeq = 0;
+  const cardList = () => findCardList(live.nodes.values());
+  /** The structure a card names, read from its segmentation each time (never stored). */
+  const cardStructure = (segId: string | undefined, label: number | undefined): CardStructure | undefined => {
+    if (!segId) return undefined;
+    const n = live.nodes.get(segId);
+    // ITS SEGMENTATION REMOVED: the card stays, drawn, and says so (critic 2026-10-02, finding 5: it vanished without a
+    // word while Markups still listed it shown). Typed text is never taken away with someone else's node.
+    if (!n) return { name: "", visible: true, gone: true };
+    if (n.type !== "segmentation") return undefined;
+    const sg = ((n.segments as Record<string, unknown>[] | undefined) ?? []).find((x) => x.labelValue === label);
+    const segOn = (sg?.visible as boolean | undefined) !== false;
+    const visible = ((n.visible3D as boolean | undefined) ?? (n.visible !== false)) && segOn;
+    const name = String(sg?.name ?? `segment ${label}`);
+    return { name, code: segmentCodeLine(sg, name), segmentation: String(n.name ?? ""), visible, visible2D: n.visible !== false && segOn };
+  };
+  let cardsView: ReturnType<typeof mountNameCards> | undefined;
+  let cardEditor: CardEditor | undefined;
+  // The slices draw a card's pin by the same rule as the 3D view (critic 2026-10-02, finding 14).
+  markupsDM.cardShown = (list, cp) => cardDrawn(list, cp as NameCard, cardStructure((cp as NameCard).associatedNodeID, (cp as NameCard).segment), "slices");
+  // A segmentation shown or hidden changes which card pins the slices draw: give them the markups again, so drawing and
+  // grabbing stay the same moment (critic 2026-10-02, round 2, finding 1).
+  live.subscribe((ch) => {
+    if (ch.type === "markup" || ch.kind === "remove" || ch.kind === "reset") checkEditor();
+    if (ch.type !== "segmentation" && ch.kind !== "remove") return;
+    const l = cardList();
+    if (l && showInOf(l).slices && cardsOf(l).length) { markupsDM.redrawSlices(live); renderSlices(); }
+  });
+  /** An open editor whose card is gone (Close scene, Delete all) or locked meanwhile closes without writing (round 2, finding 10). */
+  const checkEditor = () => {
+    if (!cardEditor) return;
+    const l = cardList(); const c = l && cardsOf(l).find((k) => k.id === cardEditor!.cardId);
+    if (!l || !c || c.locked || l.locked) { cardEditor.discard(); cardEditor = undefined; }
+  };
+  // ── A PIN BEHIND SOMETHING HIDES ITS CARD (Ron, 2026-10-02, on build 13:41: "when the anchor of a card is obstructed,
+  // it should not be seen"; the External capsule's pin was behind the coronal T1 slice shown in 3D) ──
+  // What stands in front of a pin is whatever the 3D view draws there: a slice shown in 3D (a quad, opaque inside its
+  // volume; tested here on the processor every time), and solid anatomy, surface models, the volume or the fiber tubes
+  // (the 3D probe's own question, pickRas3d -- a readback from the graphics card, so asked one card at a time after the
+  // view changes, never more than one round in flight). "In front" means more than two voxels nearer the eye along the
+  // pin's own ray: a pin placed on a surface sits on it.
+  const cardsBehind = new Set<string>();
+  let occlKey = "", occlRunning = false, occlAgain = false, occlAt = 0;
+  const cross3 = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const finestVoxel = () => Math.max(0.2, Math.min(...[...cells.values()].map((c) => bgField(c)?.sampleStep() ?? 1), 1));
+  const behindSlicePlane = (origin: Vec3, dir: Vec3, tPin: number, tol: number): boolean => {
+    for (const [cell, q] of sliceQuads) {
+      const n = cross3(q.uvec, q.vvec); const nl = Math.hypot(n[0], n[1], n[2]); if (!nl) continue;
+      const den = (dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]) / nl; if (Math.abs(den) < 1e-6) continue;
+      const t = ((q.origin[0] - origin[0]) * n[0] + (q.origin[1] - origin[1]) * n[1] + (q.origin[2] - origin[2]) * n[2]) / nl / den;
+      if (!(t > 0 && t < tPin - tol)) continue;
+      const h: Vec3 = [origin[0] + dir[0] * t, origin[1] + dir[1] * t, origin[2] + dir[2] * t];
+      const d: Vec3 = [h[0] - q.origin[0], h[1] - q.origin[1], h[2] - q.origin[2]];
+      const a = (d[0] * q.uvec[0] + d[1] * q.uvec[1] + d[2] * q.uvec[2]) / (q.uvec[0] ** 2 + q.uvec[1] ** 2 + q.uvec[2] ** 2);
+      const b = (d[0] * q.vvec[0] + d[1] * q.vvec[1] + d[2] * q.vvec[2]) / (q.vvec[0] ** 2 + q.vvec[1] ** 2 + q.vvec[2] ** 2);
+      if (Math.abs(a) > 0.5 || Math.abs(b) > 0.5) continue;
+      // The quad is see-through outside its volume (alpha 0): in front only where the volume is.
+      const c = cells.get(cell), bb = c ? bgField(c)?.aabb() : undefined;
+      if (bb && (h[0] < bb[0][0] || h[1] < bb[0][1] || h[2] < bb[0][2] || h[0] > bb[1][0] || h[1] > bb[1][1] || h[2] > bb[1][2])) continue;
+      return true;
+    }
+    return false;
+  };
+  const updateOcclusion = async () => {
+    if (occlRunning) { occlAgain = true; return; }
+    occlRunning = true;
+    try {
+      do {
+        occlAgain = false;
+        const l = cardList(); if (!l || !scene) { cardsBehind.clear(); break; }
+        const tol = 2 * finestVoxel();
+        const W = three.canvas.clientWidth, H = three.canvas.clientHeight;
+        for (const c of cardsOf(l)) {
+          const q = camera.worldToDisplay(c.position, three.canvas.width, three.canvas.height);
+          if (!(q.depth > 0)) continue;
+          const x = q.x / dpr, y = q.y / dpr;
+          if (x < 0 || y < 0 || x > W || y > H) continue;
+          const ray = scene.worldRay(x / Math.max(1, W), y / Math.max(1, H)); if (!ray) continue;
+          const tPin = (c.position[0] - ray.origin[0]) * ray.dir[0] + (c.position[1] - ray.origin[1]) * ray.dir[1] + (c.position[2] - ray.origin[2]) * ray.dir[2];
+          let behind = behindSlicePlane(ray.origin, ray.dir, tPin, tol);
+          if (!behind) {
+            const hit = await pickRas3d(x, y).catch(() => null);
+            if (hit) behind = (hit[0] - ray.origin[0]) * ray.dir[0] + (hit[1] - ray.origin[1]) * ray.dir[1] + (hit[2] - ray.origin[2]) * ray.dir[2] < tPin - tol;
+          }
+          if (behind !== cardsBehind.has(c.id)) { if (behind) cardsBehind.add(c.id); else cardsBehind.delete(c.id); cardsView?.draw(cardList(), threeVisible); }
+          if (occlAgain) break;   // the view moved meanwhile: start over from the new pose
+        }
+      } while (occlAgain);
+    } finally { occlRunning = false; }
+  };
+  const drawCards = () => {
+    checkEditor();
+    const list = cardList();
+    // What the pins sit behind depends on the camera, the cards and what is drawn: asked again when any of them changes.
+    if (list && cardsOf(list).length && threeVisible) {
+      const k = JSON.stringify([camera.position, camera.focalPoint, camera.viewUp, cardsOf(list).map((c) => c.position), [...sliceQuads.values()].map((q) => q.origin), segOverlays.map((o) => o.visible3D), three.canvas.width, three.canvas.height]);
+      // Also every 0.7 s while the view draws: tubes, structures and looks change what is in front without moving a pin.
+      const now = performance.now();
+      if (k !== occlKey || now - occlAt > 700) { occlKey = k; occlAt = now; void updateOcclusion(); }
+    }
+    if (!list && !cardsView) return;
+    cardsView ??= mountNameCards({
+      host: three.el,
+      occluded: (id) => cardsBehind.has(id),
+      project: (p) => { const q = camera.worldToDisplay(p, three.canvas.width, three.canvas.height); return q.depth > 0 ? { x: q.x / dpr, y: q.y / dpr } : null; },
+      structure: cardStructure,
+      onEdit: (_l, id) => editCard(id),
+      onRemove: (_l, id) => removeCard(id),
+      onMove: (_l, id, offset) => { const l = cardList(); const op = l && updateCardOp(l, id, { cardOffset: offset }); if (op) live.write(op); drawCards(); },
+      onMenu: (_l, id, x, y) => cardMenu(id, x, y),
+      // A right or middle press on a card goes to the view beneath: a right-drag there zooms (round 2, finding 9).
+      forward: (e) => { const fe = new PointerEvent(e.type, e); (fe as PointerEvent & { fromCard?: boolean }).fromCard = true; three.canvas.dispatchEvent(fe); },
+    });
+    cardsView.draw(list, threeVisible);
+  };
+  /** LOCKED MEANS LOCKED (critic 2026-10-02, finding 11): not moved, not edited, not removed -- unlock it first. */
+  const cardLocked = (id: string) => { const l = cardList(); const c = l && cardsOf(l).find((k) => k.id === id); return !!(l && c && (c.locked || l.locked)); };
+  const removeCard = (id: string): boolean => {
+    if (cardLocked(id)) { cfg.onStatus?.("That name card is locked — unlock it in Markups to remove it"); return false; }
+    const l = cardList(); const op = l && removeCardOp(l, id); if (op) live.write(op);
+    if (cardEditor?.cardId === id) { cardEditor.discard(); cardEditor = undefined; }
+    drawCards(); renderSlices(); return !!op;
+  };
+  const editCard = (id: string) => {
+    const l = cardList(); const c = l && cardsOf(l).find((k) => k.id === id);
+    if (!l || !c) return;
+    if (c.locked || l.locked) { cfg.onStatus?.("That name card is locked — unlock it in Markups to change it"); return; }
+    // Leaving one card's editor for another keeps what was typed there (critic 2026-10-02, finding 3).
+    cardEditor?.keep();
+    cardsView?.select(id);
+    (globalThis as unknown as { __markupsSelectCard?: (id: string) => void }).__markupsSelectCard?.(id);
+    const ed: CardEditor = openCardEditor({
+      host: three.el, cardId: id, near: cardsView?.cardRect(id), structure: cardStructure(c.associatedNodeID, c.segment), title: c.label, description: c.description,
+      onSave: (title, description) => {
+        if (cardEditor === ed) cardEditor = undefined;
+        if (cardLocked(id)) { cfg.onStatus?.("That name card was locked meanwhile — nothing was changed"); return; }
+        const l2 = cardList(); const op = l2 && updateCardOp(l2, id, { label: title.trim(), description: description.trim() });
+        if (op) live.write(op);
+        if (cardsView?.selected === id) cardsView.select("");
+        drawCards(); renderSlices();
+      },
+      onRemove: () => { if (cardEditor === ed) cardEditor = undefined; removeCard(id); },
+      // Esc ends placing too (mockup: "Esc ends placing"); the editor's own Esc would otherwise swallow it.
+      onEscape: () => {
+        if (cardEditor === ed) cardEditor = undefined;
+        if (cardsView?.selected === id) cardsView.select("");   // as Done does (round 2, finding 10)
+        if (live.nodes.get(INTERACTION_ID)?.mode === "place") { endPlace(); cfg.onStatus?.("Placing ended"); }
+      },
+    });
+    cardEditor = ed;
+  };
+  /** Add a card at `ras` for the structure under it in `cell` (or the one given), then open it for typing. */
+  const placeCardAt = async (ras: Vec3, cell: string, pick?: { segId: string; label: number }) => {
+    let target = pick?.segId ? pick : undefined;   // an empty segId: "here", naming nothing
+    if (!pick) {
+      const reading = await readProbeAt(cell, ras).catch(() => undefined);
+      const row = reading?.rows.find((r) => r.kind === "segmentation" && (r.label ?? 0) > 0);
+      if (row) target = { segId: row.id, label: row.label! };
+    }
+    const r = addCardOps(cardList(), `local-name-cards-${++cardSeq}`, { position: ras, associatedNodeID: target?.segId, segment: target?.label }, `card-${Date.now().toString(36)}-${cardSeq}`);
+    for (const op of r.ops) live.write(op);
+    const cardId = (cardsOf(live.nodes.get(r.listId)!)[r.index]).id;
+    if (cell !== "3D") { const l = live.nodes.get(r.listId); if (l && !showInOf(l).slices && !showInOf(l).threeD) live.write(setShowInOp(l, { threeD: true })); }
+    drawCards(); renderSlices(); a3d.refresh();
+    cfg.onStatus?.(target ? `Name card on ${cardStructure(target.segId, target.label)?.name ?? "the structure"} — type a title or press Enter` : "Name card placed (no segmented structure there) — type a title or press Enter");
+    requestAnimationFrame(() => editCard(cardId));
+  };
+  /** The card's right-click menu (mockup: Rename…, Edit properties, Delete). */
+  const cardMenu = (id: string, x: number, y: number) => {
+    const l = cardList(); const c = l && cardsOf(l).find((k) => k.id === id);
+    if (!l || !c) return;
+    const s = cardStructure(c.associatedNodeID, c.segment);
+    const locked = (c.locked || l.locked) ? "Locked — unlock it in Markups first" : undefined;
+    openViewMenu(x, y, [
+      { heading: `Name card · ${c.label || (s?.gone ? "" : s?.name) || "no title"}${locked ? " (locked)" : ""}` },
+      { label: "Rename…", run: () => editCard(id), title: "Type the card's title and description", off: locked },
+      { label: "Edit properties", run: () => { (globalThis as unknown as { __markupsShowCard?: (id: string) => void }).__markupsShowCard?.(id); }, title: "Opens Markups with this card selected" },
+      { label: "Delete", run: () => removeCard(id), title: "Takes this card away", off: locked },
+      "sep",
+      // The view's own items under a card too (mockup).
+      { label: "Hide name cards in this view", run: () => { const l2 = cardList(); if (l2) live.write(setShowInOp(l2, { threeD: false })); drawCards(); }, title: "Markups › Show in: 3D brings them back" },
+      { label: "Center view", run: () => { userMovedCamera = false; fittedBounds = sceneBounds(); fitCamera3D(); }, title: "Fit the camera to what is shown" },
+    ]);
+  };
+  /** A view's right-click (no movement): "Add name card: <structure>" for every structure at the point, and the cards' switch for this view. */
+  const viewMenu = async (cell: string, ras: Vec3 | null, x: number, y: number) => {
+    const items: ViewMenuItem[] = [];
+    if (ras) {
+      const reading = await readProbeAt(cell, ras).catch(() => undefined);
+      const rows = (reading?.rows ?? []).filter((r) => r.kind === "segmentation" && (r.label ?? 0) > 0);
+      if (rows.length) items.push({ heading: rows.map((r) => `${r.segment} · ${r.source}`).join(", ") });
+      for (const r of rows) items.push({ label: `Add name card: ${r.segment}${rows.length > 1 ? ` (${r.source})` : ""}`, run: () => void placeCardAt(ras, cell, { segId: r.id, label: r.label! }), title: "A card on this structure, pinned where you clicked" });
+      // ON ANYTHING ELSE SHOWN TOO -- a tract, the scan itself (Ron, 2026-10-02: "It was not intuitive to me how to add a
+      // new card"; he had labeled tracts, and the menu offered a card only on a segmented structure). The title is typed.
+      if (!rows.length) items.push({ label: "Add name card here", run: () => void placeCardAt(ras, cell, { segId: "", label: 0 }), title: "A card pinned where you clicked; type its title" });
+    }
+    const l = cardList();
+    if (l && cardsOf(l).length) {
+      if (items.length) items.push("sep");
+      const key = cell === "3D" ? "threeD" : "slices", on = showInOf(l)[key];
+      items.push({ label: `${on ? "Hide" : "Show"} name cards in ${cell === "3D" ? "this view" : "the slice views"}`, run: () => { const l2 = cardList(); if (l2) live.write(setShowInOp(l2, { [key]: !on })); drawCards(); renderSlices(); } });
+    }
+    if (cell === "3D") { if (items.length) items.push("sep"); items.push({ label: "Center view", run: () => { userMovedCamera = false; fittedBounds = sceneBounds(); fitCamera3D(); }, title: "Fit the camera to what is shown" }); }
+    if (items.length) openViewMenu(x, y, items);
   };
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.refresh(); });
   Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),
@@ -3666,7 +3927,24 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __startPlace: (markupType: MarkupType, persistent = false) => startPlace(markupType, persistent),
     __endPlace: () => endPlace(),
     __placeState: () => { const i = live.nodes.get("local-interaction"); return i ? { mode: i.mode, markupType: i.markupType, persistent: i.placeModePersistence, placeNodeId: i.placeNodeId } : null; },
-    __markups: () => [...live.nodes.values()].filter((n) => n.type === "markup").map((n) => ({ id: n.id, markupType: n.markupType, name: n.name, points: ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).length, measurements: n.measurements ?? [], visible: n.visible !== false, locked: !!n.locked })),
+    __markups: () => [...live.nodes.values()].filter((n) => n.type === "markup").map((n) => ({ id: n.id, markupType: n.markupType, name: n.name, points: ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).length, measurements: n.measurements ?? [], visible: n.visible !== false, locked: !!n.locked, cards: n.drawAs === "cards" })),
+    // NAME CARDS for the Markups panel: the list, each card with what it says; and the card's own controls.
+    __nameCards: () => {
+      const l = cardList(); if (!l) return null;
+      return { id: l.id, showIn: showInOf(l), visible: l.visible !== false, locked: !!l.locked,
+        cards: cardsOf(l).map((c) => { const st = cardStructure(c.associatedNodeID, c.segment); return { id: c.id, label: c.label, description: c.description, name: st?.name ?? "", code: st?.code ?? "", segmentation: st?.segmentation ?? "", gone: !!st?.gone, visible: c.visibility !== false, locked: !!c.locked }; }) };
+    },
+    __cardSet: (id: string, patch: { label?: string; description?: string; visibility?: boolean; locked?: boolean }) => { const l = cardList(); const op = l && updateCardOp(l, id, patch); if (!op) return false; live.write(op); drawCards(); renderSlices(); return true; },
+    __cardRemove: (id: string) => removeCard(id),
+    __cardEdit: (id: string) => editCard(id),
+    __cardSelect: (id: string) => cardsView?.select(id),
+    /** Click to outline's marks: green + where a click added, red − where a shift-click took away (slice views). */
+    __setClickMarks: (points: { ras: Vec3; sign: 1 | -1 }[]) => {
+      if (points.length) overlays.set("clickOutline", points.map((p) => ({ kind: "point" as const, ras: p.ras, color: p.sign > 0 ? [0.3, 0.79, 0.54, 1] : [0.94, 0.4, 0.36, 1], radiusPx: 5, label: p.sign > 0 ? "+" : "−", ring: false, inPlaneOnly: true })));   // only on their slice, as markups
+      else overlays.delete("clickOutline");
+      renderSlices();
+    },
+    __cardShowIn: (patch: { threeD?: boolean; slices?: boolean }) => { const l = cardList(); if (!l) return false; live.write(setShowInOp(l, patch)); drawCards(); renderSlices(); return true; },
     __removeControlPoint: (id: string, index: number) => { const n = live.nodes.get(id); if (!n) return false; const op = removeControlPointOp(n, index); if (op) { live.write(op); storeMeasurements(id); renderSlices(); return true; } live.write({ op: "del", id }); renderSlices(); return true; },
     __deleteMarkup: (id: string) => { if (live.nodes.has(id)) { live.write({ op: "del", id }); renderSlices(); return true; } return false; },
     __setMarkupProp: (id: string, prop: "visible" | "locked", value: boolean) => { if (live.nodes.has(id)) { live.write({ op: "patch", id, path: `#/${prop}`, value }); renderSlices(); return true; } return false; },

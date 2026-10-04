@@ -29,6 +29,7 @@
 
 // SLICERLIVE_CONFIG_DIR redirects the per-user store. Tests must never write the real one -- it is
 // the user's only copy of their preferences.
+import { formatIni, parseIni } from "../logic/settings.ts";
 const CONFIG_DIR = Deno.env.get("SLICERLIVE_CONFIG_DIR") ?? `${Deno.env.get("HOME")}/.config/slicerlive`;
 const USER_SETTINGS = `${CONFIG_DIR}/settings.ini`;
 const FILE_NAME = "settings.ini";
@@ -91,6 +92,27 @@ export async function writeSettings(path: string, text: string): Promise<void> {
 }
 
 /**
+ * THE SECTIONS THE SERVER OWNS are kept as they are on disk when the page writes the file. The page reads the settings
+ * once, when it starts, and writes its whole copy back; the database list ([Database]) is written by the server alone
+ * (a database made, added or chosen), and the page's older copy erased it: the test cases registered on 2026-10-01
+ * vanished from the list, and only the working database was left (Ron, 2026-10-02: "where is the data base that I have
+ * used for the past month? I am confused").
+ */
+export const SERVER_SECTIONS = ["Database"];
+
+async function keepServerSections(path: string, text: string): Promise<string> {
+  const incoming = parseIni(text);
+  const disk = parseIni(await readSettings(path).catch(() => ""));
+  const same = (sec: string) => JSON.stringify([...(incoming.get(sec) ?? new Map())]) === JSON.stringify([...(disk.get(sec) ?? new Map())]);
+  if (SERVER_SECTIONS.every(same)) return text;          // the usual case: written as the page sent it
+  for (const sec of SERVER_SECTIONS) {
+    const d = disk.get(sec);
+    if (d) incoming.set(sec, d); else incoming.delete(sec);
+  }
+  return formatIni(incoming);
+}
+
+/**
  * Serve GET/PUT for the settings file; null for any other request, so the caller serves it.
  *
  * The path is resolved per REQUEST, not once at startup, so creating or deleting a folder-local
@@ -115,7 +137,7 @@ export async function handleSettingsRequest(req: Request, galleryRoot?: string):
     // A settings file is small by nature; a large body means something is wrong upstream, and this
     // endpoint can write anywhere the app can, so it refuses rather than obliges.
     if (text.length > 1_000_000) return new Response("settings too large", { status: 413 });
-    await writeSettings(path, text);
+    await writeSettings(path, await keepServerSections(path, text));
     return new Response(null, { status: 204, headers: { "x-settings-path": path } });
   }
   return new Response("method not allowed", { status: 405, headers: { allow: "GET, PUT" } });

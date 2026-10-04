@@ -115,6 +115,8 @@ export const NODE_TYPES: Record<string, Record<string, FieldSpec>> = {
     size: { kind: "vec3", from: "core" },
     orientation: { kind: "matrix16", from: "profile", note: "the crop box's axes" },
     name: { kind: "string", from: "core" },
+    drawAs: { kind: "string", from: "profile", note: "\"cards\": a point list drawn as name cards (logic/markups/name-cards.ts); each control point adds description, associatedNodeID (a segmentation), segment (its label value), cardOffset (screen px), visible, locked" },
+    showIn: { kind: "object", from: "profile", note: "name cards: { threeD, slices }, where the cards are drawn" },
   },
   transform: {
     transformType: { kind: "string", required: true, from: "core" },

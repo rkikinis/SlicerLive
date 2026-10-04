@@ -31,8 +31,9 @@ export interface VolumeInterpreter {
   /** A single-frame file: `ds` the naturalized dataset, `raw` its DICOM JSON form (private elements by tag). */
   instance?(ds: Record<string, unknown>, raw: Record<string, unknown>): VolumeKey | undefined;
   /** One frame of an enhanced multi-frame file: `group(name)` is the frame's functional-group item of that name
-   *  (per-frame, else shared). */
-  frame?(group: (name: string) => Record<string, unknown> | undefined): VolumeKey | undefined;
+   *  (per-frame, else shared); `top` the file's top-level dataset (naturalized, and its DICOM JSON form with private
+   *  elements by tag) for what is not per frame (2026-10-03: a private block of the whole object). */
+  frame?(group: (name: string) => Record<string, unknown> | undefined, top?: { ds: Record<string, unknown>; raw?: Record<string, unknown> }): VolumeKey | undefined;
   /** After a whole parse: confirm or drop weak keys (changes the images in place). */
   finish?(images: KeyedImage[]): void;
 }
@@ -62,9 +63,9 @@ export function keysOfInstance(ds: Record<string, unknown>, raw: Record<string, 
   return out;
 }
 /** Every registered interpreter's key for one frame of a multi-frame file. */
-export function keysOfFrame(group: (name: string) => Record<string, unknown> | undefined): Record<string, VolumeKey> | undefined {
+export function keysOfFrame(group: (name: string) => Record<string, unknown> | undefined, top?: { ds: Record<string, unknown>; raw?: Record<string, unknown> }): Record<string, VolumeKey> | undefined {
   let out: Record<string, VolumeKey> | undefined;
-  for (const i of list()) { const k = i.frame?.(group); if (k) (out ??= {})[i.name] = k; }
+  for (const i of list()) { const k = i.frame?.(group, top); if (k) (out ??= {})[i.name] = k; }
   return out;
 }
 /** After a parse: each interpreter settles its weak keys; then no key is left marked weak. */

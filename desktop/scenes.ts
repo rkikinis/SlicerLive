@@ -48,7 +48,11 @@ export async function listScenes(dbDir: string): Promise<SceneRow[]> {
   const has = (await sqlite(prov, "SELECT name FROM sqlite_master WHERE type='table' AND name='Scenes';")).trim();
   if (!has) return [];
   const raw = (await sqlite(prov, ".mode json\nSELECT uid, study, name, producer, producedAt, v, origin, bytes, path FROM Scenes ORDER BY producedAt DESC;")).trim();
-  const rows = raw ? JSON.parse(raw) as SceneRow[] : [];
+  // A SCENE BELONGS TO THE DATABASE WHOSE FOLDER HOLDS ITS FILE. Databases in one folder share this store, and without
+  // this a new, empty database listed (and could delete) the scenes of the one beside it (critic, 2026-10-02, finding 2).
+  const all = raw ? JSON.parse(raw) as SceneRow[] : [];
+  const rows: SceneRow[] = [];
+  for (const r of all) if (await Deno.stat(`${dbDir}/${r.path}`).then(() => true, () => false)) rows.push(r);
   // How many series each names, from the file (a few KB each): the browser's Images column.
   for (const r of rows) {
     try {
@@ -78,6 +82,8 @@ export async function putScene(dbDir: string, uid: string, doc: Record<string, u
   const v = Number(doc.v);
   if (row && v !== row.v + 1) return { error: `this scene is at save ${row.v} on disk and this window has ${v - 1}: another window saved it since — overwrite, save as a new scene, or cancel`, status: 409, rowV: row.v };
   if (!row && v !== 1) return { error: `this scene is no longer in the store (deleted?); it would have to be saved as a new scene`, status: 400, code: "gone" };
+  // A uid whose row is another database's (the shared store): never written over from here.
+  if (!row && await sceneRowExists(dbDir, uid)) return { error: "that scene belongs to another database; save it as a new scene", status: 409, code: "elsewhere" };
   const dir = `${dbDir}/${SCENES_FOLDER}`;
   await Deno.mkdir(dir, { recursive: true });
   const path = `${dir}/${uid}.mrson.json`;
@@ -100,6 +106,15 @@ export async function putScene(dbDir: string, uid: string, doc: Record<string, u
   return { uid, v, path, bytes };
 }
 
+/** Is there a row for this uid in the store, whichever database's it is? */
+async function sceneRowExists(dbDir: string, uid: string): Promise<boolean> {
+  const prov = provenancePathFor(dbDir);
+  try { await Deno.stat(prov); } catch { return false; }
+  const has = (await sqlite(prov, "SELECT name FROM sqlite_master WHERE type='table' AND name='Scenes';")).trim();
+  if (!has) return false;
+  return (await sqlite(prov, `SELECT COUNT(*) FROM Scenes WHERE uid=${q(uid)};`)).trim() !== "0";
+}
+
 /** A new name for a scene: the file and the row, nothing else (Ron, 2026-09-22: "I would like to be able to edit scene names"). */
 export async function renameScene(dbDir: string, uid: string, name: string): Promise<{ ok: true; name: string } | { error: string; status: number }> {
   if (!UID.test(uid)) return { error: "not a scene uid", status: 400 };
@@ -117,7 +132,8 @@ export async function renameScene(dbDir: string, uid: string, name: string): Pro
 
 export async function deleteScene(dbDir: string, uid: string): Promise<boolean> {
   if (!UID.test(uid)) return false;
-  await Deno.remove(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`).catch(() => {});
+  // Only a scene this database holds: the row of one beside it is not this database's to remove (finding 2).
+  if (!(await Deno.remove(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`).then(() => true, () => false))) return false;
   const prov = provenancePathFor(dbDir);
   try { await sqlite(prov, SCHEMA + `DELETE FROM Scenes WHERE uid=${q(uid)};`, false); } catch { return false; }
   return true;
@@ -214,28 +230,35 @@ export async function importScene(dbDir: string, scene: Record<string, unknown>,
     if (n === "0") missing.push(series);
   }
   if (missing.length) return { error: `${missing.length} of the series this scene needs ${missing.length === 1 ? "is" : "are"} not in this database — import the dicom/ folder first`, status: 409, missing };
-  const prov = provenancePathFor(dbDir);
-  let edges = 0, attributes = 0;
-  if (provenance) {
-    await sqlite(prov, PROVENANCE_SCHEMA, false);            // a machine that never had a store
-    const have = await provenanceEdges(prov).catch(() => [] as ProvenanceEdge[]);
-    const seen = new Set(have.map((e) => `${e.child}|${e.parent}|${e.kind}`));
-    const stmts: string[] = [];
-    for (const e of provenance.edges ?? []) {
-      if (seen.has(`${e.child}|${e.parent}|${e.kind}`)) continue;
-      const x = e as ProvenanceEdge & { detail?: string; author?: string };
-      stmts.push(`INSERT INTO ProvenanceEdges (child_series_uid, parent_series_uid, kind, label, detail, author, created_at) VALUES (${q(e.child)}, ${q(e.parent)}, ${q(e.kind)}, ${q(e.label)}, ${x.detail ? q(x.detail) : "NULL"}, ${x.author ? q(x.author) : "NULL"}, ${q(e.createdAt ?? new Date().toISOString())});`);
-      edges++;
-    }
-    const haveAttr = new Set((await seriesAttributes(prov).catch(() => [] as SeriesAttribute[])).map((a) => `${a.uid}|${a.key}`));
-    for (const a of provenance.attributes ?? []) {
-      if (haveAttr.has(`${a.uid}|${a.key}`)) continue;
-      stmts.push(`INSERT OR IGNORE INTO SeriesAttributes VALUES (${q(a.uid)}, ${q(a.key)}, ${q(a.value)}, ${q(a.source)}, ${q(new Date().toISOString().slice(0, 19))});`);
-      attributes++;
-    }
-    if (stmts.length) await sqlite(prov, stmts.join("\n"), false);
-  }
+  const { edges, attributes } = provenance ? await mergeProvenance(provenancePathFor(dbDir), provenance) : { edges: 0, attributes: 0 };
   return { ...(await writeSceneAsIs(dbDir, uid, scene)), edges, attributes };
+}
+
+/**
+ * Add provenance rows to a store: edges it does not have yet (same child, parent and kind), attributes it does not have
+ * yet -- a person's own "user" rows are never overwritten. Used by a scene's import and by a transfer between databases.
+ */
+export async function mergeProvenance(prov: string, provenance: { edges?: ProvenanceEdge[]; attributes?: SeriesAttribute[] }): Promise<{ edges: number; attributes: number }> {
+  let edges = 0, attributes = 0;
+  await sqlite(prov, PROVENANCE_SCHEMA, false);            // a machine that never had a store
+  const have = await provenanceEdges(prov).catch(() => [] as ProvenanceEdge[]);
+  const seen = new Set(have.map((e) => `${e.child}|${e.parent}|${e.kind}`));
+  const stmts: string[] = [];
+  for (const e of provenance.edges ?? []) {
+    if (seen.has(`${e.child}|${e.parent}|${e.kind}`)) continue;
+    seen.add(`${e.child}|${e.parent}|${e.kind}`);
+    const x = e as ProvenanceEdge & { detail?: string; author?: string };
+    stmts.push(`INSERT INTO ProvenanceEdges (child_series_uid, parent_series_uid, kind, label, detail, author, created_at) VALUES (${q(e.child)}, ${q(e.parent)}, ${q(e.kind)}, ${q(e.label)}, ${x.detail ? q(x.detail) : "NULL"}, ${x.author ? q(x.author) : "NULL"}, ${q(e.createdAt ?? new Date().toISOString())});`);
+    edges++;
+  }
+  const haveAttr = new Set((await seriesAttributes(prov).catch(() => [] as SeriesAttribute[])).map((a) => `${a.uid}|${a.key}`));
+  for (const a of provenance.attributes ?? []) {
+    if (haveAttr.has(`${a.uid}|${a.key}`)) continue;
+    stmts.push(`INSERT OR IGNORE INTO SeriesAttributes VALUES (${q(a.uid)}, ${q(a.key)}, ${q(a.value)}, ${q(a.source)}, ${q(new Date().toISOString().slice(0, 19))});`);
+    attributes++;
+  }
+  if (stmts.length) await sqlite(prov, stmts.join("\n"), false);
+  return { edges, attributes };
 }
 
 /** Write a scene file under its own uid and v -- an import, not a save; a same-uid row is replaced only by a higher v. */

@@ -105,13 +105,18 @@ export async function handleWindowRequest(req: Request, path: string | undefined
   if (req.method !== "POST") return new Response(null, { status: 405 });
   const f = parseLine(await req.text());
   if (!f || !f.display) return new Response("not a window frame on a display", { status: 400 });
+  try { recordFrame(path, f); } catch (e) { return new Response(String(e), { status: 500 }); }
+  return new Response(null, { status: 204 });
+}
+
+/** That display's line replaced by `f` and moved to the top (the launcher's unlabelled line goes); written only when
+ *  it changes. Used by POST /_window and by the app itself (main.ts, slicerliveRememberWindow). */
+export function recordFrame(path: string, f: SavedFrame): void {
+  if (!f.display || f.w < MIN_W || f.h < MIN_H) return;
   let text = "";
   try { text = Deno.readTextFileSync(path); } catch { /* first time */ }
-  const others = parseFile(text).filter((o) => o.display && o.display !== f.display);   // the launcher's unlabelled line goes
-  const lines = [f, ...others].slice(0, KEEP).map((o) => `${o.display} ${o.x} ${o.y} ${o.w} ${o.h}`);
+  const others = parseFile(text).filter((o) => o.display && o.display !== f.display);
+  const lines = [f, ...others].slice(0, KEEP).map((o) => `${o.display} ${Math.round(o.x)} ${Math.round(o.y)} ${Math.round(o.w)} ${Math.round(o.h)}`);
   const next = lines.join("\n") + "\n";
-  if (next !== text) {
-    try { Deno.writeTextFileSync(path, next); } catch (e) { return new Response(String(e), { status: 500 }); }
-  }
-  return new Response(null, { status: 204 });
+  if (next !== text) Deno.writeTextFileSync(path, next);
 }

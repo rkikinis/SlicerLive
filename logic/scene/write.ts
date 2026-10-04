@@ -11,6 +11,7 @@
 // the file's internal wiring; the durable identity is in each node's `dicom` block. The writer
 // renumbers nodes as `n1, n2, …` in a stable order so two saves of the same scene differ only
 // where the scene does (the round-trip test in write.test.ts depends on it).
+import { cardsOf, isCardList, mapCardRefs } from "../markups/name-cards.ts";
 import { instanceKeys } from "../instance-key.ts";
 import type { MrsonNode } from "../../render/mrson.ts";
 import { MRSON_VERSION, NODE_TYPES, PROFILE_ID } from "./profile.ts";
@@ -190,6 +191,8 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
       const r = (n.refs as Obj | undefined) ?? {};
       node.refs = mapRefs({ volume: r.volume, transferFunction: r.property }) ?? {};
     }
+    // NAME CARDS name a segmentation by its id (logic/markups/name-cards.ts): renamed with the rest, forgotten if not saved.
+    if (isCardList(n)) node.controlPoints = mapCardRefs(cardsOf(n), (id) => keptIds.has(id) ? idOf.get(id) : undefined);
     if (n.type === "sequence") {
       delete node.name;                                       // built from the database at load
       node.items = ((n.items as Obj[]) ?? []).filter((it) => keptIds.has(it.node as string)).map((it) => ({ ...it, node: idOf.get(it.node as string) }));

@@ -9,6 +9,7 @@ import { handleDbRequest } from "./db-serve.ts";
 import { handleLogRequest, startSessionLog } from "./session-log.ts";
 import { handleWindowRequest } from "./window-frame.ts";
 import { handlePictureRequest } from "./pictures.ts";
+import { handleModelRequest } from "./model-store.ts";
 
 // The application's own code must never be served stale.
 //
@@ -92,6 +93,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
         //   /_log         one session's status messages, so they survive being overwritten
         //   /_picture/*   a PNG of the 3D view the page rendered, saved where Ron's downloads go
         //   /_window      where the native window is and how big, so a Dock start puts it back
+        //   /_models/*    trained models the page runs itself (nnLive), fetched once and kept (model-store.ts)
         async (req) =>
           refuseForeign(req, listening) ??
             (await handleSettingsRequest(req, root)) ??
@@ -102,6 +104,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             // Only the native app passes a file; everyone else gets 404 (desktop/window-frame.ts).
             (await handleWindowRequest(req, windowFile)) ??
             (await handlePictureRequest(req, root)) ??
+            (await handleModelRequest(req)) ??
             await serveCode(req, root),
       );
       return;

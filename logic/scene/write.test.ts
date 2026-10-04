@@ -92,3 +92,22 @@ Deno.test("an image a module makes again on load (recomputable: Color FA) is lef
   const text = JSON.stringify(w.doc);
   assert(!text.includes("Color FA") && !text.includes("local-image-cfa") && !text.includes("local-display-cfa"));
 });
+
+Deno.test("name cards are saved with the scene: the segmentation they name renamed with it, where they show kept", async () => {
+  const { addCardOps } = await import("../markups/name-cards.ts");
+  const nodes = liveNodes();
+  const seg = nodes.find((n) => n.type === "segmentation")!;
+  const { ops } = addCardOps(undefined, "local-name-cards-1", { position: [1, 2, 3], associatedNodeID: seg.id as string, segment: 1, label: "Look here first", description: "the wall" }, "card-1");
+  const list = (ops[0] as { node: MrsonNode }).node;
+  (list as Record<string, unknown>).showIn = { threeD: true, slices: true };
+  nodes.push(list);
+  const w = await writeScene(nodes, opts);
+  assertEquals(w.problems, [], "the written scene passes the checker");
+  const saved = Object.entries(w.doc.nodes as Record<string, Record<string, unknown>>);
+  const [, cards] = saved.find(([, n]) => n.drawAs === "cards")!;
+  const [segId] = saved.find(([, n]) => n.type === "segmentation")!;
+  assertEquals(cards.markupType, "fiducial");
+  assertEquals(cards.showIn, { threeD: true, slices: true });
+  const [c] = cards.controlPoints as Record<string, unknown>[];
+  assertEquals([c.label, c.description, c.segment, c.associatedNodeID], ["Look here first", "the wall", 1, segId]);
+});

@@ -3,7 +3,7 @@
 // the slice/3D views in the layout area are SlicerLive's own WebGPU views kept in sync over the
 // mrson channel + LiveSync (WS A). Query params: ?host=, ?gui=ws://..., ?ws=ws://..., ?http=...,
 // ?nativeMenus=1 (host provides menus; hide the streamed menubar).
-import { initSceneControl, keyLabel, SHORTCUTS, sceneControl, sceneIdentityChanged } from "./scene-control.ts";
+import { initSceneControl, keyLabel, markSceneClean, SHORTCUTS, sceneControl, sceneDirty, sceneIdentityChanged } from "./scene-control.ts";
 import { openFloatingWindow } from "./floating-window.ts";
 import { setPaletteVersion } from "../../logic/anatomy/palettes.ts";
 import { setShadingVersion, shadingVersion } from "../shading-versions.ts";
@@ -66,6 +66,7 @@ import { hasSharedTexture, COLOR_MAP_REFUSAL, isColorMap } from "../fields.ts";
 import { descKey, setZarrTimings, warmAssemblyWorkers, type ZarrDesc } from "../zarr.ts";
 import { decodeSegInWorker } from "./seg-decoder.ts";
 import { setSegDecoder } from "../../logic/readers/seg-cache.ts";
+import { createClickOutline } from "../click-outline-tool.ts";
 
 // Mirrored to the session log like the shell's setStatus: the save messages went through this one
 // and never reached the log, so no save had a recorded time (critic's target, 2026-09-17).
@@ -1047,7 +1048,30 @@ async function main() {
   });
   const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, connect: wantPeer, onStatus: status, onNotify: (n) => { shell?.notify({ title: n.title, body: n.body, actions: n.actions }); }, startup: () => ({ drawing: appSettingsNow?.getBool("View3D", "drawing", SETTING_DEFAULTS.View3D.drawing), lighting: appSettingsNow?.get("View3D", "lighting") ?? SETTING_DEFAULTS.View3D.lighting }), onFrame: () => hook?.frameRendered(),
     onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }); },
-    onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); } });
+    onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); },
+    // CLICK TO OUTLINE (render/click-outline-tool.ts): a click outlines; null (a right-click, Esc) ends the tool.
+    onClickOutline: (ras, sign) => { if (ras) void clickOutline.click(ras, sign); else endClickOutline(); } });
+  const clickOutline = createClickOutline({
+    // The status bar where the person looks (shell.setStatus), and the session log (status).
+    live: views.live, store, status: (m) => { status(m); shell?.setStatus(m); },
+    confirm: (o) => shell ? shell.confirm(o) : Promise.resolve(false),
+    marks: (points) => (globalThis as unknown as { __setClickMarks?: (p: typeof points) => void }).__setClickMarks?.(points),
+  });
+  /** The tool off: the outline stays as an ordinary edit, the marks go, the editor's button is no longer yellow. */
+  const endClickOutline = () => {
+    clickOutline.stop();
+    const ed = views.live.nodes.get("local-segmentEditor");
+    if (ed && String(ed.activeEffect ?? "").toLowerCase() === "clickoutline") views.live.write({ op: "patch", id: ed.id, path: "#/activeEffect", value: "" });
+    status("Click to outline ended — the outline stays; Save keeps it");
+    (globalThis as unknown as { __segEditorRender?: () => void }).__segEditorRender?.();
+  };
+  Object.assign(globalThis, {
+    __clickOutlineLicense: () => clickOutline.license(),
+    __clickOutlineStart: (segId: string, target: number, made?: boolean) => clickOutline.start(segId, target, made),
+    __clickOutlineEnd: endClickOutline,
+    __clickOutlineAt: (ras: [number, number, number], sign: 1 | -1) => clickOutline.click(ras, sign),
+    __clickOutlineLast: () => clickOutline.last,
+  });
   // The data probe readout, appended AFTER the module panels so it sits at the bottom of the sidebar
   // and survives a module switch (Ron: "a box at the bottom of the module space").
   if (shell) mountProbeBox(shell.sidebar);
@@ -1279,9 +1303,10 @@ async function main() {
       // app-shell already prints it under every module's Help & Acknowledgment. Putting it here too
       // printed it twice on this panel.
       mount(el) {
-      // SLICER'S OWN WORDS, both sentences, not a paraphrase. Ron: "for the not intended for clinical
-      // use: Use what the popup says in slicer" and then "Add: Slicer is NOT an FDA approved medical
-      // device". Both are upstream text, quoted rather than written:
+      // SLICER'S OWN WORDS, not a paraphrase. Ron: "for the not intended for clinical use: Use what the
+      // popup says in slicer". The second sentence it had, "Slicer is NOT an FDA approved medical
+      // device", was removed on 2026-10-02 -- Ron: Albula is used in other countries, and the label
+      // "shouldn't build in one country's law" (docs/CONSTRAINTS.md). The upstream sources:
       //
       //   CMake/SlicerApplicationOptions.cmake -- the startup popup default:
       //     "Thank you for using %1!<br><br>This software is not intended for clinical use."
@@ -1292,7 +1317,7 @@ async function main() {
       //     else. See docs/CONSTRAINTS.md.
       //
       // The popup's "Thank you for using %1!" greeting is framing the heading below already does. So
-      // what is kept is the two statements. The capitalized NOT is upstream's; leave it.
+      // what is kept is the statement.
       //
       // Large and ABOVE the heading rather than in a footnote: this renders real patient studies
       // convincingly enough that someone could reach for it at the wrong moment, and a disclaimer
@@ -1306,8 +1331,7 @@ async function main() {
       // So: what it is, what you can do with it, and how to start -- in that order. The developer
       // detail is not deleted, it is demoted into a collapsed section, because it is still the right
       // answer for the person who needs it.
-      el.innerHTML = `<p class="sl-not-clinical">This software is not intended for clinical use.<br>
-        Slicer is NOT an FDA approved medical device.</p>
+      el.innerHTML = `<p class="sl-not-clinical">This software is not intended for clinical use.</p>
         <div class="sl-welcome-logo" role="img" aria-label="SlicerAlbula"></div>
         <p><button class="sl-primary" data-act="welcome-load" title="Opens Load / Save: the DICOM database, saved scenes, or files from disk">Load data…</button>
           <button data-act="welcome-keys" title="The keyboard shortcuts, as in 3D Slicer, in a small window">Keyboard shortcuts…</button></p>
@@ -1662,7 +1686,7 @@ Object.assign(globalThis, {
       });
     }
     Object.assign(globalThis, {
-      __createSegmentation: (srcId: string) => createSegmentation(views.live, store, srcId),
+      __createSegmentation: (srcId: string, name?: string) => createSegmentation(views.live, store, srcId, name ? { name } : {}),
       __addSegment: (segId: string) => addSegment(views.live, segId),
       __applyEffect: (segId: string, effect: string, params: Record<string, unknown>) => applyEffect(views.live, store, segId, effect as Parameters<typeof applyEffect>[3], params as Parameters<typeof applyEffect>[4]),
       __segmentations: () => [...views.live.nodes.values()].filter((n) => n.type === "segmentation").map((n) => ({ segId: n.id, name: n.name, segments: (n.segments ?? []) })),
@@ -1878,6 +1902,7 @@ Object.assign(globalThis, {
       if (res.status === 400 && r.code === "gone" && !o.asNew) return await saveScene({ ...o, asNew: true, name });
       if (!res.ok || !r.uid) { shell?.notify({ title: "The scene was not saved", body: esc(r.error ?? `HTTP ${res.status}`) }); return { error: r.error }; }
       currentScene_ = { uid: r.uid, v: r.v ?? 1, name }; sceneChanged();
+      markSceneClean(800);   // HERE, not in one caller: a save from a notice's button is a save too (critic round 2, finding 3)
       const nodesN = Object.keys(w.doc.nodes as object).length;
       // THE RESULT LANDS WHERE THE PERSON IS. Saving the scene is done from Load / Save or from the
       // Scene module, and in both the button itself says "Saved ✓" and the module's own line says
@@ -1904,7 +1929,8 @@ Object.assign(globalThis, {
       const r = await g.__loadScene(uid);
       // The loaded scene is now the current one: the next save is its v + 1 under its name. A load
       // that failed is not (a save after it would replace the file with an empty scene; critic, finding 2).
-      if (r.ok) { currentScene_ = { uid, v: r.v ?? 1, name: r.name ?? "Scene" }; sceneChanged(); }
+      // Clean HERE, for every way in -- Load / Save's scene rows, All scenes, a notice's "Open it" (critic round 2, finding 3).
+      if (r.ok) { currentScene_ = { uid, v: r.v ?? 1, name: r.name ?? "Scene" }; sceneChanged(); markSceneClean(); }
       return r;
     };
     // CLOSE THE SCENE. Asks first when something loaded is not saved anywhere; then the data goes
@@ -1916,11 +1942,14 @@ Object.assign(globalThis, {
       // Frames of a sequence and companion segmentations are hidden nodes, so "loaded" is any data node at all.
       const loaded = [...views.live.nodes.values()].some((n) => ["image", "segmentation", "sequence", "markup", "model", "transform"].includes(n.type as string));
       if (!loaded) { shell?.notify({ title: "Nothing is loaded" }); return false; }
-      if (unsaved.length) {
+      const changed = !!currentScene_ && sceneDirty();
+      if (unsaved.length || changed) {
         const ok = await shell?.confirm({
           title: "Close the scene?",
           ok: "Close anyway", destructive: true, cancel: "Cancel",
-          body: `<p>${unsaved.length === 1 ? "One segmentation is" : `${unsaved.length} segmentations are`} not saved to the DICOM database and would be lost:</p><p><b>${unsaved.map((s) => s.replace(/</g, "&lt;")).join("</b>, <b>")}</b></p><p class="sl-hint">Save to DICOM in the Save module keeps them.</p>`,
+          body: (changed ? `<p>The scene “${(currentScene_?.name ?? "").replace(/</g, "&lt;")}” has changes that are not saved.</p>` : "") +
+            (unsaved.length ? `<p>${unsaved.length === 1 ? "This is" : "These are"} not saved and would be lost:</p><p><b>${unsaved.map((s) => s.replace(/</g, "&lt;")).join("</b>, <b>")}</b></p>` : "") +
+            `<p class="sl-hint">Save to DICOM keeps a segmentation; Scene › Save keeps the scene, its markups and name cards.</p>`,
         });
         if (!ok) return false;
       }
@@ -1944,7 +1973,12 @@ Object.assign(globalThis, {
     // injected by the app and exists nowhere else -- and only while the window is on screen: a
     // minimized one is not where it is meant to be. Outer size and top-left corner, the convention the
     // launcher used, so the file keeps its meaning.
-    if (typeof (globalThis as unknown as { slicerliveOpenExternal?: unknown }).slicerliveOpenExternal === "function") {
+    const remember = (globalThis as unknown as { slicerliveRememberWindow?: () => Promise<string> }).slicerliveRememberWindow;
+    if (typeof remember === "function") {
+      // The app reads its own window from macOS (desktop/main.ts); the page only says when (2026-10-01: the report
+      // below never arrived from the app's window, and nothing had been saved since 2026-09-23).
+      setInterval(() => { if (document.visibilityState === "visible") void remember().catch(() => {}); }, 2000);
+    } else if (typeof (globalThis as unknown as { slicerliveOpenExternal?: unknown }).slicerliveOpenExternal === "function") {
       let lastFrame = "";
       setInterval(() => {
         if (document.visibilityState !== "visible") return;

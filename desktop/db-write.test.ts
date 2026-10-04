@@ -13,7 +13,7 @@ const userDir = await Deno.makeTempDir({ prefix: "slicerlive-user-" });
 Deno.env.set("SLICERLIVE_CONFIG_DIR", userDir);
 
 const { handleDbRequest } = await import("./db-serve.ts");
-const { handleSettingsRequest } = await import("./settings-file.ts");
+const { resolveSettingsPath, writeSettings } = await import("./settings-file.ts");
 
 const folder = await Deno.makeTempDir({ prefix: "slicerlive-folder-" });
 const gallery = `${folder}/src/live`;
@@ -22,10 +22,7 @@ await Deno.mkdir(gallery, { recursive: true });
 // A stand-in database directory, registered the way the app registers one.
 const dbDir = await Deno.makeTempDir({ prefix: "slicerlive-db-" });
 await Deno.writeTextFile(`${dbDir}/ctkDICOM.sql`, "not a real database, but a real file");
-await handleSettingsRequest(
-  new Request("http://x/_settings", { method: "PUT", body: `[Database]\ntest=${dbDir}\ncurrent=test\n` }),
-  gallery,
-);
+await writeSettings(resolveSettingsPath(gallery), `[Database]\ntest=${dbDir}\ncurrent=test\n`);
 
 const post = (path: string, body: BodyInit) =>
   handleDbRequest(new Request(`http://x${path}`, { method: "POST", body }), gallery);
@@ -146,10 +143,7 @@ Deno.test("a series can be written, indexed and then deleted through the routes"
     INSERT INTO Patients VALUES (1, 'TEST^TWO', 'T2');
     INSERT INTO Studies VALUES ('1.2.3', 1, '20260907', 'a study');
   `);
-  await handleSettingsRequest(
-    new Request("http://x/_settings", { method: "PUT", body: `[Database]\nreal=${dir}\ncurrent=real\n` }),
-    gallery,
-  );
+  await writeSettings(resolveSettingsPath(gallery), `[Database]\nreal=${dir}\ncurrent=real\n`);
 
   // write two instances, as a derived series does
   const files = [];
@@ -210,7 +204,7 @@ Deno.test("a write with an x-albula-index header is indexed in the same request,
     CREATE TABLE Images (SOPInstanceUID TEXT PRIMARY KEY, Filename TEXT, URL TEXT, SeriesInstanceUID TEXT, InsertTimestamp TEXT);
     INSERT INTO Patients VALUES (1, 'TEST^ONE', 'T1');
     INSERT INTO Studies VALUES ('1.2.3', 1, '20260918', 'a study');`);
-  await handleSettingsRequest(new Request("http://x/_settings", { method: "PUT", body: `[Database]\ntest=${dbDir}\nwi=${dir}\ncurrent=wi\n` }), gallery);
+  await writeSettings(resolveSettingsPath(gallery), `[Database]\ntest=${dbDir}\nwi=${dir}\ncurrent=wi\n`);
   const meta = { sopInstanceUID: "1.2.3.4.5", seriesInstanceUID: "1.2.3.4", studyInstanceUID: "1.2.3", modality: "SEG", seriesDescription: "one" };
   const ok = await handleDbRequest(new Request("http://x/_db/wi/_write/one.dcm", { method: "POST", body: new Uint8Array([68, 73, 67, 77, 1]), headers: { "x-albula-index": encodeURIComponent(JSON.stringify({ ...meta, seriesDescription: "surfaces of Σ — merged" })) } }), gallery);
   const j = await ok!.json();
@@ -222,5 +216,5 @@ Deno.test("a write with an x-albula-index header is indexed in the same request,
   assertEquals(bad!.status, 409);
   assertEquals((await bad!.json()).indexed, false);
   assertEquals(await Deno.stat(`${dir}/SlicerAlbula-SEG/two.dcm`).catch(() => null), null, "the refused file is gone");
-  await handleSettingsRequest(new Request("http://x/_settings", { method: "PUT", body: `[Database]\ntest=${dbDir}\ncurrent=test\n` }), gallery);
+  await writeSettings(resolveSettingsPath(gallery), `[Database]\ntest=${dbDir}\ncurrent=test\n`);
 });

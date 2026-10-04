@@ -58,3 +58,14 @@ Deno.test("the launcher's old unlabelled window is used as it is when it fits", 
   const g = chooseFrame([{ display: "", x: 100, y: 60, w: 1200, h: 800 }], [office])!;
   assertEquals([g.x, g.y, g.w, g.h], [100, 60, 1200, 800], "a window that fits is not moved");
 });
+
+Deno.test("the app records its own frame: that display's line replaced and first, others kept, a tiny window ignored", async () => {
+  const { recordFrame } = await import("./window-frame.ts");
+  const path = await Deno.makeTempFile();
+  Deno.writeTextFileSync(path, "2560x1440 10 20 1900 1300\n6016x3384 523 49 1908 1365\n");
+  recordFrame(path, { display: "6016x3384", x: 600.4, y: 80, w: 2000, h: 1400 });
+  assertEquals(Deno.readTextFileSync(path), "6016x3384 600 80 2000 1400\n2560x1440 10 20 1900 1300\n");
+  recordFrame(path, { display: "6016x3384", x: 0, y: 0, w: 53, h: 48 });
+  assertEquals(Deno.readTextFileSync(path).split("\n")[0], "6016x3384 600 80 2000 1400");
+  Deno.removeSync(path);
+});

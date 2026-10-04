@@ -12,7 +12,7 @@ import { addSeries, emptyDb } from "../desktop/duckn-copy.fixture.ts";
 const userDir = await Deno.makeTempDir({ prefix: "slicerlive-user-" });
 Deno.env.set("SLICERLIVE_CONFIG_DIR", userDir);
 const { handleDbRequest } = await import("../desktop/db-serve.ts");
-const { handleSettingsRequest } = await import("../desktop/settings-file.ts");
+const { resolveSettingsPath, writeSettings } = await import("../desktop/settings-file.ts");
 const { writeDucknCopy } = await import("../desktop/duckn-copy.ts");
 const { auditDatabase, removeDucknCopy } = await import("../desktop/db-index.ts");
 const { loadSequenceFromCopy, setCopyWorkerFactory, copyMadeByOtherCode } = await import("./zarr-copy.ts");
@@ -26,7 +26,7 @@ const dir = await emptyDb();
 const A = await addSeries(dir, 24, 20, 70);      // two pieces deep
 const B = await addSeries(dir, 30, 18, 12);
 const C = await addSeries(dir, 16, 16, 8);
-await handleSettingsRequest(new Request("http://x/_settings", { method: "PUT", body: `[Database]\nt=${dir}\ncurrent=t\n` }), gallery);
+await writeSettings(resolveSettingsPath(gallery), `[Database]\nt=${dir}\ncurrent=t\n`);
 for (const s of [A, B, C]) await writeDucknCopy(dir, s.series.seriesInstanceUID);
 
 const server = Deno.serve({ port: 0, hostname: "127.0.0.1", onListen() {} }, async (req) =>

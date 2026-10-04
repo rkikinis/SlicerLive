@@ -807,7 +807,7 @@ async function enhancedFrames(ds: Record<string, unknown>, syntax: string, skipp
     const content = item0(own?.FrameContentSequence);
     const dimValues = (Array.isArray(content?.DimensionIndexValues) ? content!.DimensionIndexValues : content?.DimensionIndexValues != null ? [content.DimensionIndexValues] : []) as unknown[];
     const volumeOrder = volumeDims.length && dimValues.length === dimPointers.length ? volumeDims.map((d) => Number(dimValues[d])) : undefined;
-    const frameKeys = keysOfFrame((name) => fgroup(own, shared, name) as Record<string, unknown> | undefined);
+    const frameKeys = keysOfFrame((name) => fgroup(own, shared, name) as Record<string, unknown> | undefined, { ds, raw });
     const fadt = typeof content?.FrameAcquisitionDateTime === "string" ? content.FrameAcquisitionDateTime : undefined;
     const echo = fgroup(own, shared, "MREchoSequence")?.EffectiveEchoTime;
     let pixels: ArrayBuffer;

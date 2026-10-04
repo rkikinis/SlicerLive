@@ -11,13 +11,13 @@ Deno.env.set("HOME", home);
 globalThis.addEventListener("unload", () => { for (const d of [home, userDir]) try { Deno.removeSync(d, { recursive: true }); } catch { /* gone */ } });
 
 const { handleDbRequest } = await import("./db-serve.ts");
-const { handleSettingsRequest } = await import("./settings-file.ts");
+const { resolveSettingsPath, writeSettings } = await import("./settings-file.ts");
 const { remember } = await import("./choose-folder.ts");
 const { createDatabase, icloudWarning } = await import("./db-create.ts");
 
 const gallery = `${home}/app/src/live`;
 await Deno.mkdir(gallery, { recursive: true });
-await handleSettingsRequest(new Request("http://x/_settings", { method: "PUT", body: "[Database]\n" }), gallery);
+await writeSettings(resolveSettingsPath(gallery), "[Database]\n");
 
 const call = async (method: string, path: string, body?: unknown) => {
   const r = await handleDbRequest(new Request(`http://x${path}`, { method, ...(body !== undefined ? { body: JSON.stringify(body), headers: { "content-type": "application/json" } } : {}) }), gallery);
@@ -91,4 +91,42 @@ Deno.test("finding 7: folders that cloud services copy off the Mac are warned ab
     assert(icloudWarning(p), p);
   }
   assertEquals(icloudWarning(`${home}/Albula Databases/db`), undefined);
+});
+
+Deno.test("start fresh (transfer window): the old database keeps its folder under an archive name; the new one of the same name gets its own folder and opens by default", async () => {
+  const a = await call("POST", "/_db/_create", { name: "Working", holds: "where I work" });
+  assertEquals(a.status, 200, JSON.stringify(a.j));
+  // The window's order (transfer-window.ts startFresh): the new one first, then the old one renamed (critic, finding 19).
+  const b = await call("POST", "/_db/_create", { name: "Working", holds: "where I work" });
+  assertEquals(b.status, 200, JSON.stringify(b.j));
+  const renamed = await call("PUT", `/_db/${a.j.id}/_description`, { name: "Working, archive 2026-10-02", holds: "where I work" });
+  assertEquals(renamed.status, 200, JSON.stringify(renamed.j));
+  assertEquals(b.j.path, `${home}/Albula Databases/Working 2`, "a folder of that name is there already");
+  assert(b.j.id !== a.j.id);
+  await call("PUT", "/_db", { current: b.j.id });
+  const list = (await call("GET", "/_db")).j.databases as { id: string; current: boolean; path: string; description?: { name: string } }[];
+  assertEquals(list.find((d) => d.id === a.j.id)?.description?.name, "Working, archive 2026-10-02");
+  assertEquals(list.find((d) => d.id === a.j.id)?.path, `${home}/Albula Databases/Working`);
+  assert(list.find((d) => d.id === b.j.id)?.current);
+});
+
+Deno.test("transfer route: two different databases and something chosen, or a plain refusal", async () => {
+  const x = await call("POST", "/_db/_create", { name: "Transfer A" }), y = await call("POST", "/_db/_create", { name: "Transfer B" });
+  assertEquals((await call("POST", "/_db/_transfer", { from: x.j.id, to: x.j.id, series: ["1.2.3"] })).status, 400, "the same database");
+  assertEquals((await call("POST", "/_db/_transfer", { from: x.j.id, to: y.j.id, series: [] })).status, 400, "nothing chosen");
+  assertEquals((await call("POST", "/_db/_transfer", { from: x.j.id, to: "no-such", series: ["1.2.3"] })).status, 404);
+  assertEquals((await call("GET", `/_db/${x.j.id}/_record`)).j.entries, []);
+  assertEquals((await call("POST", "/_db/_transfer/00000000-0000-0000-0000-000000000000/_remove")).status, 404);
+});
+
+Deno.test("transfer finding 1: one database folder is not registered a second time under another name", async () => {
+  const made = await call("POST", "/_db/_create", { name: "Linked once" });
+  assertEquals(made.status, 200);
+  const link = `${home}/a link to the databases`;
+  await Deno.symlink(`${home}/Albula Databases`, link);
+  const { token } = remember(`${link}/Linked once`);
+  assertEquals((await call("POST", "/_db/_register", { token })).status, 409);
+  assertEquals((await call("PUT", "/_db", { id: "other-name", path: `${link}/Linked once` })).status, 409);
+  const w = await call("GET", "/_db/_transfer");
+  assertEquals(w.j.waiting, [], "no move waiting");
 });

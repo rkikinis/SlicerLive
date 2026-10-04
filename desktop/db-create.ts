@@ -42,7 +42,11 @@ export interface DbDescription {
   name: string;
   /** What it holds, in a sentence or two. */
   holds?: string;
-  /** Does it hold data of real patients (identifiable or under an approval)? */
+  /**
+   * NOT PUBLIC DATA: true = not public, false = public data (de-identified and released for anyone to use, as on IDC or
+   * OpenNeuro, or given by the person it is about). Shown as "Public data" or not (Ron, 2026-10-02: "keep it simple:
+   * Public data or not"); the field keeps its name so no description written before changes meaning.
+   */
   patientData?: boolean;
   /** The approval it was collected under, e.g. an IRB protocol number. */
   approval?: string;
@@ -112,7 +116,7 @@ export function icloudWarning(dir: string): string | undefined {
   const d = dir.replace(/^\/System\/Volumes\/Data(?=\/)/, "");
   const rel = d.startsWith(home + "/") ? d.slice(home.length + 1) : "";
   if (/^(Desktop|Documents|Library\/Mobile Documents|Library\/CloudStorage)(\/|$)/.test(rel)) {
-    return "This folder is one a cloud service can copy to the internet (Desktop, Documents, iCloud Drive, or a Dropbox, OneDrive, Google Drive or Box folder). For patient data, choose a folder outside them.";
+    return "This folder is one a cloud service can copy to the internet (Desktop, Documents, iCloud Drive, or a Dropbox, OneDrive, Google Drive or Box folder). For scans that are not public, choose a folder outside them.";
   }
   return undefined;
 }

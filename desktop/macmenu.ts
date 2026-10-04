@@ -277,6 +277,32 @@ export function placeWindowTopLeft(nsWindow: Deno.PointerValue, x: number, y: nu
 }
 
 /**
+ * WHERE THE WINDOW IS NOW, read from the window itself (2026-10-01: the page's own report never arrived -- the app's
+ * window file had not been written since 2026-09-23, so a moved or resized window was never remembered). Top-left,
+ * y-down, as the file keeps it, with the size of the display holding the window's center ("<W>x<H>"). Null when the
+ * window is minimized or off every screen.
+ */
+export function windowFrameNow(nsWindow: Deno.PointerValue): { display: string; x: number; y: number; w: number; h: number } | null {
+  if (Deno.build.os !== "darwin" || !nsWindow) return null;
+  const o = objc();
+  if (o.ask_bool(nsWindow, sel("isMiniaturized"))) return null;
+  const rect = (obj: Deno.PointerValue) => new Float64Array((o.ask_rect(obj, sel("frame")) as Uint8Array).slice().buffer);
+  const screens = o.send(cls("NSScreen"), sel("screens"));
+  const n = Number(o.ask_u64(screens, sel("count")));
+  if (!n) return null;
+  const primaryH = rect(o.send_u64(screens, sel("objectAtIndex:"), 0n))[3];
+  const w = rect(nsWindow);                                // Cocoa: x, y (bottom-left, y-up), width, height
+  const cx = w[0] + w[2] / 2, cy = w[1] + w[3] / 2;
+  for (let i = 0; i < n; i++) {
+    const f = rect(o.send_u64(screens, sel("objectAtIndex:"), BigInt(i)));
+    if (cx >= f[0] && cx <= f[0] + f[2] && cy >= f[1] && cy <= f[1] + f[3]) {
+      return { display: `${Math.round(f[2])}x${Math.round(f[3])}`, x: w[0], y: primaryH - (w[1] + w[3]), w: w[2], h: w[3] };
+    }
+  }
+  return null;
+}
+
+/**
  * THE DISPLAYS ATTACHED NOW, for choosing where the window opens (desktop/window-frame.ts): each one's
  * size, and its usable area -- without the menu bar and the Dock -- in the top-left, y-down
  * coordinates the page and the saved file use. The first is the main display (the one with the menu

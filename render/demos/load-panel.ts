@@ -1,7 +1,7 @@
 // "Data" panel (W1): open local volume files (NRRD / NIfTI, gzipped or not), drag-and-drop onto the views,
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
-import { renameCurrentScene, sceneControl } from "./scene-control.ts";
+import { renameCurrentScene, sceneControl, unsavedMarkups } from "./scene-control.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
@@ -26,6 +26,7 @@ import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../
 import { keepScroll } from "./panel-scroll.ts";
 import { openFloatingWindow } from "./floating-window.ts";
 import { chooseFolder, dbName, listDatabases, openDatabasesWindow } from "./databases-window.ts";
+import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { freesurferStructureByName, lookupStructure, usesFreesurferNumbering } from "../../logic/segment-naming.ts";
 import { segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
@@ -288,7 +289,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
   //
   // Work in progress. The grouping this files them under is a working draft
   // (docs/module-list-organization.md), to be revisited with Steve and Andrey.
-  /** What is loaded and not saved anywhere: a segmentation edited since its save, or never saved. Named, for the person to decide. */
+  /** What is loaded and not saved anywhere: a segmentation edited since its save, or never saved; markups and name cards
+   *  not in a saved scene (scene-control.ts). Named, for the person to decide. */
   const unsavedWork = (): string[] => {
     // Members of a sequence family are hidden nodes and count too (critic, 2026-09-20, finding 4);
     // a family is named once.
@@ -296,7 +298,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       const org = n.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
       return n.edited === true || !(org?.savedSeriesInstanceUID || org?.seriesInstanceUID);
     }).map((n) => String(n.name ?? n.id));
-    return [...new Set(names)];
+    return [...new Set([...names, ...unsavedMarkups()])];
   };
   /**
    * CLOSE THE SCENE: every volume (its displays, its rendering, its transfer function), every
@@ -347,6 +349,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <p><b>Databases…</b> shows every database Albula knows, what each holds, and which one opens by
       default; it makes a new one, adds an existing one, and offers the public brain tumor test cases
       (a download, its size said first).</p>
+      <p><b>Transfer between databases…</b> copies patients or studies from one of your databases into another:
+      from a project into the one you work in, or what you made back to where the scans came from. Every image is read
+      back and compared before it counts as there. A move (under Advanced) removes from the first database only on a
+      second press, after that check. Each database keeps a record of what came in and went out.</p>
       <p><b>DICOM</b> is read as a series, not as a file: use <i>DICOM files…</i> or <i>DICOM folder…</i>,
       which group the files into series first, or <i>DICOM database…</i> for what is already indexed.</p>
       <p><b>Deleting from the database</b> is done in the <i>DICOM database…</i> window: tick the
@@ -409,6 +415,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <div class="sl-row">
         <button class="sl-primary" data-act="dicom-db" title="Browse the indexed DICOM database and load a series. This is the usual way in when working on a study.">DICOM database…</button>
         <button data-act="databases" title="Which databases there are, what each holds, which one opens by default; make a new one.">Databases…</button>
+        <button data-act="transfer" title="Copy patients or studies from one of your databases into another — from a project into the one you work in, or what you made back to where the scans came from. Opens a window; nothing changes until you press its yellow button.">Transfer between databases…</button>
         <span class="sl-scene-slot"></span>
       </div>
       <div class="sl-row"><span class="sl-hint sl-db-hint">reopens the last database</span></div>
@@ -2664,7 +2671,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // it"); the notice says so and offers the one button (logic/scheme-colors.ts).
         const off = segmentationsOffScheme(opts.live);
         const offLine = off.length ? `<br>${off.length === 1 ? "One segmentation keeps its" : `${off.length} segmentations keep their`} saved colors, not those of colors v${paletteVersion()}.` : "";
-        shell.notify({ title: `Scene loaded — "${esc(name)}"`, body: `${list.length} series in ${seconds.toFixed(1)} s${surfacesFollow ? "; the 3D surfaces follow" : ""}${missing.length ? `<br>Not in the database: ${esc(missing.join(", "))}` : ""}${report.missing.length ? `<br>Not restored: ${esc(report.missing.join(", "))}` : ""}${offLine}`, ttl: off.length ? 15000 : 8000,
+        shell.notify({ title: `Scene loaded — "${esc(name)}"`, body: `${list.length} series in ${seconds.toFixed(1)} s${surfacesFollow ? "; the 3D surfaces follow" : ""}${missing.length ? `<br>Not in the database: ${esc(missing.join(", "))}` : ""}${report.missing.length ? `<br>Not restored: ${esc(report.missing.join(", "))}` : ""}${report.notes.length ? `<br>Markups: ${esc(report.notes.join("; "))}` : ""}${offLine}`, ttl: off.length ? 15000 : 8000,
           ...(off.length ? { offerOnly: true, actions: [
             { label: "Use the current colors", onClick: () => { const n = off.reduce((k, o) => k + useCurrentColors(opts.live, o.id), 0); status(`Colors: ${n} structures now in the colors of v${paletteVersion()}`); } },
             { label: "Keep", primary: true, onClick: () => {} },
@@ -2805,7 +2812,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       const usable = databases.filter((d) => d.exists);
       for (const d of usable) {
         const o = document.createElement("option");
-        o.value = d.id; o.textContent = dbName(d) + (d.description?.patientData ? " (patient data)" : d.description?.patientData === false ? " (no patient data)" : "");
+        o.value = d.id; o.textContent = dbName(d) + (d.description?.patientData ? " (not public)" : d.description?.patientData === false ? " (public data)" : "");
         if (d.description?.patientData === false) noPatientData.add(d.id); else noPatientData.delete(d.id);
         addWhich.appendChild(o);
       }
@@ -2813,9 +2820,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const n = document.createElement("option"); n.value = "_new"; n.textContent = "New database…"; addWhich.appendChild(n);
       }
       const all = document.createElement("option"); all.value = "_all"; all.textContent = "All databases…"; addWhich.appendChild(all);
-      // The default target is never a database that says it holds no patient data, unless it is the only one.
+      // The default target is never a database that says it holds public data, unless all of them do -- then the one
+      // Albula opens (scans from a disc are usually not public).
       const allowed = usable.filter((d) => d.description?.patientData !== false);
-      addWhich.value = usable.some((d) => d.id === keep) ? keep : ((allowed.find((d) => d.current) ?? allowed[0]) ?? usable[0])?.id ?? "_new";
+      addWhich.value = usable.some((d) => d.id === keep) ? keep : ((allowed.find((d) => d.current) ?? allowed[0]) ?? usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
       (el.querySelector(".sl-add-row") as HTMLElement).hidden = !features.includes("import");
     };
     addWhich.addEventListener("change", () => {
@@ -2826,18 +2834,19 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     });
     void fillAddWhich();
     (el.querySelector('[data-act="databases"]') as HTMLButtonElement).addEventListener("click", () => openDatabasesWindow({ onChanged: (id) => void afterDatabasesChanged(id) }));
+    (el.querySelector('[data-act="transfer"]') as HTMLButtonElement).addEventListener("click", () => openTransferWindow({ onChanged: () => void afterDatabasesChanged(), onOpenBrowser: () => openDatabase(false) }));
     /** The database DICOM loaded from disk is added to, or null when "Also add to" is unticked. */
     const addTarget = (): { id: string; name: string } | null =>
       addBox.checked && addWhich.value && !addWhich.value.startsWith("_") ? { id: addWhich.value, name: addWhich.selectedOptions[0]?.textContent ?? addWhich.value } : null;
     /** Run an import, then say what happened where the person looks, with a button to see the result. */
     /**
-     * ASKED FIRST when the target says it holds no patient data (critic, 2026-10-01, finding 2): scans from a disc are
-     * usually a patient's. True to go on.
+     * ASKED FIRST when the target says it holds public data (critic, 2026-10-01, finding 2): scans from a disc are
+     * usually a patient's, not public. True to go on.
      */
     const okForTarget = (target: { id: string; name: string }) => !noPatientData.has(target.id) ? Promise.resolve(true) : new Promise<boolean>((resolve) => {
       shell.notify({
-        title: `“${target.name}” says it holds no patient data`,
-        body: "<p>These scans are about to be copied into it. If they are a patient's, choose another database under <i>Also add to</i>.</p>",
+        title: `“${target.name}” holds public data`,
+        body: "<p>These scans are about to be copied into it. If they are not public — a patient's scans from a disc, say — choose another database under <i>Also add to</i>.</p>",
         actions: [{ label: "Add them anyway", onClick: () => resolve(true) }, { label: "Don't add", primary: true, onClick: () => resolve(false) }],
       });
     });

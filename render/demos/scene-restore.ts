@@ -15,6 +15,7 @@ import { firstInstance, holdsInstance } from "../../logic/instance-key.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { MrsonNode } from "../mrson.ts";
 import { frameIsCurrent, selectFrame } from "../../logic/sequences.ts";
+import { cardsOf, isCardList, mapCardRefs, type NameCard } from "../../logic/markups/name-cards.ts";
 
 type Obj = Record<string, unknown>;
 
@@ -29,15 +30,24 @@ export interface RestoreHooks {
 }
 const CARDIAC = new Set(["short-axis", "four-chamber", "two-chamber"]);
 
-export interface RestoreReport { applied: string[]; missing: string[] }
+/** `notes`: what the person should hear about the markups (one added beside a changed one, a crop box kept). */
+export interface RestoreReport { applied: string[]; missing: string[]; notes: string[] }
 
 const origin = (n: MrsonNode | undefined) => (n?.origin as Obj | undefined) ?? {};
+/** The live id each saved markup was put back under, per scene document: the restore runs once per arriving series and
+ *  must put a markup back once, not once a pass. */
+const markupIds = new WeakMap<Obj, Map<string, string>>();
+/** The Crop panel's box (crop-panel.ts FITTED_ID; not imported, that module is the panel's DOM). */
+const CROP_BOX_ID = "local-markup-cropbox";
+/** What a markup is where it is: its points, or a box's center, size and axes. */
+const geometry = (n: MrsonNode) => JSON.stringify([((n.controlPoints as { position?: unknown }[] | undefined) ?? []).map((c) => c.position), n.center ?? null, n.size ?? null, n.orientation ?? null]);
+const withoutRefs = (n: Obj): Obj => { const { refs: _r, ...rest } = n; return rest; };
 
 export function applySceneState(live: LiveScene, doc: Obj, hooks: RestoreHooks = {}): RestoreReport {
   const nodes = (doc.nodes as Record<string, Obj>) ?? {};
   const liveAll = [...live.nodes.values()];
   const map = new Map<string, string>();          // saved id -> live id
-  const applied: string[] = [], missing: string[] = [];
+  const applied: string[] = [], missing: string[] = [], notes: string[] = [];
 
   // ── identity: volumes by an instance, segmentations by their SEG series ──
   for (const [id, n] of Object.entries(nodes)) {
@@ -236,5 +246,61 @@ export function applySceneState(live: LiveScene, doc: Obj, hooks: RestoreHooks =
   for (const [id, n] of Object.entries(nodes)) {
     if (n.type === "camera") { const liveId = map.get(id); if (liveId) patch(liveId, { position: n.position, focalPoint: n.focalPoint, viewUp: n.viewUp, viewAngle: n.viewAngle, parallelProjection: n.parallelProjection, parallelScale: n.parallelScale }, "camera"); }
   }
-  return { applied, missing };
+  // ── 6. markups: points, lines, curves, boxes and name cards, which a person made and nothing else brings back ──
+  // (the writer has saved them since the scene format began; the restore never put them back -- found 2026-10-02 with the
+  // name cards). A name card's segmentation is the live one by the saved id's identity; on a pass before that
+  // segmentation has arrived the card waits without it, and a later pass fills it in.
+  const ids = markupIds.get(doc) ?? new Map<string, string>();
+  markupIds.set(doc, ids);
+  for (const [id, n] of Object.entries(nodes)) {
+    if (n.type !== "markup") continue;
+    const cards = isCardList(n as MrsonNode) ? mapCardRefs(cardsOf(n as MrsonNode), (sid) => map.get(sid)) : undefined;
+    if (cards) for (const c of cardsOf(n as MrsonNode)) if (c.associatedNodeID && !map.has(c.associatedNodeID)) missing.push(`name card ${c.label || "(no title)"}: its segmentation`);
+    const done = ids.get(id);
+    if (done) {
+      // PUT BACK ON AN EARLIER PASS: the person's now. Deleted since, it stays deleted (critic 2026-10-02, finding 12);
+      // only a card still waiting for its segmentation is filled in.
+      const cur = cards && live.nodes.get(done);
+      if (cards && cur) {
+        const now = cardsOf(cur);
+        const filled = now.map((c) => { const k = cards.find((x) => x.id === c.id); return !c.associatedNodeID && k?.associatedNodeID ? { ...c, associatedNodeID: k.associatedNodeID, segment: k.segment } as NameCard : c; });
+        if (filled.some((c, i) => c !== now[i])) patch(done, { controlPoints: filled }, "name cards");
+      }
+      continue;
+    }
+    let kin: MrsonNode[] = [];
+    if (cards) {
+      // ONE CARD LIST A SCENE (name-cards.ts): a scene opened on top of cards already there adds its cards to that list.
+      const there = [...live.nodes.values()].find((x) => isCardList(x));
+      if (there) {
+        ids.set(id, there.id as string);
+        const have = new Set(cardsOf(there).map((c) => c.id));
+        patch(there.id as string, { controlPoints: [...cardsOf(there), ...cards.filter((c) => !have.has(c.id))] }, String(n.name ?? "name cards"));
+        continue;
+      }
+    } else {
+      // THE SAME MARKUP ALREADY HERE -- the scene opened again over its own study (critic 2026-10-02, finding 2: a second
+      // and a third copy of every point list and crop box): same kind, name and geometry, so it is that one. A live markup
+      // is matched at most once, and never one this open has just put back: two saved lists stay two (round 2, finding 4).
+      const claimed = new Set(ids.values());
+      kin = [...live.nodes.values()].filter((x) => x.type === "markup" && !isCardList(x) && !claimed.has(x.id as string) && x.markupType === n.markupType && x.name === n.name);
+      const same = kin.find((x) => geometry(x) === geometry(n as MrsonNode));
+      if (same) { ids.set(id, same.id as string); continue; }
+      // THE CROP BOX goes back under the Crop panel's own id (crop-panel.ts FITTED_ID), so the panel finds it and its
+      // "Fit a box" moves this box instead of drawing a second. One already here is the person's: kept, and said.
+      if (n.markupType === "roi" && n.name === "Crop box") {
+        ids.set(id, CROP_BOX_ID);
+        if (live.nodes.has(CROP_BOX_ID)) { notes.push("the crop box here was kept; the scene's is in a different place"); continue; }
+        live.write({ op: "put", id: CROP_BOX_ID, node: { ...withoutRefs(n), id: CROP_BOX_ID, origin: { local: true } } as unknown as MrsonNode });
+        applied.push("crop box");
+        continue;
+      }
+    }
+    const liveId = `local-markup-scene-${Math.random().toString(36).slice(2, 8)}-${id}`;
+    ids.set(id, liveId);
+    if (kin.length) notes.push(`"${String(n.name)}" from the scene was added beside the one already here (they differ)`);
+    live.write({ op: "put", id: liveId, node: { ...withoutRefs(n), id: liveId, ...(cards ? { controlPoints: cards } : {}), origin: { local: true } } as unknown as MrsonNode });
+    applied.push(String(n.name ?? "markup"));
+  }
+  return { applied, missing, notes };
 }

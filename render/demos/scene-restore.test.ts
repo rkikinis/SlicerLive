@@ -152,3 +152,82 @@ Deno.test("a slice view saved as shown in 3D is shown in 3D again", async () => 
   applySceneState(live, first.doc, hooks);                     // the next pass: already so, nothing asked
   assertEquals(asked, ["Red true"]);
 });
+
+Deno.test("markups come back with the scene, once however many passes run; a name card finds its segmentation by identity", async () => {
+  const { addCardOps, cardsOf } = await import("../../logic/markups/name-cards.ts");
+  const saved = liveNodes();
+  const seg = saved.find((n) => n.type === "segmentation")!;
+  const { ops } = addCardOps(undefined, "local-name-cards-1", { position: [1, 2, 3], associatedNodeID: seg.id as string, segment: 1, label: "Look here first" }, "card-1");
+  saved.push((ops[0] as { node: MrsonNode }).node);
+  saved.push({ type: "markup", id: "local-markup-7", name: "F", markupType: "fiducial", controlPoints: [{ id: "p1", position: [4, 5, 6], label: "F-1" }], origin: { local: true } } as unknown as MrsonNode);
+  const doc = (await writeScene(saved, { producer: "test", origin: "w1", name: "s", now: () => "2026-10-02T12:00:00Z" })).doc as Obj;
+  const live = fakeLive(arrivedNodes());
+  applySceneState(live, doc);
+  const report = applySceneState(live, doc);   // the loader runs it again as each series lands
+  const markups = [...live.nodes.values()].filter((n) => n.type === "markup");
+  assertEquals(markups.length, 2, "each saved markup once");
+  const cards = markups.find((n) => n.drawAs === "cards")!;
+  const liveSeg = [...live.nodes.values()].find((n) => n.type === "segmentation")!;
+  assertEquals(cardsOf(cards)[0].associatedNodeID, liveSeg.id, "the arrived segmentation, not the saved id");
+  assertEquals(cardsOf(cards)[0].label, "Look here first");
+  assertEquals((markups.find((n) => n.name === "F")!.controlPoints as Obj[])[0].position, [4, 5, 6]);
+  assertEquals(report.missing.filter((m) => m.startsWith("name card")), []);
+});
+
+Deno.test("a scene opened on top of name cards adds its cards to the one list", async () => {
+  const { addCardOps, cardsOf } = await import("../../logic/markups/name-cards.ts");
+  const saved = liveNodes();
+  saved.push((addCardOps(undefined, "local-name-cards-1", { position: [1, 2, 3], label: "from the scene" }, "card-s").ops[0] as { node: MrsonNode }).node);
+  const doc = (await writeScene(saved, { producer: "test", origin: "w1", name: "s", now: () => "2026-10-02T12:00:00Z" })).doc as Obj;
+  const arrived = arrivedNodes();
+  arrived.push((addCardOps(undefined, "local-name-cards-9", { position: [0, 0, 0], label: "already here" }, "card-h").ops[0] as { node: MrsonNode }).node);
+  const live = fakeLive(arrived);
+  applySceneState(live, doc);
+  applySceneState(live, doc);
+  const lists = [...live.nodes.values()].filter((n) => n.drawAs === "cards");
+  assertEquals(lists.length, 1);
+  assertEquals(cardsOf(lists[0]).map((c) => c.label), ["already here", "from the scene"]);
+});
+
+Deno.test("a scene opened again over its own study adds no second point list or crop box; one deleted between passes stays deleted (critic 2026-10-02, findings 2, 12)", async () => {
+  const saved = liveNodes();
+  saved.push({ type: "markup", id: "local-markup-7", name: "F", markupType: "fiducial", controlPoints: [{ id: "p1", position: [4, 5, 6], label: "F-1" }], origin: { local: true } } as unknown as MrsonNode);
+  saved.push({ type: "markup", id: "local-markup-cropbox", name: "Crop box", markupType: "roi", center: [1, 2, 3], size: [10, 20, 30], origin: { local: true } } as unknown as MrsonNode);
+  const write = async () => (await writeScene(saved, { producer: "test", origin: "w1", name: "s", now: () => "2026-10-02T12:00:00Z" })).doc as Obj;
+  const live = fakeLive(arrivedNodes());
+  applySceneState(live, await write());
+  applySceneState(live, await write());     // opened again: a new document
+  applySceneState(live, await write());
+  const markups = () => [...live.nodes.values()].filter((n) => n.type === "markup");
+  assertEquals(markups().map((n) => n.name).sort(), ["Crop box", "F"]);
+  assertEquals(markups().find((n) => n.name === "Crop box")!.id, "local-markup-cropbox", "under the Crop panel's own id");
+  // Deleted by the person between two passes of one open: not put back.
+  const doc = await write();
+  const live2 = fakeLive(arrivedNodes());
+  applySceneState(live2, doc);
+  const f = [...live2.nodes.values()].find((n) => n.name === "F")!;
+  live2.nodes.delete(f.id as string);
+  applySceneState(live2, doc);
+  assertEquals([...live2.nodes.values()].filter((n) => n.name === "F").length, 0);
+});
+
+Deno.test("two saved lists of the same name and points stay two; a changed list gets the scene's beside it, said; a moved crop box is kept, said (critic round 2, finding 4)", async () => {
+  const saved = liveNodes();
+  const f = (id: string, label: string) => ({ type: "markup", id, name: "F", markupType: "fiducial", controlPoints: [{ id: "p1", position: [4, 5, 6], label }], origin: { local: true } }) as unknown as MrsonNode;
+  saved.push(f("local-markup-7", "F-1"), f("local-markup-8", "second list"));
+  saved.push({ type: "markup", id: "local-markup-cropbox", name: "Crop box", markupType: "roi", center: [0, 20, 10], size: [10, 20, 30], origin: { local: true } } as unknown as MrsonNode);
+  const doc = async () => (await writeScene(saved, { producer: "test", origin: "w1", name: "s", now: () => "2026-10-02T12:00:00Z" })).doc as Obj;
+  const live = fakeLive(arrivedNodes());
+  applySceneState(live, await doc());
+  const fs = () => [...live.nodes.values()].filter((n) => n.name === "F");
+  assertEquals(fs().map((n) => (n.controlPoints as Obj[])[0].label).sort(), ["F-1", "second list"]);
+  // The person moves one list's point and the crop box, then opens the scene again over its study.
+  const moved = fs().find((n) => (n.controlPoints as Obj[])[0].label === "F-1")!;
+  live.nodes.set(moved.id as string, { ...moved, controlPoints: [{ id: "p1", position: [5, 5, 6], label: "F-1" }] } as MrsonNode);
+  const box = live.nodes.get("local-markup-cropbox")!;
+  live.nodes.set("local-markup-cropbox", { ...box, center: [5, 5, 5] } as MrsonNode);
+  const r = applySceneState(live, await doc());
+  assertEquals(fs().length, 3, "the moved one, the unchanged one, and the scene's beside the moved one");
+  assertEquals(live.nodes.get("local-markup-cropbox")!.center, [5, 5, 5], "the person's box kept");
+  assertEquals(r.notes.length, 2, r.notes.join(" | "));
+});

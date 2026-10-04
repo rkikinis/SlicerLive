@@ -221,3 +221,29 @@ Deno.test("finding 8: a big endian file is called what it is, not 'not an image'
   assertEquals(r.skippedCount, 1);
   assert(/big endian/.test(r.skipped[0].reason), r.skipped[0].reason);
 });
+
+Deno.test("a deflated file (the form Albula saves label-map segmentations in) is added, not skipped", async () => {
+  const { deflateDicomFile, DEFLATED_EXPLICIT_VR_LE } = await import("../logic/dicom-deflate.ts");
+  const src = await tmp("albula-src-");
+  const sr = await makeCtSeries(4, 4, 2);
+  const D = dcmjs.data;
+  for (const [i, x] of sr.instances.entries()) {
+    const bytes = new Uint8Array(x);
+    const dd = D.DicomMessage.readFile(x);
+    const meta = D.DicomMetaDictionary.naturalizeDataset(dd.meta) as Record<string, unknown>;
+    const deflated = await deflateDicomFile(bytes, (ts) => {
+      const header = new D.DicomDict(D.DicomMetaDictionary.denaturalizeDataset({ ...meta, TransferSyntaxUID: ts }));
+      header.dict = {};
+      return new Uint8Array(header.write());
+    });
+    await Deno.writeFile(`${src}/IM${i}`, deflated);
+  }
+  const db = await freshDb();
+  const r = await importFiles(db, (await filesUnder(src)).files);
+  assertEquals(r.skippedCount, 0, JSON.stringify(r.skipped));
+  assertEquals(r.instances, 2);
+  assertEquals(r.series.length, 1);
+  const sop0 = (await import("../logic/readers/dicom-head.ts")).readDicomHead(new Uint8Array(sr.instances[0]).buffer).get("00080018")!;
+  const stored = await Deno.readFile(`${db}/${ctkInstancePath(sr.studyInstanceUID, sr.seriesInstanceUID, sop0)}`).catch(() => undefined);
+  assert(stored && new TextDecoder("latin1").decode(stored.subarray(0, 600)).includes(DEFLATED_EXPLICIT_VR_LE), "copied as it is, still deflated");
+});

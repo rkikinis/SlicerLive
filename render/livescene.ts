@@ -514,15 +514,27 @@ export class CameraDisplayableManager implements DisplayableManager {
 /** A draggable control-point handle: which markup + control-point index, and its current RAS. */
 export interface MarkupHandle { id: string; index: number; ras: Vec3 }
 
+/** The name card's pin: amber, Mike Halle's "Landmark / annotation" color (#FFB300; Ron, 2026-09-25: "lets go with amber for now"). */
+export const NAME_CARD_PIN = [1, 0.702, 0, 1];
+
 export class MarkupsDisplayableManager implements DisplayableManager {
   // `view` as well as `markup`: an ROI's 2D outline is its intersection with a slice, so it has to
   // be recomputed when the SLICE moves, not only when the box does.
   interestedTypes = ["markup", "view"];
   private nodes = new Map<string, MrsonNode>();  // markup id -> its full node (points + geometry)
+  /** Whether a name card is drawn at all (its structure shown) -- the view's rule, so the slices follow the 3D view. */
+  cardShown?: (list: MrsonNode, card: unknown) => boolean;
+  /** The card pins the slices were last given ("listId#index"): a drag grabs only one of these, so what is drawn and
+   *  what can be grabbed never disagree (critic 2026-10-02, round 2, finding 1). */
+  private drawnCardPins = new Set<string>();
+  cardPinDrawn(listId: string, index: number): boolean { return this.drawnCardPins.has(`${listId}#${index}`); }
+  /** Give the slices the markups again (a segmentation's visibility changed what a name card's pin shows). */
+  redrawSlices(scene: LiveScene) { scene.view?.setOverlay?.("*", "markups", this.overlayItems(scene)); }
   private field?: FiducialField;                 // control-point glyphs (all markup types)
   private lines?: CapsuleField;                  // connectors: line/angle/curve/plane geometry
 
   private spheresFor(node: MrsonNode): Sphere[] {
+    if (node.drawAs === "cards") return [];                 // NAME CARDS draw themselves in 3D (render/name-cards-view.ts)
     const col = (node.color as number[]) ?? MARKUP_POINT_RGB;
     const cps = (node.controlPoints as { position: number[] }[] | undefined) ?? [];
     // A small flat ring (Ron, 2026-09-25: "a tiny black ring"): 2.4 px per glyph-size step, 7 px at the default 3.
@@ -626,6 +638,7 @@ export class MarkupsDisplayableManager implements DisplayableManager {
   }
 
   private overlayItems(scene?: LiveScene): OverlayItem[] {
+    this.drawnCardPins.clear();
     const out: OverlayItem[] = [];
     // THE CROP BOX LIVES IN THE SLICE VIEWS TOO. Ron: "When you look at slicers cropping tool, it
     // lives in all viewers, 2D and 3D." Slicer has a vtkSlicerROIRepresentation2D beside its 3D one,
@@ -673,9 +686,24 @@ export class MarkupsDisplayableManager implements DisplayableManager {
       const col = (n.color as number[]) ?? [1, 0.85, 0.2, 1];               // lines and curves: amber unless colored
       const pointCol = (n.color as number[]) ?? MARKUP_POINT_RGB;          // points: a black ring unless colored
       if (n.visible === false) continue;                                    // hidden markups draw nothing
+      // NAME CARDS in the slices only when chosen (Ron, 2026-09-25: "Show in: 3D / Slices", 3D only by default): the
+      // amber pin and the typed title, no card -- the card is the 3D view's.
+      if (n.drawAs === "cards") {
+        if (!(n.showIn as { slices?: boolean } | undefined)?.slices) continue;
+        ((n.controlPoints as unknown[] | undefined) ?? []).forEach((cp0, index) => {
+          const cp = cp0 as { position: number[]; label?: string; visibility?: boolean; visible?: boolean };
+          if (cp.visibility === false || cp.visible === false || this.cardShown?.(n, cp) === false) return;
+          this.drawnCardPins.add(`${n.id}#${index}`);
+          out.push({ kind: "point", ras: cp.position as Vec3, color: NAME_CARD_PIN, radiusPx: 4, label: cp.label || undefined, ring: false, inPlaneOnly: true });   // on the slice only, never a projection (critic 2026-10-02, 14)
+        });
+        continue;
+      }
       const cps = (n.controlPoints as { position: number[]; label?: string }[] | undefined) ?? [];
       const radiusPx = Math.max(2, ((n.glyphScale as number) ?? 3) * 2);   // 2D glyph size tracks GlyphScale (Slicer)
-      for (const cp of cps) out.push({ kind: "point", ras: cp.position as Vec3, color: pointCol, radiusPx, label: cp.label, ring: true });
+      // ONLY ON THE SLICE LOOKED AT (Ron, 2026-10-03: "the appearance of the markup point on the slices [is] confusing.
+      // They should only show, if they are on the slice that is being looked at") -- no faded copy on every other slice;
+      // Slicer's own default (projection off).
+      for (const cp of cps) out.push({ kind: "point", ras: cp.position as Vec3, color: pointCol, radiusPx, label: cp.label, ring: true, inPlaneOnly: true });
       // NOT for an ROI. This joins a markup's segments end to end into one path, which is what a
       // line, an angle or a curve IS. A box's twelve edges are not a path: chaining them draws a
       // thirteen-point zigzag through the corners in whatever order they were generated. The 2D form

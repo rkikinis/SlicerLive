@@ -41,6 +41,27 @@ export function mountAccumLoop(opts: {
   };
 }
 
+// HOLDING THE 3D VIEW WHILE OTHER HEAVY CARD WORK RUNS (2026-10-03): Ron's window lost its card when whole-brain fiber
+// tracking (compute, extensions/diffusion) ran beside a 3D view of the solid anatomy -- macOS's watchdog aborted a command
+// buffer, "Impacting Interactivity" in the system log, as on 2026-09-23 with an AI network. While anything holds drawing,
+// no 3D frame is started; a change that arrives meanwhile is drawn, at full quality, when the last hold is released.
+// One place for the count (single access point): globalThis, so every bundle that mounts a loop sees the same holds.
+const HOLDS = "__albulaDrawingHolds";
+type Holds = { count: number; reasons: string[]; waiting: Set<() => void> };
+const holds = (): Holds => ((globalThis as Record<string, unknown>)[HOLDS] ??= { count: 0, reasons: [], waiting: new Set() }) as Holds;
+/** Hold the 3D views' drawing for heavy card work; returns the release (call it once, in a finally). */
+export function holdDrawing(reason: string): () => void {
+  const h = holds(); h.count++; h.reasons.push(reason);
+  let done = false;
+  return () => {
+    if (done) return; done = true;
+    h.count--; h.reasons.splice(h.reasons.indexOf(reason), 1);
+    if (h.count === 0) { const w = [...h.waiting]; h.waiting.clear(); for (const f of w) f(); }
+  };
+}
+/** Whether drawing is held, and by what (for the views' own status, and for whoever is looking). */
+export const drawingHeld = (): string[] => [...holds().reasons];
+
 // ADAPTIVE driver (M2b): the full budget×AA loop. While interacting (kicks arriving), render fast
 // budget-scaled MOVING frames (low-res trace + Catmull-Rom upsample). When kicks stop for idleGapMs,
 // switch to SETTLED convergence (native + temporal accumulation). Any kick cancels the settle. This
@@ -83,9 +104,15 @@ export function mountAdaptiveLoop(opts: {
   };
   const run = async () => {
     running = true; stopped = false;
-    while (!stopped && step()) await Promise.all([sync(), paced()]);
+    while (!stopped) {
+      // Held (holdDrawing): wait for the release, then draw the newest content from a fresh full-quality frame.
+      if (holds().count > 0) { holds().waiting.add(resume); break; }
+      if (!step()) break;
+      await Promise.all([sync(), paced()]);
+    }
     running = false;
   };
+  const resume = () => { fresh = true; if (!running && !stopped) run(); };
   return {
     kick() { lastKick = performance.now(); if (!running) run(); },   // run() renders the 1st frame synchronously
     stop() { stopped = true; },

@@ -36,19 +36,21 @@ export async function chooseFolder(prompt: string): Promise<{ token: string; pat
 const FIELDS = `
   <label class="sl-dbw-f"><span>Name</span><input name="name" maxlength="80" placeholder="e.g. Neurosurgery research"></label>
   <label class="sl-dbw-f"><span>What it holds</span><textarea name="holds" maxlength="1000" rows="2" placeholder="e.g. Pre-operative MRIs of brain tumor patients"></textarea></label>
-  <label class="sl-dbw-f"><span>Patient data</span><span><input type="checkbox" name="patientData"> real patients' scans</span></label>
-  <label class="sl-dbw-f"><span>Approval</span><input name="approval" maxlength="120" placeholder="e.g. IRB protocol number"></label>
+  <label class="sl-dbw-f" title="Public data: de-identified and released for anyone to use, as the collections on IDC or OpenNeuro are, or given by the person it is about. Leave it unticked for anything else."><span>Public data</span><span><input type="checkbox" name="publicData"> released for anyone to use</span></label>
+  <label class="sl-dbw-f" title="Optional. The rules differ between countries, and not every use needs an approval; leave it empty if there is none."><span>Approval</span><input name="approval" maxlength="120" placeholder="optional, e.g. an ethics committee or IRB number"></label>
   <label class="sl-dbw-f"><span>Whom to ask</span><input name="contact" maxlength="200"></label>
   <label class="sl-dbw-f"><span>Came from</span><input name="source" maxlength="300" placeholder="e.g. the hospital's PACS, a public collection"></label>`;
 
 function readForm(form: HTMLElement): DbDescription {
   const v = (n: string) => (form.querySelector(`[name="${n}"]`) as HTMLInputElement | null)?.value.trim() ?? "";
   return { name: v("name"), holds: v("holds"), approval: v("approval"), contact: v("contact"), source: v("source"),
-    patientData: (form.querySelector('[name="patientData"]') as HTMLInputElement).checked };
+    // ONE QUESTION, PUBLIC OR NOT (Ron, 2026-10-02: "keep it simple: Public data or not"). Stored as before, in
+    // patientData, so no description written earlier changes meaning: public = patientData false.
+    patientData: !(form.querySelector('[name="publicData"]') as HTMLInputElement).checked };
 }
 function fillForm(form: HTMLElement, d?: DbDescription) {
   for (const n of ["name", "holds", "approval", "contact", "source"] as const) (form.querySelector(`[name="${n}"]`) as HTMLInputElement).value = d?.[n] ?? "";
-  (form.querySelector('[name="patientData"]') as HTMLInputElement).checked = !!d?.patientData;
+  (form.querySelector('[name="publicData"]') as HTMLInputElement).checked = d?.patientData === false;
 }
 
 export interface DatabasesWindowOptions {
@@ -157,7 +159,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       const { ok, j } = await post("/_db/_test-cases", {});
       if (!ok || !j.job) { go.disabled = false; box.appendChild(Object.assign(document.createElement("p"), { className: "sl-dbw-err", textContent: String(j.error ?? "the download did not start") })); return; }
       // NOT onChanged(id): that would make the test database the target of "Also add to" in Load / Save, and real scans
-      // from disk would be copied into a database that says it holds no patient data (critic, finding 2).
+      // from disk would be copied into a database that says it holds public data (critic, finding 2).
       o.onChanged?.();
       follow(String(j.job));
     });
@@ -175,8 +177,8 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     const c = document.createElement("div");
     c.className = "sl-dbw-card" + (d.current ? " sl-cur" : "");
     const ds = d.description;
-    const tag = ds?.patientData === true ? `<span class="sl-dbw-tag sl-pt" title="Holds real patients' scans">patient data</span>`
-      : ds?.patientData === false ? `<span class="sl-dbw-tag" title="Holds no real patients' scans">no patient data</span>` : "";
+    const tag = ds?.patientData === true ? `<span class="sl-dbw-tag sl-pt" title="Not released for public use: kept as patient data is kept">not public</span>`
+      : ds?.patientData === false ? `<span class="sl-dbw-tag" title="De-identified and released for anyone to use">public data</span>` : "";
     const meta = [ds?.approval && `approval: ${ds.approval}`, ds?.source && `from: ${ds.source}`, ds?.contact && `ask: ${ds.contact}`].filter(Boolean) as string[];
     c.innerHTML = `<div><span class="sl-dbw-name">${esc(dbName(d))}</span>${tag}${d.current ? ` <span class="sl-hint">· opens by default</span>` : ""}${d.exists ? "" : ` <span class="sl-dbw-err">· not reachable (a disk not connected?)</span>`}</div>
       ${ds?.holds ? `<p class="sl-dbw-holds">${esc(ds.holds)}</p>` : ""}
@@ -190,7 +192,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       acts.appendChild(use);
     }
     if (canEdit && d.exists) {
-      const ed = button(ds ? "Edit" : "Add a description", "What this database is called, what it holds, whether it holds patient data and under which approval, whom to ask.");
+      const ed = button(ds ? "Edit" : "Add a description", "What this database is called, what it holds, whether it is public data, the approval it was collected under (if any), whom to ask.");
       ed.addEventListener("click", () => editForm(c, d));
       acts.appendChild(ed);
     }
@@ -231,7 +233,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     const showWhere = () => { where.textContent = folder ? `In: ${folder.path}` : "In: Albula Databases, in your home folder"; };
     showWhere();
     const make = button("Make the database", "Makes the empty database and adds it to this list.", true);
-    const other = button("Another folder…", "Choose where the database goes. Not Desktop or Documents if they are kept in iCloud: patient data there would be copied to Apple's servers.");
+    const other = button("Another folder…", "Choose where the database goes. Not Desktop or Documents if they are kept in iCloud: scans that are not public would be copied to Apple's servers.");
     const cancel = button("Cancel", "Make nothing.");
     other.addEventListener("click", async () => {
       try { const c = await chooseFolder("Where should the new database go?"); if (c) { folder = c; showWhere(); } } catch (e) { err.textContent = (e as Error).message; }

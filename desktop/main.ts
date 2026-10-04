@@ -13,8 +13,8 @@
 // hundreds of MB of immutable JS2 blob data cached across launches.
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { dirname, join, fromFileUrl, toFileUrl } from "jsr:@std/path@1";
-import { attachedDisplays, installMacMenu, keepPageVisibleOffScreen, placeWindowTopLeft, showAlert } from "./macmenu.ts";
-import { chooseFrame, readWindowFrames, windowFilePath } from "./window-frame.ts";
+import { attachedDisplays, installMacMenu, keepPageVisibleOffScreen, placeWindowTopLeft, showAlert, windowFrameNow } from "./macmenu.ts";
+import { chooseFrame, readWindowFrames, recordFrame, windowFilePath } from "./window-frame.ts";
 import { HELP_INIT_JS } from "./help-content.ts";
 
 const exeDir = dirname(Deno.execPath());
@@ -194,6 +194,17 @@ if (mac) {
   // Awaited: webview.run() blocks the event loop a few lines down, and an un-awaited fetch never
   // gets to send (the first build of this line wrote nothing -- checked in the log).
   await fetch(`${origin}/_log`, { method: "POST", body: outcome, signal: AbortSignal.timeout(2000) }).catch(() => {});
+}
+
+// THE WINDOW REMEMBERED BY THE APP ITSELF (2026-10-01; Ron: "resizing and repositioning the albula window seems to
+// have gotten lost"): the page asks every two seconds (slicer-app.ts) and the app reads its own window from macOS and
+// writes the file -- the page's screenX/outerWidth never arrived, so nothing had been saved since 2026-09-23.
+if (mac) {
+  const windowFile = windowFilePath(root);
+  webview.bind("slicerliveRememberWindow", () => {
+    try { const f = windowFrameNow(webview.unsafeWindowHandle); if (f) recordFrame(windowFile, f); return f ? "saved" : "not on screen"; }
+    catch (e) { return `not saved: ${(e as Error).message}`; }
+  });
 }
 
 // External http(s) links open in the system browser.

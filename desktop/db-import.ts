@@ -20,6 +20,7 @@
 // The originals are never touched (the staging folder's uploads are moved, then the folder removed). Copying, not
 // linking (Ron: the patient stays after the stick is gone; IRB data in one known place).
 import { readDicomHead } from "../logic/readers/dicom-head.ts";
+import { DEFLATED_EXPLICIT_VR_LE, datasetOffset } from "../logic/dicom-deflate.ts";
 import { IMPORT_FOLDER, indexImportedSeries, knownInstances, type AuditResult, type ImportSeries } from "./db-index.ts";
 import { ctkInstancePath } from "./md5.ts";
 
@@ -27,7 +28,7 @@ export { IMPORT_FOLDER };
 
 const UID = /^[0-9][0-9.]{0,63}$/;
 const DICOMDIR_CLASS = "1.2.840.10008.1.3.10";
-const NOT_READ_YET: Record<string, string> = { "1.2.840.10008.1.2.2": "big endian", "1.2.840.10008.1.2.1.99": "deflated" };
+const NOT_READ_YET: Record<string, string> = { "1.2.840.10008.1.2.2": "big endian" };
 const HEAD_BYTES = 1 << 20, HEAD_MAX = 64 << 20;
 
 export interface ImportProgress { phase: "reading" | "adding" | "done"; files: number; read: number; dicom: number; series: number; seriesDone: number }
@@ -90,8 +91,32 @@ async function head(path: string): Promise<{ h: Map<string, string>; size: numbe
   };
   let h = await read(HEAD_BYTES);
   // A large private element before the identifiers (finding 18): read further, up to 64 MB, before giving up.
-  if (!h.get("0020000E") && size > HEAD_BYTES) h = await read(HEAD_MAX);
+  if (!h.get("0020000E") && size > HEAD_BYTES && h.get("00020010") !== DEFLATED_EXPLICIT_VR_LE) h = await read(HEAD_MAX);
+  // DEFLATED (2026-10-02): the form Albula itself saves label-map segmentations in (logic/dicom-deflate.ts). Importing
+  // one -- a tumor outline from the test cases into the working database -- skipped it as "a form Albula cannot read
+  // yet". The meta group is plain; the dataset after it is one deflate stream: the beginning of it is inflated (enough
+  // for the identifiers) and read. The file is copied as it is; the loader reads the deflated form.
+  if (h.get("00020010") === DEFLATED_EXPLICIT_VR_LE && !h.get("0020000E")) {
+    await f.seek(0, Deno.SeekMode.Start);
+    const all = new Uint8Array(Math.min(size, HEAD_MAX));
+    let got = 0;
+    while (got < all.length) { const k = await f.read(all.subarray(got)); if (!k) break; got += k; }
+    const body = await inflatePrefix(all.subarray(datasetOffset(all), got), HEAD_BYTES);
+    for (const [k, v] of readDicomHead(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer)) if (!h.has(k)) h.set(k, v);
+  }
   return { h, size };
+}
+
+/** The first `max` bytes (or all, if fewer) of a raw deflate stream; the rest is not inflated. */
+async function inflatePrefix(bytes: Uint8Array, max: number): Promise<Uint8Array> {
+  const reader = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+  const parts: Uint8Array[] = []; let n = 0;
+  try {
+    while (n < max) { const { value, done } = await reader.read(); if (done) break; parts.push(value); n += value.length; }
+  } finally { await reader.cancel().catch(() => {}); }
+  const out = new Uint8Array(n); let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
 }
 
 interface Found { path: string; sop: string; study: string; series: string; h: Map<string, string> }

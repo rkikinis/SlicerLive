@@ -85,6 +85,13 @@
   --sl-scene-zone-edge: #5d4d3b;
   --sl-scrim: rgba(0, 0, 0, .45);          /* behind a floating dialog */
   --sl-scrim-strong: rgba(0, 0, 0, .55);   /* behind a modal question */
+  /* NAME CARDS (logic/markups/name-cards.ts; Ron, 2026-09-25: "If we use a whitish color for the card, it needs a clear
+     border in black"; amber pin, Mike Halle's "Landmark / annotation" color, "lets go with amber for now"). */
+  --sl-card-bg: #fbf9f5;
+  --sl-card-ink: #000;
+  --sl-card-dim: #4a4a4a;                   /* the code line, under the name */
+  --sl-card-pin: #ffb300;
+  --sl-card-pin-glow: rgba(255, 179, 0, .45);
   --sl-scrim-full: rgba(5, 6, 10, .82);    /* behind the preset picker, which needs the views quiet */
   --sl-shadow-dialog: 0 24px 70px rgba(0, 0, 0, .6);
   --sl-shadow-float: 0 6px 18px rgba(0, 0, 0, .45);
@@ -1249,3 +1256,53 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 .sl-mk-rename-btn { background: none; border: none; padding: 0; margin: 0; font: inherit; color: var(--sl-fg); border-bottom: 1px dashed var(--sl-control-edge); cursor: text; border-radius: 0; }
 .sl-mk-rename-btn:hover { border-bottom-color: var(--sl-accent); }
 .sl-mk-rename { box-sizing: border-box; min-width: 12em; background: var(--sl-bg); color: var(--sl-fg); border: 1px solid var(--sl-accent); border-radius: 5px; padding: 2px 6px; font: inherit; font-weight: 600; }
+
+/* NAME CARDS in the 3D view (render/name-cards-view.ts): an off-white card, black border and text, a black leader to an
+   amber pin. The layer passes the pointer through; only the cards take it. */
+.sl-cards { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 4; }
+.sl-cards svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.sl-card { position: absolute; width: max-content; max-width: 200px; background: var(--sl-card-bg); color: var(--sl-card-ink); border: 1.5px solid var(--sl-card-ink);
+  border-radius: 4px; padding: 3px 7px 4px; font: 12px/1.3 var(--sl-font, system-ui); pointer-events: auto; cursor: grab; user-select: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35); }
+.sl-card.sl-locked { cursor: default; }
+.sl-card.sl-gone .n { font-weight: 400; font-style: italic; color: var(--sl-card-dim); }
+.sl-card.sl-sel { outline: 2px solid var(--sl-card-pin); outline-offset: 1px; }
+.sl-card .t { font-weight: 700; }
+.sl-card .n { font-weight: 600; }
+.sl-card .t + .n { font-weight: 400; }
+.sl-card .c { color: var(--sl-card-dim); font-size: 11px; }
+.sl-card .d { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.sl-card .x { position: absolute; top: -9px; right: -9px; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--sl-card-ink);
+  background: var(--sl-card-bg); color: var(--sl-card-ink); font: 700 11px/14px system-ui; text-align: center; padding: 0; min-height: 0; display: none; cursor: pointer; }
+.sl-card:hover .x { display: block; }
+.sl-card.sl-locked:hover .x { display: none; }
+/* The Markups list's eye and lock (markups-panel.ts): drawn by the stylesheet in the button's text color, not emoji. */
+.sl-ico { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; background-color: currentColor;
+  -webkit-mask: var(--sl-ico) center / contain no-repeat; mask: var(--sl-ico) center / contain no-repeat; }
+.sl-ico-eye { --sl-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 8s2.6-4.8 7-4.8S15 8 15 8s-2.6 4.8-7 4.8S1 8 1 8z' fill='none' stroke='%23000' stroke-width='1.5'/%3E%3Ccircle cx='8' cy='8' r='2.3'/%3E%3C/svg%3E"); }
+.sl-ico-eye-off { --sl-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 8s2.6-4.8 7-4.8S15 8 15 8s-2.6 4.8-7 4.8S1 8 1 8z' fill='none' stroke='%23000' stroke-width='1.5' opacity='.45'/%3E%3Cpath d='M2.5 13.5l11-11' stroke='%23000' stroke-width='1.6'/%3E%3C/svg%3E"); }
+.sl-ico-lock { --sl-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 7V5a3 3 0 0 1 6 0v2' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Crect x='3' y='7' width='10' height='7.5' rx='1.2'/%3E%3C/svg%3E"); }
+.sl-ico-unlock { --sl-ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M5 7V5a3 3 0 0 1 5.8-1' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Crect x='3' y='7' width='10' height='7.5' rx='1.2' fill='none' stroke='%23000' stroke-width='1.5'/%3E%3C/svg%3E"); }
+.sl-mk-cardlist, .sl-mk-card { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.sl-mk-cardlist .sl-mk-actions, .sl-mk-card .sl-mk-actions { display: flex; flex: none; gap: 3px; }
+.sl-mk-card .sl-mk-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sl-panel .sl-mk-fold { background: none; border: none; padding: 0 4px 0 0; margin: 0; min-height: 0; min-width: 0; width: auto; color: var(--sl-fg); font: inherit; cursor: pointer; }
+.sl-mk-cardsel label { display: block; margin-top: 4px; }
+.sl-mk-cardsel input, .sl-mk-cardsel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 2px; }
+.sl-card-edit { position: fixed; z-index: 9400; width: 290px; max-width: calc(100vw - 16px); background: var(--sl-surface-2); border: 1px solid var(--sl-line-strong);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .55); padding: 8px 10px; pointer-events: auto; }
+.sl-card-edit .hd { display: flex; justify-content: space-between; align-items: center; font-weight: 600; color: var(--sl-heading); font-size: 12px; margin-bottom: 4px; }
+.sl-card-edit .auto { background: var(--sl-bg); border-radius: 4px; padding: 4px 7px; font-size: 12px; }
+.sl-card-edit .auto .sub { color: var(--sl-fg-muted); font-size: 11px; }
+.sl-card-edit label { display: block; color: var(--sl-fg-muted); font-size: 11px; margin: 6px 0 2px; }
+.sl-card-edit input, .sl-card-edit textarea { width: 100%; box-sizing: border-box; }
+.sl-card-edit .acts { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.sl-view-menu { position: fixed; z-index: 9500; min-width: 220px; background: var(--sl-surface-2); border: 1px solid var(--sl-line-strong); border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .55); padding: 4px 0; font-size: 12px; color: var(--sl-fg); }
+.sl-view-menu .it { padding: 4px 12px; cursor: pointer; }
+.sl-view-menu .it:hover { background: var(--sl-accent); color: var(--sl-accent-fg); }
+.sl-view-menu .it.off { color: var(--sl-fg-muted); cursor: default; }
+.sl-view-menu .it.off:hover { background: none; color: var(--sl-fg-muted); }
+.sl-view-menu .hd2 { padding: 2px 12px 3px; font-size: 11px; color: var(--sl-fg-muted); }
+.sl-view-menu .sep { border-top: 1px solid var(--sl-line); margin: 4px 0; }
+

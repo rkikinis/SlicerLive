@@ -5,7 +5,7 @@
 // real ~/.config/slicerlive/settings.ini would destroy exactly what this feature exists to protect.
 //
 //   deno test -A --no-check desktop/settings-file.test.ts
-import { assertEquals, assertNotEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert";
 
 const userDir = await Deno.makeTempDir({ prefix: "slicerlive-user-" });
 Deno.env.set("SLICERLIVE_CONFIG_DIR", userDir);
@@ -91,4 +91,22 @@ Deno.test("other methods are refused with Allow", async () => {
 Deno.test("any other path is not ours: null, so the static server handles it", async () => {
   assertEquals(await handleSettingsRequest(new Request("http://x/webgpu/slicer-app.html"), gallery), null);
   assertEquals(await handleSettingsRequest(new Request("http://x/_settings/other"), gallery), null);
+});
+
+Deno.test("the page's older copy never erases the database list the server wrote (Ron, 2026-10-02: a database vanished)", async () => {
+  const gallery = await Deno.makeTempDir();
+  const put = (body: string) => handleSettingsRequest(new Request("http://x/_settings", { method: "PUT", body }), gallery);
+  // The page started and read a file with one database...
+  const path = resolveSettingsPath(gallery);
+  await Deno.writeTextFile(path, "[Database]\ncurrent=albula\nalbula=/data/work\n\n[Layout]\nview=four-up\n");
+  // ...the server then registered a second one...
+  await Deno.writeTextFile(path, (await Deno.readTextFile(path)).replace("albula=/data/work", "albula=/data/work\ntests=/data/tests"));
+  // ...and the page writes its layout back from its old copy.
+  await put("[Database]\ncurrent=albula\nalbula=/data/work\n\n[Layout]\nview=red\n");
+  const now = await Deno.readTextFile(path);
+  assert(now.includes("tests=/data/tests"), now);
+  assert(now.includes("view=red"), now);
+  // A page that never had the section does not remove it either.
+  await put("[Layout]\nview=green\n");
+  assert((await Deno.readTextFile(path)).includes("tests=/data/tests"));
 });

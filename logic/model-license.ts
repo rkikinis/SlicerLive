@@ -140,3 +140,21 @@ export function outputRestriction(task: string): string {
       "segmentation you are about to make, not only on the software that makes it."
     : "";
 }
+
+/**
+ * nnLIVE, the Segment Editor's "Click to outline" (Ron, 2026-10-03: "yes, and follow the totalsegementator template").
+ * nnLive is Steve Pieper's distilled copy of MIC-DKFZ's nnInteractive; its code is Apache-2.0, and its WEIGHTS inherit
+ * nnInteractive's CC BY-NC-SA 4.0. The clauses as nnLive's MODELS.md words them (github.com/pieper/nnLive, read
+ * 2026-10-03). The license is on the model, not on what it outlines: `restrictedOutput` false, so the dialog is asked
+ * once a session, as for TotalSegmentator's other networks.
+ */
+export const NNLIVE_LICENSE: ModelLicense = {
+  project: "nnLive (from nnInteractive)",
+  url: "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+  terms: [
+    { title: "Attribution", text: "Attribution to nnInteractive (Isensee, Rokuss, et al., MIC-DKFZ) is required." },
+    { title: "Non-commercial", text: "Non-commercial use only." },
+    { title: "Share-alike", text: "Redistribution of the weights (or derivatives) must be under the same CC BY-NC-SA 4.0 license." },
+  ],
+  restrictedOutput: false,
+};

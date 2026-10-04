@@ -12,7 +12,7 @@ const userDir = await Deno.makeTempDir({ prefix: "slicerlive-user-" });
 Deno.env.set("SLICERLIVE_CONFIG_DIR", userDir);
 
 const { handleDbRequest } = await import("./db-serve.ts");
-const { handleSettingsRequest } = await import("./settings-file.ts");
+const { resolveSettingsPath, writeSettings } = await import("./settings-file.ts");
 
 const folder = await Deno.makeTempDir({ prefix: "slicerlive-folder-" });
 const gallery = `${folder}/src/live`;
@@ -20,10 +20,7 @@ await Deno.mkdir(gallery, { recursive: true });
 
 const dbDir = await Deno.makeTempDir({ prefix: "slicerlive-db-" });
 await Deno.writeTextFile(`${dbDir}/ctkDICOM.sql`, "not a real database, but a real file");
-await handleSettingsRequest(
-  new Request("http://x/_settings", { method: "PUT", body: `[Database]\ntest=${dbDir}\ncurrent=test\n` }),
-  gallery,
-);
+await writeSettings(resolveSettingsPath(gallery), `[Database]\ntest=${dbDir}\ncurrent=test\n`);
 
 const meta = (over: Record<string, unknown> = {}) =>
   JSON.stringify({ task: "ts:total", volume: "NEPHROGENIC", at: "2026-09-05T13:12:00.000Z", ms: 28000, ...over });
@@ -171,10 +168,7 @@ Deno.test("an unknown database is refused, not created", async () => {
 Deno.test("listing a database with no checkpoints is empty, not an error", async () => {
   const other = await Deno.makeTempDir({ prefix: "slicerlive-db2-" });
   await Deno.writeTextFile(`${other}/ctkDICOM.sql`, "x");
-  await handleSettingsRequest(
-    new Request("http://x/_settings", { method: "PUT", body: `[Database]\ntest=${dbDir}\nblank=${other}\ncurrent=test\n` }),
-    gallery,
-  );
+  await writeSettings(resolveSettingsPath(gallery), `[Database]\ntest=${dbDir}\nblank=${other}\ncurrent=test\n`);
   const res = await handleDbRequest(new Request("http://x/_db/blank/_checkpoints"), gallery);
   assertEquals(res!.status, 200);
   assertEquals((await res!.json()).checkpoints, []);

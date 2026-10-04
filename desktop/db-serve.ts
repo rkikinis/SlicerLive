@@ -37,6 +37,7 @@ import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_F
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
 import { getTestCases, TEST_CASES, testCasesComplete, type TestCaseProgress } from "./test-cases.ts";
+import { readRecord, recordKept, removeTransferred, sameDatabase, transferSeries, type TransferProgress, type TransferResult, type TransferSide } from "./db-transfer.ts";
 
 const SECTION = "Database";
 
@@ -141,6 +142,8 @@ const FEATURES = [
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
   "import",        // POST /_db/<id>/_import {token} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
   "test-cases",    // GET /_db/_test-cases (what, how big, which database has them); POST to start; GET /_db/_test-cases/<job>
+  "transfer",      // POST /_db/_transfer {from, to, series, move?, scenes?}; GET /_db/_transfer/<job>; POST /_db/_transfer/<job>/_remove
+  "record",        // GET /_db/<id>/_record -- what came in and went out (transfers), newest first
 ];
 
 /** The test-case download (desktop/test-cases.ts): one at a time, its progress kept while the server runs. */
@@ -177,6 +180,46 @@ function startImport(dbId: string, dbPath: string, files: () => Promise<{ files:
   });
   importQueue.set(dbPath, run);
   run.finally(() => { if (importQueue.get(dbPath) === run) importQueue.delete(dbPath); });
+  return job;
+}
+
+/**
+ * TRANSFERS between two registered databases (desktop/db-transfer.ts), by job id like imports, IN BOTH DATABASES' QUEUES:
+ * a copy out of a database while a move's removal ran on it reported a scan "not copied" that had arrived (critic,
+ * 2026-10-02, finding 4). A move's removal runs on its own call -- the person's second press -- in both queues again.
+ * A move waiting for that press stays listed (GET /_db/_transfer) until it is finished or kept (finding 8).
+ */
+interface TransferJob { job: string; from: TransferSide; to: TransferSide; move: boolean; progress: TransferProgress; result?: TransferResult; error?: string; started: number; ended?: number; removing?: boolean; kept?: boolean; by: string }
+const transfers = new Map<string, TransferJob>();
+
+function queued(paths: string[], work: () => Promise<void>): void {
+  const prev = Promise.all(paths.map((p) => (importQueue.get(p) ?? Promise.resolve()).catch(() => {})));
+  const run = prev.then(work);
+  for (const p of paths) importQueue.set(p, run);
+  run.finally(() => { for (const p of paths) if (importQueue.get(p) === run) importQueue.delete(p); });
+}
+
+/** A move that has copied and waits for the person's second press. */
+const waiting = (r: TransferJob) => r.move && r.progress.phase === "ready" && !r.removing && !r.kept && !r.error;
+
+function startTransfer(from: TransferSide, to: TransferSide, series: string[], opts: { move: boolean; scenes: boolean; by: string }): string {
+  const now = Date.now();
+  for (const [k, r] of transfers) if (r.ended && !waiting(r) && now - r.ended > 3600_000) transfers.delete(k);
+  const job = crypto.randomUUID();
+  const rec: TransferJob = { job, from, to, move: opts.move, by: opts.by, progress: { phase: "reading", series: series.length, seriesDone: 0 }, started: now };
+  transfers.set(job, rec);
+  queued([from.path, to.path], async () => {
+    try {
+      rec.result = await transferSeries(from, to, series, { move: opts.move, scenes: opts.scenes, by: opts.by, onProgress: (p) => { rec.progress = p; } });
+      const w = icloudWarning(to.path);
+      if (w && rec.result.added) rec.result.notes.push(w);
+    } catch (e) {
+      rec.error = (e as Error).message;
+      rec.progress = { ...rec.progress, phase: "done" };
+    } finally {
+      rec.ended = Date.now();
+    }
+  });
   return job;
 }
 
@@ -250,7 +293,9 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         if (!chosen) return Response.json({ error: "choose the database folder first" }, { status: 400 });
         path = chosen.path;
         if (!(await hasIndex(path))) return Response.json({ error: "that folder holds no DICOM database (no ctkDICOM.sql)" }, { status: 400 });
-        if (registered.some((d) => d.path === path)) return Response.json({ error: "that database is already in the list" }, { status: 409 });
+        // THE SAME FOLDER UNDER ANOTHER NAME (a link, /tmp against /private/tmp) is the same database: registered twice, a
+        // move between the two entries compared each file with itself and deleted it (critic, 2026-10-02, finding 1).
+        for (const d of registered) if (await sameDatabase(d.path, path)) return Response.json({ error: `that database is already in the list, as “${d.description?.name ?? d.id}”` }, { status: 409 });
         // ITS DESCRIPTION IS LEFT AS IT IS (critic, 2026-10-01, finding 3): one that does not pass the checker is not
         // replaced -- the person's approval number and contact were lost that way -- and only a database with no
         // description file at all gets one, naming it.
@@ -267,6 +312,9 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         // NOT INSIDE ANOTHER DATABASE (finding 10): its audit would count the new one's files as orphans from then on.
         if (chosen && await hasIndex(chosen.path)) return Response.json({ error: "that folder already holds a DICOM database; use “Add an existing database folder” for it, or choose another folder" }, { status: 400 });
         path = chosen ? chosen.path : `${defaultDatabasesFolder()}/${folderName}`;
+        // A FOLDER OF THAT NAME ALREADY THERE gets a number (two databases may share a name: "Start fresh" keeps the old
+        // one as an archive and makes a new one under its name; transfer-window.ts).
+        if (!chosen) for (let i = 2; await Deno.stat(path).then(() => true, () => false); i++) path = `${defaultDatabasesFolder()}/${folderName} ${i}`;
         if (chosen && (await Array.fromAsync(Deno.readDir(path))).some((e) => !e.name.startsWith("."))) path = `${path}/${folderName}`;
         const inside = registered.find((d) => path.startsWith(d.path.replace(/\/+$/, "") + "/"));
         if (inside) return Response.json({ error: `that folder is inside the database “${inside.description?.name ?? inside.id}”; choose a folder outside it` }, { status: 400 });
@@ -328,6 +376,53 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     return Response.json({ db: testCasesJob.db, progress: testCasesJob.progress, error: testCasesJob.error, done: !!testCasesJob.ended }, noStore);
   }
 
+  // POST /_db/_transfer {from, to, series: [uid], move?, scenes?, by?} -- copy (or move) series between two databases.
+  if (url.pathname === "/_db/_transfer" && req.method === "POST") {
+    const b = await jsonBody();
+    const dbs = await registeredDatabases(galleryRoot);
+    const from = dbs.find((d) => d.id === String(b.from ?? "")), to = dbs.find((d) => d.id === String(b.to ?? ""));
+    if (!from?.exists || !to?.exists) return Response.json({ error: "choose two databases that are on this computer" }, { status: 404 });
+    if (from.id === to.id || await sameDatabase(from.path, to.path)) return Response.json({ error: "the two are the same database (one folder, perhaps under two names)" }, { status: 400 });
+    const series = Array.isArray(b.series) ? (b.series as unknown[]).map(String).filter((u) => /^[0-9][0-9.]{0,63}$/.test(u)) : [];
+    if (!series.length) return Response.json({ error: "nothing chosen" }, { status: 400 });
+    const name = (d: RegisteredDb) => d.description?.name ?? d.id;
+    const by = String(b.by ?? "Albula").replace(/[\u0000-\u001f]/g, " ").slice(0, 80);
+    const job = startTransfer({ id: from.id, path: from.path, name: name(from) }, { id: to.id, path: to.path, name: name(to) }, series, { move: b.move === true, scenes: b.scenes !== false, by });
+    return Response.json({ job }, noStore);
+  }
+  // GET /_db/_transfer -- the moves waiting for their second press, oldest first.
+  if (url.pathname === "/_db/_transfer" && req.method === "GET") {
+    const list = [...transfers.values()].filter(waiting).sort((a, b) => a.started - b.started).map((r) => ({
+      job: r.job, from: r.from.id, fromName: r.from.name, to: r.to.id, toName: r.to.name, scans: r.result?.identical.length ?? 0, at: new Date(r.started).toISOString() }));
+    return Response.json({ waiting: list }, noStore);
+  }
+  // GET /_db/_transfer/<job> -- progress, then the result; POST .../_remove -- a move's second step; POST .../_keep -- not.
+  const tj = /^\/_db\/_transfer\/([0-9a-f-]{36})(\/_remove|\/_keep)?$/.exec(url.pathname);
+  if (tj) {
+    const rec = transfers.get(tj[1]);
+    if (!rec) return Response.json({ error: "this transfer is no longer known to Albula (it was restarted); nothing was removed" }, { status: 404 });
+    if (tj[2] && req.method === "POST") {
+      if (!waiting(rec) || !rec.result) return Response.json({ error: "nothing is waiting to be removed" }, { status: 409 });
+      const result = rec.result;
+      if (tj[2] === "/_keep") {
+        rec.kept = true;
+        await recordKept(rec.from, rec.to, result, rec.by).catch(() => {});
+        rec.progress = { ...rec.progress, phase: "done" };
+        return Response.json({ ok: true }, noStore);
+      }
+      rec.removing = true;
+      queued([rec.from.path, rec.to.path], async () => {
+        try { result.removed = await removeTransferred(rec.from, rec.to, result, { by: rec.by, onProgress: (p) => { rec.progress = p; } }); }
+        catch (e) { rec.error = (e as Error).message; }
+        finally { rec.progress = { ...rec.progress, phase: "done" }; rec.ended = Date.now(); }
+      });
+      return Response.json({ ok: true }, noStore);
+    }
+    if (req.method === "GET") {
+      return Response.json({ from: rec.from.id, to: rec.to.id, move: rec.move, kept: !!rec.kept, progress: rec.progress, result: rec.result, error: rec.error, seconds: Math.round((Date.now() - rec.started) / 1000) }, noStore);
+    }
+  }
+
   // GET /_db/_import/<job> -- an import's progress, then its result.
   const ij = /^\/_db\/_import\/([0-9a-f-]{36})$/.exec(url.pathname);
   if (ij && req.method === "GET") {
@@ -341,6 +436,11 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       const body = await req.json().catch(() => ({})) as { id?: string; path?: string; current?: string };
       if (body.path && !isAbsolute(body.path)) {
         return Response.json({ error: "a database path must be absolute" }, { status: 400 });
+      }
+      if (body.id && body.path) {
+        for (const d of await registeredDatabases(galleryRoot)) {
+          if (d.id !== body.id && await sameDatabase(d.path, body.path)) return Response.json({ error: `that database is already in the list, as “${d.description?.name ?? d.id}”` }, { status: 409 });
+        }
       }
       const list = await updateDatabases(galleryRoot, {
         register: body.id && body.path ? { id: body.id, path: body.path } : undefined,
@@ -467,6 +567,14 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       await Deno.remove(`${dir}/${d.file}`).catch(() => {});
       await Deno.remove(`${dir}/${d.file}.json`).catch(() => {});
     }
+  }
+
+  // GET /_db/<id>/_record -- the database's record of what came in and went out, newest first.
+  const rc = /^\/_db\/([^/]+)\/_record$/.exec(url.pathname);
+  if (rc && req.method === "GET") {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(rc[1]));
+    if (!db || !db.exists) return Response.json({ error: "no such database" }, { status: 404 });
+    return Response.json({ entries: await readRecord(db.path, Number(url.searchParams.get("limit")) || 200) }, noStore);
   }
 
   // GET/PUT /_db/<id>/_description -- what the database says about itself (Ron: "option to edit might be nice").

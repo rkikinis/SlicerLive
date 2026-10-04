@@ -22,9 +22,10 @@ import type { LiveScene } from "../livescene.ts";
 import type { LocalBlobStore } from "../../logic/ingest.ts";
 import { lookupStructure } from "../../logic/segment-naming.ts";
 import { invalidatePaintCache } from "../../logic/segmentation-editor.ts";
+import { defaultTarget } from "../../logic/click-outline.ts";
 
 interface Hooks {
-  __createSegmentation: (sourceImageId: string) => Promise<{ segId: string; segment: number }>;
+  __createSegmentation: (sourceImageId: string, name?: string) => Promise<{ segId: string; segment: number }>;
   __addSegment: (segId: string) => number;
   __applyEffect: (segId: string, effect: string, params: Record<string, unknown>) => Promise<{ voxels: number; threshold?: number; ms?: number }>;
   __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => void;
@@ -34,6 +35,9 @@ interface Hooks {
   __segTool: () => { activeEffect: string; diameterMm: number; sphere: boolean };
   __saveEditedSegmentation: (segId: string, o?: { asNew?: boolean }) => Promise<{ ok: boolean; name?: string; error?: string; kept?: string }>;
   __editSegmentation?: (segId: string) => void;
+  __clickOutlineLicense: () => Promise<boolean>;
+  __clickOutlineStart: (segId: string, target: number, made?: boolean) => Promise<boolean>;
+  __clickOutlineEnd: () => void;
 }
 const g = () => globalThis as unknown as Hooks;
 type Seg = { labelValue: number; name?: string; structure?: string; color?: number[]; visible?: boolean };
@@ -64,6 +68,8 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   let segId = "", active = 1, filter = "";
   const openGroups = new Set<string>();
   let brushVox = 14;
+  /** Click to outline's structure, per segmentation: a label value, "tumor" (a Tumor structure to be made) or "new". */
+  const clickInto = new Map<string, number | "tumor" | "new" | "newseg">();
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
   const node = () => (segId ? live.nodes.get(segId) : undefined) as Obj | undefined;
   const segsOf = (id: string) => ((live.nodes.get(id)?.segments as Seg[] | undefined) ?? []);
@@ -160,6 +166,75 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     }).join("");
   }
 
+  // WHERE AN OUTLINE GOES (Ron, 2026-10-03: "I do not want to overwrite the existing segementation. It should offer to
+  // create a new one, if I did not load one"; then, asked: a new one by default, a loaded one only when chosen; and a
+  // question before making one when none is loaded). A segmentation this tool made is its own: its Tumor is the default
+  // there. Any other -- loaded from the database or a file, or made by hand -- defaults to "a new segmentation".
+  const madeByTool = new Set<string>();
+  type Into = number | "tumor" | "new" | "newseg";
+  const intoOf = (id: string): Into => clickInto.get(id) ?? (!id || !madeByTool.has(id) ? "newseg" : defaultTarget(segsOf(id)) ?? "tumor");
+  /** "Into:" — a new segmentation (with a Tumor structure), or, in the chosen one, Tumor, a structure, or a new structure. */
+  function clickOptions(): string {
+    const segs = segsOf(segId);
+    const cur = intoOf(segId);
+    const opt = (v: string | number, label: string) => `<option value="${v}"${cur === v ? " selected" : ""}>${label}</option>`;
+    return opt("newseg", "Into: a new segmentation") + (segId ? (defaultTarget(segs) === null ? opt("tumor", "Into: Tumor (new, in this one)") : "") +
+      segs.map((x) => opt(x.labelValue, `Into: ${escapeHtml(x.name ?? `Segment ${x.labelValue}`)} (this one)`)).join("") +
+      opt("new", "Into: a new structure (this one)") : "");
+  }
+  /** Make the chosen structure if it is to be made; its label value. */
+  function clickTarget(id: string): number {
+    const segs = segsOf(id);
+    const want = intoOf(id);
+    if (typeof want === "number" && segs.some((x) => x.labelValue === want)) return want;
+    const v = g().__addSegment(id);
+    if (want !== "new") g().__setSegmentProp(id, v, "name", "Tumor");
+    clickInto.set(id, v);
+    return v;
+  }
+  /** The scan the slice views show (the first view's background), else the only scan loaded. */
+  function shownScan(): string {
+    for (const n of live.nodes.values()) {
+      if (n.type !== "sliceComposite") continue;
+      const bg = ((n.refs as Record<string, string[]> | undefined)?.background ?? [])[0];
+      const img = bg ? live.nodes.get(bg) : undefined;
+      if (img?.type === "image" && !img.labelmap) return bg;
+    }
+    return ([...live.nodes.values()].find((n) => n.type === "image" && !n.labelmap)?.id as string | undefined) ?? "";
+  }
+  async function clickOutlineToggle() {
+    if (String(g().__segTool?.().activeEffect).toLowerCase() === "clickoutline") { g().__clickOutlineEnd(); return; }
+    // The license first: a structure made for the outline and then refused would stay behind, empty.
+    if (!(await g().__clickOutlineLicense())) return;
+    // ON A SCAN WITH NO SEGMENTATION CHOSEN (Ron, 2026-10-03, on a T1 alone: "click to outline does not respond" -- every
+    // tool was grayed out until a segmentation was chosen, and only a tooltip said so): the press makes one on the scan
+    // the views show, with a Tumor structure. Made by this press, for this tool: removed again if no click lands in it.
+    let made = false;
+    const none = !segId || !live.nodes.has(segId);
+    if (none || intoOf(segId) === "newseg") {
+      // On the scan of the segmentation chosen, else the scan the views show.
+      const scan = (!none && (((live.nodes.get(segId)?.refs as Record<string, string[]> | undefined)?.source ?? [])[0])) || shownScan();
+      if (!scan) { status("Click to outline: load a scan first"); return; }
+      // NOTHING LOADED: ask first (Ron's choice).
+      if (none) {
+        const scanName = String(live.nodes.get(scan)?.name ?? "the scan");
+        const ok = await shell.confirm({ title: "Make a new segmentation for the outline?", body: `<p>No segmentation is loaded. Click to outline makes a new one on <b>${escapeHtml(scanName)}</b>, with a structure named Tumor.</p><p class="sl-hint">It is not saved until you press Save; if you end without clicking, it is removed again.</p>`, ok: "Make it", cancel: "Cancel" });
+        if (!ok) return;
+      }
+      const r = await g().__createSegmentation(scan, "Tumor outline");
+      segId = r.segId; made = true; madeByTool.add(segId);
+      g().__setSegmentProp(segId, r.segment, "name", "Tumor");
+      clickInto.set(segId, r.segment);
+    }
+    const id = segId;
+    const target = clickTarget(id);
+    active = target;
+    render();
+    const ok = await g().__clickOutlineStart(id, target, made);
+    if (ok) g().__setSegTool(id, "clickOutline", { segment: target });
+    render();
+  }
+
   function render() {
     if (!root) return;
     const n = node();
@@ -189,12 +264,13 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <div class="sl-row"><label>Islands</label><button class="sl-eff-largest" title="Keep the largest connected piece of this structure; remove the rest">Keep largest</button><button class="sl-eff-small" title="Remove pieces smaller than 10 voxels">Remove small</button></div>
       <div class="sl-row"><label>Smoothing</label><button class="sl-eff-median">Median</button><button class="sl-eff-open">Open</button><button class="sl-eff-close">Close</button></div>
       <div class="sl-row"><label>Margin (voxels)</label><input class="sl-margin" type="number" value="2" step="1" style="width:48px" title="How far to grow or shrink, in voxels of this volume"><button class="sl-eff-grow">Grow</button><button class="sl-eff-shrink">Shrink</button></div>
+      <div class="sl-row"><label>By clicking</label><button class="sl-eff-click${String(tool.activeEffect).toLowerCase() === "clickoutline" ? " sl-primary" : ""}" title="Click inside a structure in any view and it is outlined in 3D; click again to add, shift-click to take away. Esc or a right-click ends. Academic, non-commercial use (nnLive, from nnInteractive). More in Help.">Click to outline</button><select class="sl-click-into" title="The structure the outline goes into. Further clicks refine the same one.">${clickOptions()}</select></div>
       <div class="sl-row"><label>From strokes</label><button class="sl-eff-seeds" title="Fills each structure out to its edges from a few painted strokes. Paint strokes inside the structure, and with a second segment in what surrounds it, then press. Every segment shown takes part, and everything around the strokes becomes one of them; hide the segments that should stay as they are (the eye). Undo puts the strokes back.">Grow from seeds</button></div>
       <details class="sl-advanced"><summary>Advanced</summary>
         <div class="sl-row"><label>Logical (label no.)</label><input class="sl-other" type="number" value="2" step="1" style="width:60px"><button class="sl-eff-union">∪</button><button class="sl-eff-sub">−</button><button class="sl-eff-int">∩</button></div>
         <div class="sl-row"><button class="sl-eff-stats">Statistics</button></div><div class="sl-seg-stats"></div>
       </details>`;
-    if (!segId) tl.querySelectorAll<HTMLButtonElement>("button").forEach((b) => { b.disabled = true; b.title = "Choose a segmentation at the top first"; });
+    if (!segId) tl.querySelectorAll<HTMLButtonElement>("button:not(.sl-eff-click)").forEach((b) => { b.disabled = true; b.title = "Choose a segmentation at the top first"; });
     const sv = shell.section(root, "Save", { open: true, band: "yellow" });
     sv.innerHTML = `<p class="sl-hint">${saveWords}</p>
       <div class="sl-row sl-actions">${segId && o.editedCopy ? `<button class="sl-se-saveas" title="Keep the edited copy as it is and write these edits as another new series">Save as a new series</button>` : ""}<button class="sl-se-save${edited ? " sl-primary" : ""}"${segId ? "" : " disabled"}>Save</button></div>`;
@@ -229,7 +305,21 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     onEffect($(".sl-eff-sub"), "logical", () => ({ logical: "subtract", other: num(".sl-other") }));
     onEffect($(".sl-eff-int"), "logical", () => ({ logical: "intersect", other: num(".sl-other") }));
     { const sb = $<HTMLButtonElement>(".sl-eff-stats"); sb.addEventListener("click", () => void runAction(sb, async () => { const stt = await g().__segmentStats(segId); $(".sl-seg-stats").innerHTML = stt.map((x) => `<div class="sl-hint">${escapeHtml(segsOf(segId).find((s) => s.labelValue === x.labelValue)?.name ?? `Segment ${x.labelValue}`)}: ${x.voxels.toLocaleString()} voxels, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); }, { busyLabel: "Counting…", doneLabel: "Done ✓" }).catch(() => {})); }
-    const setTool = async (t: string) => { const id = await ensureSeg(); if (!id) return; const cur = g().__segTool().activeEffect; g().__setSegTool(id, cur === t ? "" : t, { diameterMm: brushVox * sp, sphere: ($(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); status(cur === t ? "Brush off" : `${t === "paint" ? "Paint" : "Erase"}: drag in a slice view`); render(); };
+    const setTool = async (t: string) => { const id = await ensureSeg(); if (!id) return; if (String(g().__segTool().activeEffect).toLowerCase() === "clickoutline") g().__clickOutlineEnd(); const cur = g().__segTool().activeEffect; g().__setSegTool(id, cur === t ? "" : t, { diameterMm: brushVox * sp, sphere: ($(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); status(cur === t ? "Brush off" : `${t === "paint" ? "Paint" : "Erase"}: drag in a slice view`); render(); };
+    // CLICK TO OUTLINE (render/click-outline-tool.ts): the button starts and ends it; changing "Into:" while it is on
+    // moves it to that structure (Ron, 2026-10-03: "user defines the structure with tumor as default … option to have a
+    // new structure").
+    { const cb = $<HTMLButtonElement>(".sl-eff-click"); cb.addEventListener("click", () => void runAction(cb, clickOutlineToggle, { busyLabel: "Starting…", doneLabel: "", failedLabel: "Failed" }).catch((e) => status(`Click to outline: ${(e as Error).message ?? e}`))); }
+    $<HTMLSelectElement>(".sl-click-into").addEventListener("change", async (e) => {
+      const v = (e.target as HTMLSelectElement).value;
+      clickInto.set(segId, v === "tumor" || v === "new" || v === "newseg" ? v : Number(v));
+      if (String(g().__segTool?.().activeEffect).toLowerCase() === "clickoutline") {
+        if (v === "newseg") { g().__clickOutlineEnd(); await clickOutlineToggle(); render(); return; }   // start over in a new one
+        const target = clickTarget(segId); active = target;
+        if (await g().__clickOutlineStart(segId, target)) g().__setSegTool(segId, "clickOutline", { segment: target });
+      }
+      render();
+    });
     $(".sl-eff-paint").addEventListener("click", () => setTool("paint"));
     $(".sl-eff-erase").addEventListener("click", () => setTool("erase"));
     $(".sl-brush-vox").addEventListener("input", (e) => { brushVox = Number((e.target as HTMLInputElement).value); ($(".sl-brush-v") as HTMLElement).textContent = `${brushVox} voxels`; ($(".sl-brush-mm") as HTMLElement).textContent = `≈ ${(brushVox * sp).toFixed(1)} mm on this ${sp.toFixed(2)} mm grid`; syncTool(); });
@@ -274,8 +364,25 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       </svg>
       <p>The first save writes a new series named “…, edited” and the date and time; rename it with a double-click in
       Segmentations. Later saves update that edited copy; <b>Save as a new series</b> keeps it and writes another. A
-      copy that a saved scene uses is kept either way.</p>`,
+      copy that a saved scene uses is kept either way.</p>
+      <h4>Click to outline</h4>
+      <p>Press <b>Click to outline</b>, then click inside a structure in a slice view or on it in 3D: it is outlined in
+      3D. Each further click refines the same outline — a click where it missed adds, a <b>shift-click</b> where it
+      spilled over takes away. The outline goes into the structure chosen beside the button (<b>Tumor</b> unless you
+      choose another, or a new one); it replaces what the tool drew there with the last click, never another structure
+      and never what you painted by hand. <b>Undo</b> takes back the last click; Esc or a right-click ends.</p>
+      <p>It runs <b>nnLive</b> (Steve Pieper, <a href="https://github.com/pieper/nnLive">github.com/pieper/nnLive</a>), a
+      smaller copy of <b>nnInteractive</b> (MIC-DKFZ, <a href="https://github.com/MIC-DKFZ/nnInteractive">github.com/MIC-DKFZ/nnInteractive</a>),
+      on this computer's graphics card: nothing is sent anywhere. The model is fetched once (188 MB) the first time it
+      is used. nnLive's own measurement: its outlines agree with nnInteractive's at about 0.74 Dice when refining.</p>
+      <p><b>License:</b> the model is for academic, non-commercial use only (Creative Commons BY-NC-SA 4.0, inherited from
+      nnInteractive); you are asked to agree once a session. The program code is Apache 2.0.</p>
+      <p><b>Please cite</b> when you publish work that used it: Isensee F, Rokuss M, Krämer L, et al. nnInteractive:
+      Redefining 3D Promptable Segmentation. 2025. <a href="https://arxiv.org/abs/2503.08373">arXiv:2503.08373</a></p>`,
     mount(el) { root = el; render(); },
   });
   live.subscribe((c) => { if (c.type === "segmentation" || c.type === "image") render(); });
+  Object.assign(globalThis, { __segEditorRender: () => render() });
+  // Esc ends Click to outline, as it ends placing a markup.
+  addEventListener("keydown", (e) => { if (e.key === "Escape" && String(g().__segTool?.().activeEffect).toLowerCase() === "clickoutline") g().__clickOutlineEnd(); });
 }

@@ -14,7 +14,7 @@
 // all decision (showHideAllState), and what an extension draws opaque in 3D for the 3D probe (registerRayHits). Each
 // version only adds; an extension written for an earlier one still builds.
 
-export const SDK_VERSION = 4;
+export const SDK_VERSION = 5;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -72,6 +72,8 @@ export async function saveSegmentationToDicom(segId: string): Promise<string> {
 }
 /** A button that says what is happening to it: busy, done, failed (core's, as every module's buttons do). */
 export { runAction } from "../render/demos/app-shell.ts";
+// Hold the 3D views' drawing while heavy card work runs (2026-10-03: macOS's watchdog, tracking beside the solid anatomy).
+export { drawingHeld, holdDrawing } from "../render/demos/accum-loop.ts";
 /** The Show / Hide all button's decision, as the Segmentations module makes it (one rule, one wording, tested in core). */
 export { showHideAllState } from "../render/demos/segmentations-panel.ts";
 /** Rows for the data probe about a point (patient RAS): an extension's objects under the pointer. */

@@ -124,7 +124,7 @@ async function sqlite(dbPath: string, sql: string, readonly = true): Promise<str
  * snapshot back: SQLite's own rollback has already left the file as it was.
  */
 const writers = new Map<string, Promise<unknown>>();
-async function withIndexLock<T>(dbDir: string, fn: () => Promise<T>): Promise<T> {
+export async function withIndexLock<T>(dbDir: string, fn: () => Promise<T>): Promise<T> {
   const key = dbDir.replace(/\/+$/, "");
   const prev = writers.get(key) ?? Promise.resolve();
   const run = prev.catch(() => {}).then(fn);
@@ -730,10 +730,20 @@ export function insideDatabase(rel: string): boolean {
 
 export async function deleteSeriesFromDatabase(dbDir: string, seriesUID: string): Promise<DeleteResult> {
   if (!UID.test(seriesUID)) throw new Error(`not a DICOM UID: ${seriesUID}`);
-  return await withIndexLock(dbDir, () => deleteSeriesLocked(dbDir, seriesUID));
+  return await withIndexLock(dbDir, () => deleteSeriesLocked(dbDir, [seriesUID]));
 }
 
-async function deleteSeriesLocked(dbDir: string, seriesUID: string): Promise<DeleteResult> {
+/**
+ * SEVERAL SERIES IN ONE GO: one backup, one transaction, one audit. A move's second step took 1.7 s a series one at a
+ * time -- the backup and the whole-database audit each time -- and 100 small scans 168 s (critic, 2026-10-02, finding 11).
+ * The caller holds the index lock (`withIndexLock`), so a check made just before stays true.
+ */
+export async function deleteSeriesBatchLocked(dbDir: string, seriesUIDs: string[]): Promise<DeleteResult> {
+  for (const u of seriesUIDs) if (!UID.test(u)) throw new Error(`not a DICOM UID: ${u}`);
+  return await deleteSeriesLocked(dbDir, [...new Set(seriesUIDs)]);
+}
+
+async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<DeleteResult> {
   const dbPath = `${dbDir}/ctkDICOM.sql`;
   if (await busy(dbPath)) {
     throw new Error("the DICOM index is open by another program (a -wal/-journal file is present); close it and try again");
@@ -743,10 +753,13 @@ async function deleteSeriesLocked(dbDir: string, seriesUID: string): Promise<Del
   // "slice 1.dcm" came back as "\"slice 1.dcm\"", matched no row, and was left on disk while its series was
   // reported deleted -- 11,611 such files in Ron's index (critic, 2026-09-23, O1). Every other reader
   // of the index already used JSON.
-  const raw = (await sqlite(dbPath, `.mode json\nSELECT Filename AS f FROM Images WHERE SeriesInstanceUID=${q(seriesUID)};`)).trim();
-  const rows = (raw ? JSON.parse(raw) as { f: string | null }[] : []).map((r) => r.f ?? "").filter(Boolean);
-  if (!rows.length) {
-    const present = (await sqlite(dbPath, `SELECT COUNT(*) FROM Series WHERE SeriesInstanceUID=${q(seriesUID)};`)).trim();
+  const rows: string[] = [];
+  for (let i = 0; i < uids.length; i += 500) {
+    const raw = (await sqlite(dbPath, `.mode json\nSELECT Filename AS f FROM Images WHERE SeriesInstanceUID IN (${uids.slice(i, i + 500).map(q).join(",")});`)).trim();
+    rows.push(...(raw ? JSON.parse(raw) as { f: string | null }[] : []).map((r) => r.f ?? "").filter(Boolean));
+  }
+  if (!rows.length && uids.length === 1) {
+    const present = (await sqlite(dbPath, `SELECT COUNT(*) FROM Series WHERE SeriesInstanceUID=${q(uids[0])};`)).trim();
     if (present === "0") throw new Error("no such series in this database");
   }
 
@@ -756,19 +769,14 @@ async function deleteSeriesLocked(dbDir: string, seriesUID: string): Promise<Del
 
   let images = 0, series = 0;
   try {
-    const out = await sqlite(
-      dbPath,
-      `BEGIN IMMEDIATE;
-DELETE FROM Images WHERE SeriesInstanceUID=${q(seriesUID)};
-SELECT changes();
-DELETE FROM Series WHERE SeriesInstanceUID=${q(seriesUID)};
-SELECT changes();
-COMMIT;`,
-      false,
-    );
+    const parts: string[] = [];
+    for (let i = 0; i < uids.length; i += 500) {
+      const list = uids.slice(i, i + 500).map(q).join(",");
+      parts.push(`DELETE FROM Images WHERE SeriesInstanceUID IN (${list});\nSELECT changes();\nDELETE FROM Series WHERE SeriesInstanceUID IN (${list});\nSELECT changes();`);
+    }
+    const out = await sqlite(dbPath, `.bail on\nBEGIN IMMEDIATE;\n${parts.join("\n")}\nCOMMIT;`, false);
     const counts = out.split("\n").map((s) => s.trim()).filter(Boolean).map(Number);
-    images = counts[0] ?? 0;
-    series = counts[1] ?? 0;
+    for (let i = 0; i < counts.length; i += 2) { images += counts[i] ?? 0; series += counts[i + 1] ?? 0; }
   } catch (e) {
     await Deno.remove(backup).catch(() => {});               // SQLite rolled back; nothing to put back
     throw new Error(`delete failed and was rolled back: ${(e as Error).message}`);
@@ -797,25 +805,32 @@ COMMIT;`,
     if (!abs && !insideDatabase(rel)) { leftInPlace.push(rel); continue; }
     if (await Deno.remove(abs ? rel : `${dbDir}/${rel}`).then(() => true).catch(() => false)) files.push(rel);
   }
-  if (leftInPlace.length) console.warn(`delete ${seriesUID}: ${leftInPlace.length} file(s) outside the database folder left in place, e.g. ${leftInPlace[0]}`);
+  if (leftInPlace.length) console.warn(`delete: ${leftInPlace.length} file(s) outside the database folder left in place, e.g. ${leftInPlace[0]}`);
 
   // The derivation edge goes with it. A dangling edge would keep drawing the deleted series as a
   // parent of something, which is the "zombie" the audit exists to catch, one level up.
   // Its duckn working copy too: derived from this series alone, it would be the orphan the audit
   // below then reports (critic, 2026-09-23, finding 12).
-  const copyRemoved = await removeDucknCopy(dbDir, seriesUID);
+  let copyRemoved = false;
+  for (const u of uids) if (await removeDucknCopy(dbDir, u)) copyRemoved = true;
 
+  // ONE PROVENANCE STORE CAN SERVE SEVERAL DATABASES: it sits beside the database folder, so every database in "Albula
+  // Databases" shares one. A series another of them still holds keeps its edges -- removing them broke that database's
+  // tree after a move between the two (2026-10-02, transfer between databases).
   let edges = 0;
   const provPath = provenancePathFor(dbDir);
+  const held = await heldBySiblings(dbDir, uids);
+  const unlink = uids.filter((u) => !held.has(u));
   try {
-    await Deno.stat(provPath);
-    const before = Number((await sqlite(provPath, "SELECT COUNT(*) FROM ProvenanceEdges;")).trim());
-    await sqlite(
-      provPath,
-      `DELETE FROM ProvenanceEdges WHERE child_series_uid=${q(seriesUID)} OR parent_series_uid=${q(seriesUID)};`,
-      false,
-    );
-    edges = before - Number((await sqlite(provPath, "SELECT COUNT(*) FROM ProvenanceEdges;")).trim());
+    if (unlink.length) {
+      await Deno.stat(provPath);
+      const before = Number((await sqlite(provPath, "SELECT COUNT(*) FROM ProvenanceEdges;")).trim());
+      for (let i = 0; i < unlink.length; i += 500) {
+        const list = unlink.slice(i, i + 500).map(q).join(",");
+        await sqlite(provPath, `DELETE FROM ProvenanceEdges WHERE child_series_uid IN (${list}) OR parent_series_uid IN (${list});`, false);
+      }
+      edges = before - Number((await sqlite(provPath, "SELECT COUNT(*) FROM ProvenanceEdges;")).trim());
+    }
   } catch { /* no provenance store: nothing to unlink */ }
 
   const audit = await auditDatabase(dbDir);
@@ -827,4 +842,35 @@ COMMIT;`,
     return { series, images, files, edges, copyRemoved, audit, ...extra };
   }
   return { series, images, files, edges, copyRemoved, audit, backup, error: "the audit found rows without files; the pre-delete backup has been kept", ...extra };
+}
+
+/** Does another database beside this one (sharing its provenance store) hold this series? */
+export async function heldBySibling(dbDir: string, seriesUID: string): Promise<boolean> {
+  return (await heldBySiblings(dbDir, [seriesUID])).has(seriesUID);
+}
+
+/**
+ * Which of these series another database beside this one holds: one query per sibling. A sibling whose index cannot be
+ * read holds nothing -- sqlite3 reading from stdin exits 0 with no output when it cannot open a file, and the empty
+ * answer counted as "held" (critic, 2026-10-02, finding 16).
+ */
+export async function heldBySiblings(dbDir: string, uids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  const self = dbDir.replace(/\/+$/, ""), parent = self.replace(/\/[^/]+$/, "");
+  const selfReal = await Deno.realPath(self).catch(() => self);
+  try {
+    for await (const e of Deno.readDir(parent)) {
+      const other = `${parent}/${e.name}`;
+      if (other === self || !e.isDirectory) continue;
+      if ((await Deno.realPath(other).catch(() => other)) === selfReal) continue;
+      const idx = `${other}/ctkDICOM.sql`;
+      if (!(await Deno.stat(idx).then((x) => x.isFile, () => false))) continue;
+      for (let i = 0; i < uids.length; i += 500) {
+        const raw = (await sqlite(idx, `.mode json\nSELECT SeriesInstanceUID AS u FROM Series WHERE SeriesInstanceUID IN (${uids.slice(i, i + 500).map(q).join(",")});`).catch(() => "")).trim();
+        if (!raw.startsWith("[")) continue;
+        for (const r of JSON.parse(raw) as { u: string }[]) out.add(r.u);
+      }
+    }
+  } catch { /* unreadable parent: no sibling known */ }
+  return out;
 }
