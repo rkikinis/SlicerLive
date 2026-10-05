@@ -13,8 +13,12 @@
 // Version 4 (2026-10-01, evening): rows in the data probe (registerProbeRows) and the Segmentations module's Show / Hide
 // all decision (showHideAllState), and what an extension draws opaque in 3D for the 3D probe (registerRayHits). Each
 // version only adds; an extension written for an earlier one still builds.
+// Version 5 (2026-10-03): holdDrawing / drawingHeld (the 3D view waits while an extension's long GPU work runs).
+// Version 6 (2026-10-04): synthstripBrainMask -- the brain on an MRI of the anatomy, from SynthStrip on the haversack
+// server (the diffusion extension's tracking rule 3) -- and startSegmentationServer, the AI panel's start, for a module
+// that needs the server.
 
-export const SDK_VERSION = 5;
+export const SDK_VERSION = 6;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -74,6 +78,8 @@ export async function saveSegmentationToDicom(segId: string): Promise<string> {
 export { runAction } from "../render/demos/app-shell.ts";
 // Hold the 3D views' drawing while heavy card work runs (2026-10-03: macOS's watchdog, tracking beside the solid anatomy).
 export { drawingHeld, holdDrawing } from "../render/demos/accum-loop.ts";
+/** SDK 6: the brain on an MRI of the anatomy (SynthStrip, through the haversack server), on that volume's own grid. */
+export { startSegmentationServer, synthstripBrainMask, type BrainMask, type BrainMaskResult } from "../logic/brain-mask.ts";
 /** The Show / Hide all button's decision, as the Segmentations module makes it (one rule, one wording, tested in core). */
 export { showHideAllState } from "../render/demos/segmentations-panel.ts";
 /** Rows for the data probe about a point (patient RAS): an extension's objects under the pointer. */

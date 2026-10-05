@@ -89,8 +89,16 @@ function tokenFor(port: number): { token: string | null; reason: "ok" | "missing
  * 0.14.0, so the `fastsurfer` extra is gone from the command.
  */
 export const HAVERSACK_VERSION = "v0.15.0";
-/** The extras the application installs haversack with. One place: the start command and the printed one. */
-const HAVERSACK_EXTRAS = "serve,remote";
+/** The extras the application installs haversack with. One place: the start command and the printed one.
+ *  `synthstrip` since 2026-10-04 (the diffusion extension's tracking rule 3 asks for SynthStrip's brain mask), but ONLY
+ *  on a Mac with Apple's command line developer tools: the extra builds `surfa` from source (PyPI has no wheel for it),
+ *  and on a Mac without a compiler that build fails and takes the whole server with it -- AI segmentation included
+ *  (critic, 2026-10-04, finding 1). Without the tools the server starts without SynthStrip, and the Diffusion module
+ *  says it took the brain from the diffusion scan. */
+const developerTools = (() => {
+  try { return new Deno.Command("/usr/bin/xcode-select", { args: ["-p"], stdout: "null", stderr: "null" }).outputSync().success; } catch { return false; }
+})();
+const HAVERSACK_EXTRAS = developerTools ? "serve,remote,synthstrip" : "serve,remote";
 /** Ports with a start in flight, so a second click does not start a second server. */
 const starting = new Set<number>();
 /** `uvx` where the installers put it -- the Finder launches the app with a bare PATH. */
