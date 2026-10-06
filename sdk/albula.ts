@@ -17,8 +17,12 @@
 // Version 6 (2026-10-04): synthstripBrainMask -- the brain on an MRI of the anatomy, from SynthStrip on the haversack
 // server (the diffusion extension's tracking rule 3) -- and startSegmentationServer, the AI panel's start, for a module
 // that needs the server.
+// Version 7 (2026-10-05): rgbToDicomLab -- a display color in DICOM's CIELab, as the SEG writer stores it (the diffusion
+// extension's Tractography Results writer).
+// Version 8 (2026-10-05): `albula/server` (sdk/server.ts), the door for a program beside the server -- an extension's
+// import-time job: the database index read-only, a series' files, the DICOM library to inject, the NRRD writer.
 
-export const SDK_VERSION = 6;
+export const SDK_VERSION = 8;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -109,6 +113,8 @@ export { siemensMosaic, mosaicTile, type Mosaic } from "../logic/readers/siemens
 export { groupSeries, parseInstances, volumesOfSeries } from "../logic/readers/dicom-series.ts";
 /** The one DICOM library (dcmjs), behind the app's own wrapper. */
 export { dicomIO } from "../logic/dicom-io.ts";
+/** SDK 7: RGB (0..1) to the DICOM CIELab triple (0..65535) a display color is stored as. */
+export { rgbToDicomLab } from "../logic/export-dicom-seg.ts";
 
 // ── the scene ────────────────────────────────────────────────────────────────────────────────────────────────────
 export type { MrsonNode } from "../render/mrson.ts";

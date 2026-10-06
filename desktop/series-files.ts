@@ -60,3 +60,16 @@ export async function seriesFilePaths(dbDir: string, seriesUID: string): Promise
   return rows.map((r) => r.f.startsWith("/") ? r.f : `${root}/${r.f}`);
 }
 
+
+/** One row of the index per series, with its study: what a program beside the server (an import-time job) needs to find
+ *  a study's series without parsing their files. Read-only; empty when the database has no index. */
+export interface IndexSeries { seriesUID: string; studyUID: string; patientUID: string; modality: string; seriesNumber: string; description: string; frameOfReferenceUID: string }
+export async function indexSeries(dbDir: string): Promise<IndexSeries[]> {
+  const root = dbDir.replace(/\/+$/, "");
+  const raw = (await sqliteRead(`${root}/ctkDICOM.sql`, `.mode json
+SELECT s.SeriesInstanceUID AS seriesUID, s.StudyInstanceUID AS studyUID, COALESCE(st.PatientsUID,'') AS patientUID,
+  COALESCE(s.Modality,'') AS modality, COALESCE(s.SeriesNumber,'') AS seriesNumber, COALESCE(s.SeriesDescription,'') AS description,
+  COALESCE(s.FrameOfReferenceUID,'') AS frameOfReferenceUID
+FROM Series s LEFT JOIN Studies st ON st.StudyInstanceUID = s.StudyInstanceUID ORDER BY s.StudyInstanceUID, s.SeriesNumber;`).catch(() => "")).trim();
+  return raw ? (JSON.parse(raw) as IndexSeries[]).map((r) => ({ ...r, seriesNumber: String(r.seriesNumber) })) : [];
+}

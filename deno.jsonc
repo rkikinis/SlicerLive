@@ -11,6 +11,8 @@
     // Extensions import "albula" and, in their tests, "albula/testing"; the app's build maps the same names.
     "albula": "./sdk/albula.ts",
     "albula/testing": "./sdk/testing.ts",
+    // A program beside the server (an extension's import-time job; sdk/server.ts).
+    "albula/server": "./sdk/server.ts",
     // Deno's standard library: tests (assert), paths, the server's file serving, the tools' argument parsing.
     // Versions as resolved on 2026-09-28; next look: the quarterly slow-movers date.
     "jsr:@std/assert": "jsr:@std/assert@1.0.19",
