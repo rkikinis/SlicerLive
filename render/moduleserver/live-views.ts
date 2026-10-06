@@ -1198,8 +1198,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // The next frame of a SEQUENCE is not a different volume either: the frames share one
       // geometry, and re-framing on every step threw away whatever plane the user had set --
       // Ron: "When I tried [the short axis], it reset when the sequence was running."
+      //
+      // And a volume that COVERS the level the view is at keeps it (the Tract review, critic 2026-10-06: showing a
+      // case's b = 0 image in place of its T1 jumped the view from the crus level to the b = 0's middle, and that level
+      // was then saved as the one the reviewer chose). Re-framing is for a level the new volume does not reach.
       const bgId = layers.background?.id;
-      if (bgId && c.bgId && bgId !== c.bgId && !sameSequence(bgId, c.bgId)) { c.bgId = bgId; fitCell(cell); restageSlicesIn3D(); return; }
+      if (bgId && c.bgId && bgId !== c.bgId && !sameSequence(bgId, c.bgId)) {
+        c.bgId = bgId;
+        const at = live.nodes.get(nativeSliceId(cell))?.offset, bg = bgField(c), axis = c.orientKey === "axial" ? 2 : c.orientKey === "coronal" ? 1 : 0;
+        const box = bg?.aabb?.();
+        if (!(typeof at === "number" && box && at >= box[0][axis] && at <= box[1][axis])) fitCell(cell);
+        else renderSlice(c);
+        restageSlicesIn3D(); return;
+      }
       if (bgId) c.bgId = bgId;
       renderSlice(c);
     },

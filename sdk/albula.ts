@@ -26,8 +26,10 @@
 // databaseFileUrl (a file in its folder, e.g. the import job's cached Color FA) and writeDatabaseFile (a module's own
 // small file, e.g. the review's verdicts); restartSegmentationServer, for a server stuck with queued jobs (reason "stuck"); and the views for a module that sets
 // them up itself -- setLayout (LAYOUT), orientView, setSliceOffset / sliceOffset, lookFrom3D, closeScene, sliceOrientation.
+// Version 10 (2026-10-06): a module that has the person draw a line and takes it (the Tract review's crus border) --
+// placingMarkupId (the markup being placed, while placement lasts) and endPlacing.
 
-export const SDK_VERSION = 9;
+export const SDK_VERSION = 10;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -139,6 +141,17 @@ export function startPlacing(markupType: "fiducial" | string, persistent = false
   if (!g.__startPlace) return false;
   g.__startPlace(markupType, persistent);
   return true;
+}
+
+/** The markup being placed right now (its node id), or undefined when nothing is being placed (SDK 10). */
+export function placingMarkupId(): string | undefined {
+  const g = globalThis as unknown as { __placeState?: () => { mode?: string; placeNodeId?: string } | null };
+  const s = g.__placeState?.();
+  return s?.mode === "place" && s.placeNodeId ? s.placeNodeId : undefined;
+}
+/** End placing, as Escape or the Markups module's Done does (SDK 10). */
+export function endPlacing(): void {
+  (globalThis as unknown as { __endPlace?: () => void }).__endPlace?.();
 }
 
 // ── getting a patient's scans in, and outlining on them (SDK 3, 2026-10-01: the Diffusion module's checklist) ──────────
