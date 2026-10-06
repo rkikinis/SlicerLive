@@ -78,6 +78,8 @@ export interface AppShell {
   statusEl: HTMLElement;
   registerPanel(spec: PanelSpec): void;
   showPanel(id: string): Promise<void>;
+  /** Mount a panel without showing it (its mount sets up what other code uses); nothing when mounted already. */
+  mountPanel(id: string): Promise<void>;
   activePanel(): string | null;
   panels(): PanelSpec[];
   setStatus(text: string): void;
@@ -567,9 +569,8 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
   /** id -> the shell's <section>; `els` holds the module's own container inside it. */
   const sections = new Map<string, HTMLElement>();
 
-  async function showPanel(id: string) {
-    const spec = specs.find((s) => s.id === id);
-    if (!spec) return;
+  /** A panel's container, made (hidden) when it is first needed. */
+  function containerFor(id: string, spec: PanelSpec): HTMLElement {
     let el = els.get(id);
     if (!el) {
       // TWO ELEMENTS, and the reason matters: the section is the shell's, the inner div is the
@@ -591,6 +592,23 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
       el = content;
       els.set(id, el);
     }
+    return el;
+  }
+
+  /** MOUNT A PANEL WITHOUT SHOWING IT (2026-10-06): a panel whose mount sets up what other code uses -- Load / Save's
+   *  database handles behind the SDK's databaseSeries, seriesDicomFiles, loadDatabaseSeries -- is mounted here when
+   *  that code asks first (the Tract review lists cases before anything was ever loaded). The active panel stays. */
+  async function mountPanel(id: string) {
+    const spec = specs.find((s) => s.id === id);
+    if (!spec || mounted.has(id)) return;
+    const el = containerFor(id, spec);
+    mounted.add(id); await spec.mount(el, shell);
+  }
+
+  async function showPanel(id: string) {
+    const spec = specs.find((s) => s.id === id);
+    if (!spec) return;
+    const el = containerFor(id, spec);
     for (const [pid, sec] of sections) sec.hidden = pid !== id;
     active = id; rebuildSelect();
     if (!mounted.has(id)) { mounted.add(id); await spec.mount(el, shell); }
@@ -710,7 +728,7 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
         if (last && last !== active && specs.some((s) => s.id === last)) void showPanel(last);
       }, 0);
     },
-    showPanel, activePanel: () => active, panels: () => [...specs],
+    showPanel, mountPanel, activePanel: () => active, panels: () => [...specs],
     setStatus(text) {
       statusEl.textContent = text;
       // AND KEEP IT. The status bar holds one line and every message overwrites the last, so

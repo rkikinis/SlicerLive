@@ -501,7 +501,11 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     try {
       await Deno.mkdir(dir, { recursive: true });
       const bytes = new Uint8Array(await req.arrayBuffer());
-      await Deno.writeFile(`${dir}/${name}`, bytes);
+      // WRITTEN WHOLE OR NOT AT ALL (critic 2026-10-06, R2-2): to a temporary name beside it, then renamed over, so a
+      // reader never sees half a file and a server killed mid-write never leaves a truncated one.
+      const tmp = `${dir}/.${name}.${Deno.pid}-${crypto.randomUUID().slice(0, 8)}.tmp`;
+      try { await Deno.writeFile(tmp, bytes); await Deno.rename(tmp, `${dir}/${name}`); }
+      catch (e) { await Deno.remove(tmp).catch(() => {}); throw e; }
       const written = { path: `${dir}/${name}`, dir, rel: `${sub}/${name}`, bytes: bytes.byteLength };
       if (!indexHeader) return Response.json(written);
       let meta: IndexMeta;

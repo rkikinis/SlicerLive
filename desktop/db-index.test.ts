@@ -215,6 +215,19 @@ Deno.test("deleting a series removes its rows, its file and its edge", async () 
   assertEquals(r.backup, undefined, "verified, so the backup has done its job");
 });
 
+Deno.test("deleting a series removes its cache files, and only its own (critic 2026-10-06, R2-7)", async () => {
+  const dir = await makeDb();
+  await writeDicom(`${dir}/SlicerAlbula-SEG/seg.dcm`);
+  await indexFileIntoDatabase(dir, "SlicerAlbula-SEG/seg.dcm", meta);
+  const uid = meta.seriesInstanceUID, cache = `${dir}/SlicerAlbula-Cache`;
+  await Deno.mkdir(cache, { recursive: true });
+  const mine = [`${uid}.albmesh`, `colorfa-${uid}.nrrd`], others = [`${uid}4.albmesh`, `colorfa-9${uid}.nrrd`, "notes.txt"];
+  for (const f of [...mine, ...others]) await Deno.writeTextFile(`${cache}/${f}`, "x");
+  await deleteSeriesFromDatabase(dir, uid);
+  for (const f of mine) assertEquals(await Deno.stat(`${cache}/${f}`).catch(() => null), null, `${f} removed`);
+  for (const f of others) assert(await Deno.stat(`${cache}/${f}`).catch(() => null), `${f} kept`);
+});
+
 Deno.test("the study and its other series are not touched", async () => {
   const dir = await makeDb();
   await writeDicom(`${dir}/SlicerAlbula-SEG/a.dcm`);

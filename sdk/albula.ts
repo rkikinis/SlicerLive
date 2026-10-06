@@ -21,8 +21,13 @@
 // extension's Tractography Results writer).
 // Version 8 (2026-10-05): `albula/server` (sdk/server.ts), the door for a program beside the server -- an extension's
 // import-time job: the database index read-only, a series' files, the DICOM library to inject, the NRRD writer.
+// Version 9 (2026-10-06): the open database for a module that lists cases itself (the diffusion extension's Tract
+// review) -- databaseSeries (its series and provenance edges), loadDatabaseSeries (as the browser's Load does),
+// databaseFileUrl (a file in its folder, e.g. the import job's cached Color FA) and writeDatabaseFile (a module's own
+// small file, e.g. the review's verdicts); restartSegmentationServer, for a server stuck with queued jobs (reason "stuck"); and the views for a module that sets
+// them up itself -- setLayout (LAYOUT), orientView, setSliceOffset / sliceOffset, lookFrom3D, closeScene, sliceOrientation.
 
-export const SDK_VERSION = 8;
+export const SDK_VERSION = 9;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -36,10 +41,97 @@ export const assetUrl = (extension: string, path: string): URL => workerUrl(`./v
 export type { AppShell } from "../render/demos/app-shell.ts";
 export type { LiveScene } from "../render/livescene.ts";
 
+/** The Load / Save panel's database handles exist once it is mounted; mounted here, unseen, when a module asks first. */
+async function databaseHandles(): Promise<void> {
+  const g = globalThis as unknown as { __dicomSourceInstances?: unknown; __shell?: { mountPanel?: (id: string) => Promise<void> } };
+  if (!g.__dicomSourceInstances) await g.__shell?.mountPanel?.("add-data");
+}
 /** The DICOM files of a series in the open database, as the app read them (null: the series is not from the database). */
 export async function seriesDicomFiles(seriesInstanceUID: string): Promise<ArrayBuffer[] | null> {
+  await databaseHandles();
   const g = globalThis as unknown as { __dicomSourceInstances?: (uid: string) => Promise<ArrayBuffer[] | null> };
   return g.__dicomSourceInstances ? await g.__dicomSourceInstances(seriesInstanceUID) : null;
+}
+/** A series of the open database, as its index knows it (SDK 9). */
+export interface DatabaseSeries { seriesInstanceUID: string; studyInstanceUID?: string; patientName?: string; patientID?: string; studyDescription?: string; studyDate?: string; seriesNumber?: number; seriesDate?: string; seriesTime?: string; modality?: string; description?: string; count: number }
+/** SDK 9: the open database's series and how they derive from each other (kind "tracts", "surface", "algorithm", …);
+ *  null when no database is served. For a module that lists cases itself. */
+export async function databaseSeries(opts: { /** Read the index again (a list made while an import job writes). */ fresh?: boolean } = {}): Promise<{ series: DatabaseSeries[]; edges: { child: string; parent: string; kind: string }[] } | null> {
+  await databaseHandles();
+  const g = globalThis as unknown as { __databaseSeries?: (o: { fresh?: boolean }) => Promise<{ series: DatabaseSeries[]; edges: { child: string; parent: string; kind: string }[] } | null> };
+  return g.__databaseSeries ? await g.__databaseSeries(opts) : null;
+}
+/** The registered database this window has open: a module's files are read and written beside THAT one, not the
+ *  machine-wide current one, which another window may switch (critic 2026-10-06, finding 7). */
+async function openDatabaseId(): Promise<string | null> {
+  await databaseHandles();
+  const g = globalThis as unknown as { __openDatabaseId?: () => Promise<string | null> };
+  return g.__openDatabaseId ? await g.__openDatabaseId() : null;
+}
+/** SDK 9: load series of the open database into the scene, as the DICOM browser's Load does. */
+export async function loadDatabaseSeries(seriesInstanceUIDs: string[], onProgress?: (line: string) => void): Promise<{ loaded: number; failures: string[] }> {
+  await databaseHandles();
+  const g = globalThis as unknown as { __loadDatabaseSeries?: (u: string[], p?: (l: string) => void) => Promise<{ loaded: number; failures: string[] }> };
+  return g.__loadDatabaseSeries ? await g.__loadDatabaseSeries(seriesInstanceUIDs, onProgress) : { loaded: 0, failures: ["loading from the database is not available in this app"] };
+}
+/** SDK 9: the view layout, by its id in logic/layouts.ts (16 Conventional Widescreen, 2 Conventional, 3 Four-Up, …). */
+export const LAYOUT = { conventional: 2, fourUp: 3, conventionalWidescreen: 16 } as const;
+export function setLayout(id: number): boolean {
+  const g = globalThis as unknown as { __setLayout?: (id: number) => void };
+  if (!g.__setLayout) return false;
+  g.__setLayout(id);
+  return true;
+}
+/** SDK 9: a slice view ("Red", "Yellow", "Green") turned to an orientation, as its own orientation menu does. */
+export function orientView(cell: string, orientation: "axial" | "coronal" | "sagittal"): boolean {
+  const g = globalThis as unknown as { __reformatCell?: (c: string, o: string) => void };
+  if (!g.__reformatCell) return false;
+  g.__reformatCell(cell, orientation);
+  return true;
+}
+/** SDK 9: a slice view's position along its normal (mm), set and read, as its slider does. */
+export function setSliceOffset(cell: string, mm: number): boolean {
+  const g = globalThis as unknown as { __setSliceOffset?: (c: string, mm: number) => void };
+  if (!g.__setSliceOffset) return false;
+  g.__setSliceOffset(cell, mm);
+  return true;
+}
+/** SDK 9: a slice view's orientation now ("Axial", "Coronal", "Sagittal", or "Reformat"), undefined when there is no such view. */
+export function sliceOrientation(cell: string): string | undefined {
+  const g = globalThis as unknown as { __sliceNode?: (c: string) => { orientation?: string } | null };
+  const o = g.__sliceNode?.(cell)?.orientation;
+  return typeof o === "string" ? o : undefined;
+}
+export function sliceOffset(cell: string): number | undefined {
+  const g = globalThis as unknown as { __sliceNode?: (c: string) => { offset?: number } | null };
+  const o = g.__sliceNode?.(cell)?.offset;
+  return typeof o === "number" ? o : undefined;
+}
+/** SDK 9: the 3D view seen from a side ("A" the front, "P", "L", "R", "S", "I"), keeping its distance -- the 3D view's own buttons. */
+export function lookFrom3D(side: "A" | "P" | "L" | "R" | "S" | "I"): boolean {
+  const g = globalThis as unknown as { __views?: { resetCamera3D?: (s: string) => void } };
+  if (!g.__views?.resetCamera3D) return false;
+  g.__views.resetCamera3D(side);
+  return true;
+}
+/** SDK 9: close the scene, as File › Close Scene does (it asks first when something is not saved); false when kept. */
+export async function closeScene(): Promise<boolean> {
+  const g = globalThis as unknown as { __closeScene?: () => Promise<boolean> };
+  return g.__closeScene ? await g.__closeScene() : false;
+}
+/** SDK 9: write a small file of a module's own (a review's verdicts, as JSON) into the open database's folder, where the
+ *  server puts what Albula writes (SlicerAlbula-SEG/); not indexed (not DICOM). Its address back, for databaseFileUrl. */
+export async function writeDatabaseFile(name: string, body: string | Uint8Array): Promise<{ ok: boolean; relativePath?: string; why?: string }> {
+  const id = await openDatabaseId();
+  if (!id) return { ok: false, why: "no DICOM database is open in this window" };
+  const r = await fetch(`/_db/${encodeURIComponent(id)}/_write/${encodeURIComponent(name)}`, { method: "POST", body: body as BodyInit }).catch(() => null);
+  if (!r?.ok) return { ok: false, why: `the server did not write it (${r?.status ?? "no answer"})` };
+  return { ok: true, relativePath: `SlicerAlbula-SEG/${name.replace(/[^A-Za-z0-9._-]/g, "_")}` };
+}
+/** The address of a file in the open database's folder, as the server serves it (SDK 9) -- a cache file beside a series. */
+export async function databaseFileUrl(relativePath: string): Promise<string | null> {
+  const id = await openDatabaseId();
+  return id ? `/_db/${encodeURIComponent(id)}/${relativePath.split("/").map(encodeURIComponent).join("/")}` : null;
 }
 /** Start placing a markup in the views, as the Markups module does (false: placement is not available in this app). */
 export function startPlacing(markupType: "fiducial" | string, persistent = false): boolean {
@@ -83,7 +175,7 @@ export { runAction } from "../render/demos/app-shell.ts";
 // Hold the 3D views' drawing while heavy card work runs (2026-10-03: macOS's watchdog, tracking beside the solid anatomy).
 export { drawingHeld, holdDrawing } from "../render/demos/accum-loop.ts";
 /** SDK 6: the brain on an MRI of the anatomy (SynthStrip, through the haversack server), on that volume's own grid. */
-export { startSegmentationServer, synthstripBrainMask, type BrainMask, type BrainMaskResult } from "../logic/brain-mask.ts";
+export { restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMask, type BrainMaskResult } from "../logic/brain-mask.ts";
 /** The Show / Hide all button's decision, as the Segmentations module makes it (one rule, one wording, tested in core). */
 export { showHideAllState } from "../render/demos/segmentations-panel.ts";
 /** Rows for the data probe about a point (patient RAS): an extension's objects under the pointer. */

@@ -177,6 +177,13 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
    * SEG has no pixel data" -- true, and useless: it never had pixels and was never going to.
    */
   const surfaceSeries = new Set<string>();
+  /**
+   * FIBER TRACTS STORED AS DICOM (a Tractography Results object; provenance kind "tracts"): not an image, so not loaded
+   * here either. Ron's demo, 2026-10-06: ticking a study ticked its "Fiber tracts (whole brain)" and the load ended in red,
+   * "none of the 1 instances could be read as images -- no pixel data", in front of people. They are opened by the
+   * module that reads them; the browser says so, quietly, instead of failing.
+   */
+  const tractsSeries = new Set<string>();
 /** A name into a notice's HTML. */
 const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   /** child series uid -> the series it was derived from, from the provenance edges. */
@@ -970,8 +977,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
      * where progress goes; `timings` and `failures` come back filled.
      */
     /** Surfaces series ticked in the last load (loadDbEntries fills it; the browser offers the module). */
-    let surfacesTicked: string[] = [];
+    let surfacesTicked: string[] = [], tractsTicked: string[] = [];
     const loadDbEntries = async (db: DicomDatabase, list: DbSeriesEntry[], setBusy: (s: string) => void, timings: string[], failures: string[], arrivalFor?: (seriesInstanceUID: string) => { visible3D?: boolean } | undefined, onEach?: () => void): Promise<void> => {
+    // STORED FIBER TRACTS ON EVERY PATH IN (critic 2026-10-06, finding 15): the browser's tree fills tractsSeries, but a
+    // module's loadDatabaseSeries does not build the tree; the provenance edges say which series are tracts.
+    for (const e of (await provenanceEdges()) ?? []) if (e.kind === "tracts") tractsSeries.add(e.child);
     for (const [n, entry] of list.entries()) {
       // The SCENE name, which is the only thing identifying what was loaded once the browser
       // has closed. Not the browser's own row label, which is nested under a patient and a study.
@@ -987,7 +997,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // ONCE. A series already in the scene is not loaded again: a cardiac
         // sequence loaded twice, the Sequences module then played one copy while the 3D showed the
         // other, and nothing moved -- "No beating heart." Loaded is loaded; the row says so.
-        if (!surfaceSeries.has(entry.seriesInstanceUID) && alreadyLoaded(entry)) {
+        if (!surfaceSeries.has(entry.seriesInstanceUID) && !tractsSeries.has(entry.seriesInstanceUID) && alreadyLoaded(entry)) {
           timings.push(`${label}: already loaded — not loaded again`);
           continue;
         }
@@ -999,6 +1009,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         if (surfaceSeries.has(entry.seriesInstanceUID)) {
           surfacesTicked.push(label);
           timings.push(`${label}: stored surface models, not loaded — Generate Surface Models brings them back`);
+        } else if (tractsSeries.has(entry.seriesInstanceUID)) {
+          tractsTicked.push(label);
+          timings.push(`${label}: fiber tracts, not an image — not loaded here`);
         } // A SEG is not a volume: it is a set of 1-bit masks placed on ANOTHER series' grid, so
         // it is decoded onto a loaded volume rather than reconstructed on its own.
         else if (entry.modality === "SEG") {
@@ -1324,6 +1337,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             parentOf.set(e.child, e.parent);
             kindOf.set(e.child, e.kind);
             if (e.kind === "surface") surfaceSeries.add(e.child);
+            if (e.kind === "tracts") tractsSeries.add(e.child);
             derivedFrom.set(e.child, e.parent);
           }
         }
@@ -1497,8 +1511,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // Wall clock from the click to the window going away: the number actually experienced, as
         // opposed to the sum of whichever phases happen to be instrumented.
         const tClick = performance.now();
-        surfacesTicked = [];
+        surfacesTicked = []; tractsTicked = [];
         await loadDbEntries(db, list, setBusy, timings, failures);
+        // Fiber tracts ticked with their study: said in the line that stays (critic 2026-10-06, finding 15: a line set here
+        // was overwritten at once by the timings), as a hint, not as a failure.
+        const tractsNote = tractsTicked.length ? `${tractsTicked.length === 1 ? "the fiber tracts were" : `${tractsTicked.length} sets of fiber tracts were`} not loaded here (not an image: the module that made them shows them)` : "";
         // A BUTTON, NOT A SENTENCE (the first-time user does not read): stored surface models were ticked,
         // and they come back only through Generate Surface Models.
         if (surfacesTicked.length && !failures.length) {
@@ -1531,7 +1548,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }
         const total = `TOTAL ${((performance.now() - tClick) / 1000).toFixed(1)}s`;
         if (closeAfter) {
-          status([...timings, total].join(" · "));
+          status([...(tractsNote ? [tractsNote] : []), ...timings, total].join(" · "));
           close();
           // AND SHOW WHAT WAS LOADED. Ron: "When I load and close the dicom db, take me to the scene
           // data module." Closing the browser used to leave you wherever you started, which is
@@ -1539,7 +1556,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           void shell.showPanel("data");
         }
         else {
-          setBusy([...timings, total].join(" · "));
+          setBusy([...(tractsNote ? [tractsNote] : []), ...timings, total].join(" · "));
           selected.clear();
           for (const el of scroll.querySelectorAll("input[type=checkbox]")) (el as HTMLInputElement).checked = false;
           refreshSelection();
@@ -2355,7 +2372,49 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // Writing a segmentation back out as DICOM needs two things this block owns: the source series'
     // own instances (a SEG references them) and the folder to write into. Exposed here, beside the
     // state, rather than plumbed through the panel's options.
+    /** The served database open in this window (opened on first use, re-read when a series asked for is not in it). */
+    const ensureOpenDb = async (wantUids: string[] = []): Promise<DicomDatabase | null> => {
+      if (!openDb) {
+        if (!servedDb) await loadRegistered();
+        if (!lastSource && servedDb) lastSource = httpSource(servedDb);
+        if (lastSource) { try { openDb = await openDicomDatabase(lastSource, (p) => status(p.note)); forgetProvenance(); } catch { return null; } }
+      }
+      if (openDb && lastSource && wantUids.some((u) => !openDb!.series.some((s) => s.seriesInstanceUID === u))) {
+        try { openDb = await openDicomDatabase(lastSource); forgetProvenance(); } catch { /* keep the snapshot */ }
+      }
+      return openDb;
+    };
     Object.assign(globalThis, {
+      /** SDK 9: the open database's series, and how they derive from each other (the provenance edges), for a module
+       *  that lists cases itself (the diffusion extension's Tract review). Null: no database is served. */
+      __databaseSeries: async (opts: { fresh?: boolean } = {}): Promise<{ series: DbSeriesEntry[]; edges: { child: string; parent: string; kind: string }[] } | null> => {
+        // FRESH by request (critic 2026-10-06, finding 5): a list made while an import job writes must not be the snapshot
+        // taken when the window first read the index.
+        if (opts.fresh && lastSource) { try { openDb = await openDicomDatabase(lastSource); } catch { /* keep the snapshot */ } forgetProvenance(); }
+        const db = await ensureOpenDb();
+        if (!db) return null;
+        return { series: db.series.slice(), edges: (await provenanceEdges()) ?? [] };
+      },
+      /** SDK 9: which registered database this window has open (null: none, or a folder picked by hand) -- so a module
+       *  reads and writes beside THAT one, not the machine-wide current one (critic 2026-10-06, finding 7). */
+      __openDatabaseId: async (): Promise<string | null> => {
+        await ensureOpenDb();
+        const m = lastSource?.label.match(/\/_db\/([^/]+)\//);
+        return m ? decodeURIComponent(m[1]) : null;
+      },
+      /** SDK 9: load series of the open database into the scene, as the browser's Load does (images before
+       *  segmentations, a segmentation's image with it, nothing loaded twice). What could not be loaded, in words. */
+      __loadDatabaseSeries: async (uids: string[], onProgress?: (line: string) => void): Promise<{ loaded: number; failures: string[] }> => {
+        const db = await ensureOpenDb(uids);
+        if (!db) return { loaded: 0, failures: ["no DICOM database is served by this window"] };
+        const entries = uids.map((u) => db.series.find((s) => s.seriesInstanceUID === u)).filter((e): e is DbSeriesEntry => !!e);
+        const failures: string[] = uids.filter((u) => !entries.some((e) => e.seriesInstanceUID === u)).map((u) => `series ${u} is not in the database`);
+        const list = withAncestors(entries).sort((a, b) => Number(a.modality === "SEG") - Number(b.modality === "SEG"));
+        const missing = failures.length;
+        await loadDbEntries(db, list, (s) => onProgress?.(s), [], failures);
+        // Stored fiber tracts are not loaded as series (their module draws them): not counted (critic 2026-10-06, R2-7).
+        return { loaded: list.filter((e) => !tractsSeries.has(e.seriesInstanceUID)).length - (failures.length - missing), failures };
+      },
       /** The raw instances of one series in the open database — what a DICOM SEG must reference. */
       __dicomSourceInstances: async (seriesInstanceUID: string): Promise<ArrayBuffer[] | null> => {
         // THE PERSON SAID "SAVE"; the rest is ours. No database open in this window yet -- open

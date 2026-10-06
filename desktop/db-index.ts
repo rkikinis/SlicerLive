@@ -813,6 +813,16 @@ async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<Delete
   // below then reports (critic, 2026-09-23, finding 12).
   let copyRemoved = false;
   for (const u of uids) if (await removeDucknCopy(dbDir, u)) copyRemoved = true;
+  // ITS CACHE FILES TOO: anything in SlicerAlbula-Cache/ named with the series' UID -- a segmentation's surfaces cache
+  // (<uid>.albmesh), the Color FA an import job stored with a tracts object (colorfa-<uid>.nrrd) -- derived from this
+  // series alone (critic 2026-10-06, finding 16: "no orphans, no zombies").
+  try {
+    for await (const e of Deno.readDir(`${dbDir}/SlicerAlbula-Cache`)) {
+      // The UID as a whole name part (start or after "-" / "_", then "."): "1.2.3" must not take "1.2.34"'s files.
+      const owner = /^(?:.*[-_])?((?:\d+\.)+\d+)\.[A-Za-z][A-Za-z0-9.]*$/.exec(e.name)?.[1];
+      if (e.isFile && owner && uids.includes(owner)) await Deno.remove(`${dbDir}/SlicerAlbula-Cache/${e.name}`).catch(() => {});
+    }
+  } catch { /* no cache folder */ }
 
   // ONE PROVENANCE STORE CAN SERVE SEVERAL DATABASES: it sits beside the database folder, so every database in "Albula
   // Databases" shares one. A series another of them still holds keeps its edges -- removing them broke that database's

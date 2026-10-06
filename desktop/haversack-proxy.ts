@@ -135,6 +135,36 @@ export async function handleHaversackRequest(req: Request): Promise<Response | n
   // ~/.config/slicerlive/haversack.log; the panel then polls _status until the first health
   // answer. `uvx` is looked for where the installers put it, since an app launched from the Finder
   // has a bare PATH.
+  // ONLY THIS APP'S OWN PAGES may start or stop the server (critic 2026-10-06, finding 17: a POST with no body needs no
+  // preflight, so any page open in a browser on this Mac could otherwise stop it).
+  if ((url.pathname === "/_haversack/_restart" || url.pathname === "/_haversack/_start") && req.method === "POST") {
+    const origin = req.headers.get("origin"), site = req.headers.get("sec-fetch-site");
+    if ((origin && new URL(origin).host !== url.host) || site === "cross-site") return Response.json({ error: "not from this app" }, { status: 403 });
+  }
+  // RESTART IT (Ron's demo, 2026-10-06: the server answered every new job "queued" and never ran it, idle; the Diffusion
+  // panel waited forever). Stops the haversack server listening on the port -- only a process whose command line says
+  // "haversack serve", whoever started it -- waits until it has really ended (SIGTERM, then SIGKILL after 15 s), and only
+  // then starts a new one, so a server that answers afterward is the new one (critic 2026-10-06, finding 13).
+  if (url.pathname === "/_haversack/_restart" && req.method === "POST") {
+    const port = Number(url.searchParams.get("_port") ?? DEFAULT_PORT) || DEFAULT_PORT;
+    const text = async (cmd: string, args: string[]) => new TextDecoder().decode((await new Deno.Command(cmd, { args, stdout: "piped", stderr: "null" }).output()).stdout);
+    const alive = async (pid: number) => (await text("/bin/ps", ["-o", "pid=", "-p", String(pid)])).trim() !== "";
+    const pids = (await text("/usr/sbin/lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"])).trim().split(/\s+/).filter(Boolean).map(Number);
+    const ours: number[] = [];
+    for (const pid of pids) if (/haversack\s+serve/.test(await text("/bin/ps", ["-o", "command=", "-p", String(pid)]))) ours.push(pid);
+    if (pids.length && !ours.length) return Response.json({ restarted: false, error: `port ${port} is held by something that is not a haversack server; not touched` }, { status: 409 });
+    for (const pid of ours) { try { Deno.kill(pid, "SIGTERM"); } catch { /* gone already */ } }
+    const until = async (ms: number) => { const end = Date.now() + ms; while (Date.now() < end) { let any = false; for (const pid of ours) if (await alive(pid)) any = true; if (!any) return true; await new Promise((r) => setTimeout(r, 250)); } return false; };
+    if (!(await until(15_000))) {
+      for (const pid of ours) { try { Deno.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+      if (!(await until(5_000))) return Response.json({ restarted: false, error: `the old segmentation server (process ${ours.join(", ")}) did not end` }, { status: 500 });
+    }
+    starting.delete(port);
+    const res = await handleHaversackRequest(new Request(new URL(`/_haversack/_start?_port=${port}`, url.origin), { method: "POST" }));
+    const body = (res ? await res.json() : {}) as { started?: boolean; note?: string; error?: string };
+    if (!body.started) return Response.json({ restarted: false, stopped: ours, error: body.error ?? body.note ?? "it did not start" }, { status: 500 });
+    return Response.json({ restarted: true, stopped: ours, ...body });
+  }
   if (url.pathname === "/_haversack/_start" && req.method === "POST") {
     const port = Number(url.searchParams.get("_port") ?? DEFAULT_PORT) || DEFAULT_PORT;
     if (starting.has(port)) return Response.json({ started: true, note: "already starting" });

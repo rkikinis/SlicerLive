@@ -21,9 +21,18 @@ import { parseNrrdSeg } from "../render/nrrd.ts";
 export interface BrainMask { dims: [number, number, number]; ijkToRAS: number[]; data: Uint8Array }
 /** Why there is no mask: the server is not running (a start button helps), or it runs without SynthStrip, or the job
  *  failed or stalled. `message` is a phrase that completes "…because ___". */
-export type BrainMaskResult = { ok: true; mask: BrainMask; cached: boolean; seconds: number } | { ok: false; reason: "no-server" | "no-synthstrip" | "failed"; message: string };
+export type BrainMaskResult = { ok: true; mask: BrainMask; cached: boolean; seconds: number } | { ok: false; reason: "no-server" | "no-synthstrip" | "stuck" | "failed"; message: string };
 
 const TASK = "synthstrip:mask", POLL_MS = 800, STALL_MS = 2 * 60 * 1000, GONE_MS = 10 * 1000, KEEP = 2;
+/** True only when the server's job list reads and shows no job running (haversack: GET jobs → { jobs: [{ state }] }). */
+async function nothingRunning(transport: HaversackTransport): Promise<boolean> {
+  const r = await transport.fetch(`${transport.base ?? "/_haversack/"}jobs`, { cache: "no-store" }).catch(() => null);
+  if (!r?.ok) return false;
+  const j = await r.json().catch(() => null) as { jobs?: { state?: string }[] } | null;
+  return Array.isArray(j?.jobs) && !j!.jobs!.some((x) => x.state === "running");
+}
+/** A job still QUEUED after this long is taken as a stuck server (Ron's demo, 2026-10-06: idle, it never started one). */
+const QUEUED_STUCK_MS = 3 * 60 * 1000;
 const kept: { key: string; nodeId: string; mask: BrainMask }[] = [];
 
 /** What identifies a volume's voxels and place: its geometry and its stored voxels (the zarr reference). */
@@ -36,7 +45,7 @@ function keyOf(live: LiveScene, nodeId: string): string | undefined {
  *  ("running 40%", "waiting for the segmentation server: it is busy with another job"). */
 export async function synthstripBrainMask(live: LiveScene, nodeId: string, onProgress?: (line: string) => void,
   /** The server and the upload, replaceable for tests (brain-mask.test.ts). */
-  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number } = {}): Promise<BrainMaskResult> {
+  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number; queuedStuckMs?: number } = {}): Promise<BrainMaskResult> {
   const pollMs = deps.pollMs ?? POLL_MS, goneMs = deps.goneMs ?? GONE_MS;
   const transport: HaversackTransport = deps.transport ?? { fetch: (...a) => fetch(...a) };
   const key = keyOf(live, nodeId) ?? nodeId;
@@ -69,8 +78,14 @@ export async function synthstripBrainMask(live: LiveScene, nodeId: string, onPro
       cached = j.cached === true;
       break;
     }
-    // A queued job is not stalled (another job runs first); a running one that has not moved for two minutes is.
+    // A running job that has not moved for two minutes is stalled. A queued one waits for another job to finish -- but
+    // not forever: still queued after three minutes, the server is taken as stuck (it was, idle, at Ron's demo), and the
+    // panel offers to restart it instead of waiting on.
     if (j.state === "running" && Date.now() - lastChange > STALL_MS) return { ok: false, reason: "failed", message: "finding the brain on the MRI made no progress for two minutes" };
+    // STUCK = our job queued for three minutes AND nothing running on the server (critic 2026-10-06, finding 12: one job
+    // runs at a time, so a job behind a long FastSurfer is queued for long on a healthy server). A job list that cannot be
+    // read is not taken as idle: the wait goes on.
+    if (j.state === "queued" && Date.now() - lastChange > (deps.queuedStuckMs ?? QUEUED_STUCK_MS) && await nothingRunning(transport)) return { ok: false, reason: "stuck", message: "the segmentation server has not started the job in three minutes although it runs nothing else: it seems stuck" };
     await new Promise((r) => setTimeout(r, pollMs));
   }
   const bytes = await result(transport, sub.jobId);
@@ -85,8 +100,26 @@ export async function synthstripBrainMask(live: LiveScene, nodeId: string, onPro
   return { ok: true, mask, cached, seconds: (performance.now() - t0) / 1000 };
 }
 
+/** RESTART the segmentation server (a stuck one: reason "stuck"): the server stops the haversack process on the port --
+ *  only one whose command line says "haversack serve" -- starts it again, and this waits for its first answer. */
+export async function restartSegmentationServer(onProgress?: (line: string) => void, transport: HaversackTransport = { fetch: (...a) => fetch(...a) }): Promise<{ ok: boolean; message: string }> {
+  const t0 = Date.now();
+  onProgress?.("restarting the segmentation server…");
+  const r = await transport.fetch("/_haversack/_restart", { method: "POST" }).then((x) => x.json()).catch((e) => ({ restarted: false, error: String(e) })) as { restarted?: boolean; started?: boolean; note?: string; error?: string; log?: string };
+  if (!r.restarted) return { ok: false, message: r.error ?? "it could not be restarted" };
+  for (;;) {
+    const st = await serverStatus(transport);
+    if (st.reachable) return { ok: true, message: `the segmentation server was restarted and answered after ${Math.round((Date.now() - t0) / 1000)} s` };
+    const secs = Math.round((Date.now() - t0) / 1000);
+    if (secs > 300) return { ok: false, message: `the segmentation server did not answer within ${secs} s after the restart${r.log ? ` (its log: ${r.log})` : ""}` };
+    onProgress?.(`restarting the segmentation server… ${secs} s`);
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+}
+
 /** Start the segmentation server, as the AI segmentation panel's button does, and wait until it answers (the first start
  *  builds its Python environment: a minute or two). `onProgress` gets the seconds waited. */
+
 export async function startSegmentationServer(onProgress?: (line: string) => void, transport: HaversackTransport = { fetch: (...a) => fetch(...a) }): Promise<{ ok: boolean; message: string }> {
   const t0 = Date.now();
   const r = await transport.fetch("/_haversack/_start", { method: "POST" }).then((x) => x.json()).catch((e) => ({ started: false, error: String(e) })) as { started?: boolean; note?: string; error?: string; log?: string };

@@ -67,3 +67,21 @@ Deno.test("a server without SynthStrip is said in words, and nothing is uploaded
   assertEquals(!r.ok && r.message.includes("SynthStrip"), true);
   assertEquals(uploaded, false);
 });
+
+Deno.test("a job the server never starts, while it runs nothing else, ends the wait as a stuck server (Ron's demo, 2026-10-06)", async () => {
+  const server = (running: boolean, ours: () => string) => (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("tasks/")) return Promise.resolve(new Response("{}", { status: 200 }));
+    if (init?.method === "POST") return Promise.resolve(new Response(JSON.stringify({ id: "j3" }), { status: 200 }));
+    if (u.endsWith("/jobs")) return Promise.resolve(new Response(JSON.stringify({ jobs: [{ id: "j3", state: "queued" }, ...(running ? [{ id: "long", state: "running" }] : [])] }), { status: 200 }));
+    return Promise.resolve(new Response(JSON.stringify({ state: ours() }), { status: 200 }));
+  };
+  const lines: string[] = [];
+  const idle = await synthstripBrainMask(live, "z", (l) => lines.push(l), { transport: { fetch: server(false, () => "queued") as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 100 });
+  assertEquals(!idle.ok && idle.reason, "stuck");
+  assertEquals(lines.includes("waiting for the segmentation server: it is busy with another job"), true);
+  // Another job running (a long FastSurfer): not stuck, the wait goes on -- here until our job ends on its own.
+  const t0 = performance.now();
+  const busy = await synthstripBrainMask(live, "w", undefined, { transport: { fetch: server(true, () => (performance.now() - t0 > 400 ? "failed" : "queued")) as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 100 });
+  assertEquals(!busy.ok && busy.reason, "failed");
+});
