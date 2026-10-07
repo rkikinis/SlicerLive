@@ -327,3 +327,39 @@ Deno.test("a derived CT keeps ImageType's third value and writes AcquisitionNumb
   // Empty (zero length; DCMTK: "no value available"). dcmjs reads an empty IS back as [null].
   assertEquals((raw["00200012"]?.Value ?? []).filter((x) => x !== null && x !== ""), [], "and empty: a derived image is not that acquisition");
 });
+
+// Ron, 2026-10-07 (ds004910's resampled float T1): "Following established practice and remaining standards compliant".
+Deno.test("truly fractional values: refused unless asked; asked, rounded to 16 bits with one Rescale Slope, the rounding stated", async () => {
+  const dims: [number, number, number] = [6, 5, 4], I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const data = Float32Array.from({ length: 120 }, (_, i) => (i === 7 ? -14.236359 : i * 24.31 + Math.sin(i) * 0.37));
+  // ImageType from the sidecar, as the BIDS import gives it (MR requires value 3).
+  const subject = { patientName: "T", patientID: "T", modality: "MR" as const, studyDate: "", studyTime: "", extra: { ImageType: ["ORIGINAL", "PRIMARY", "M", "FFE"] } };
+  await assertRejects(() => volumeToDicomSeries(data, dims, I, [], { subject }), Error, "fractional");
+  const out = await volumeToDicomSeries(data, dims, I, [], { subject, quantize: true, derivation: "Imported from a NIfTI" });
+  const first = dcmjs.data.DicomMessage.readFile(ab(out.instances[0].bytes));
+  const d = dcmjs.data.DicomMetaDictionary.naturalizeDataset(first.dict) as Record<string, unknown>;
+  const slope = Number(d.RescaleSlope);
+  assert(slope > 0 && Number(d.RescaleIntercept) === 0, `slope ${d.RescaleSlope}, intercept ${d.RescaleIntercept}`);
+  assert(String(d.DerivationDescription).startsWith("Imported from a NIfTI; values rounded to 16-bit stored numbers"), String(d.DerivationDescription));
+  assertEquals((d.ImageType as string[]).slice(0, 2), ["DERIVED", "SECONDARY"]);
+  assertEquals(d.PixelRepresentation, 1, "a negative value makes the pixels signed");
+  const back = reconstructSeries(await parseInstances(out.instances.map((i) => ab(i.bytes))));
+  sameVolumeInSpaceWithin(back, { dims, ijkToRAS: I, data }, slope / 2 + 1e-4);
+  // The rounding's attributes conform (the minimal subject's own gaps, e.g. Laterality, are another test's business).
+  const r = dciodvfy(out.instances[0].bytes);
+  if (r) { const mine = [...r.errors.filter((e) => /Rescale|Pixel|Bits|HighBit|Derivation|ImageType/.test(e)), ...r.warnings.filter((e) => /Rescale|Pixel|Bits|HighBit|Derivation/.test(e) && !/not expected to be present in standard MR IOD|Attribute is not present in standard DICOM IOD/.test(e))];
+    // The one warning kept: Rescale Slope in a classic MR image is not in the MR IOD's modules -- a standard extended SOP
+    // class (PS3.4 B.1.3), as Philips writes every MR image; the strict alternative is the Enhanced MR object's Pixel
+    // Value Transformation (the diffusion writer's form).
+    assert(mine.length === 0, mine.join("\n")); }
+});
+
+/** As sameVolumeInSpace, within a tolerance (the rounding). */
+function sameVolumeInSpaceWithin(b: { dims: readonly number[]; ijkToRAS: readonly number[]; data: ArrayLike<number> }, a: { dims: readonly number[]; ijkToRAS: readonly number[]; data: ArrayLike<number> }, tol: number) {
+  const toA = invertAffine(a.ijkToRAS), [ax, ay] = a.dims, [bx, by] = b.dims;
+  for (let k = 0; k < b.dims[2]; k++) for (let j = 0; j < by; j++) for (let i = 0; i < bx; i++) {
+    const r = apply(toA, apply(b.ijkToRAS, [i, j, k])).map((v) => Math.round(v));
+    const va = a.data[(r[2] * ay + r[1]) * ax + r[0]], vb = b.data[(k * by + j) * bx + i];
+    assert(Math.abs(va - vb) <= tol, `voxel ${i},${j},${k}: ${vb} against ${va} (tolerance ${tol})`);
+  }
+}

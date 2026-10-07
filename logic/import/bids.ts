@@ -26,8 +26,11 @@
 // address, station, serial number), the same rule as for the anatomical series.
 //
 // ONE SCAN THAT CANNOT BE WRITTEN is skipped and named (`skipped`), not the end of the subject: e.g. a NIfTI whose value
-// scale makes its voxels fractional (DICOM image pixels are whole numbers; writing the stored integers with their scale
-// is still to do).
+// scale makes its voxels fractional (DICOM image pixels are whole numbers). The diffusion writer writes a scan's stored
+// integers with their scale (2026-10-07); an anatomical series whose values are truly fractional (ds004910's T1 and
+// FLAIR: resampled floats, negatives included) is rounded to 16-bit stored numbers with one Rescale Slope, as a scanner
+// and a PACS hold such values, the rounding stated in DerivationDescription (Ron, 2026-10-07: "Following established
+// practice and remaining standards compliant is the way to go").
 import { parseNiftiVolumes, type Volume } from "../readers/nifti.ts";
 import { bidsKinds, type BidsKindContext } from "./bids-kinds.ts";
 import { volumeToDicomSeries } from "../export-dicom-image.ts";
@@ -232,7 +235,11 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
   const height = Number(col("height (cm)", "height")), weight = Number(col("weight (kg)", "weight"));
   const diagnosis = col("tumor type & grade", "diagnosis");
   // As the first OpenNeuro import did (ds000113, 2026-09-16: "studyforrest sub-01", "ds000113-sub-01").
-  const patientName = `${ds.name} ${sub}`, patientID = `${ds.id}-${sub}`;
+  // A person's name, a description and a protocol name hold at most 64 characters (PN and LO, PS3.5 Table 6.2-1); where
+  // the dataset's name makes one longer, the accession stands in for it (ds004910's "An open relaxation-diffusion MRI
+  // dataset in neurosurgical studies" is 65 alone; 2026-10-07). The full name stays in PatientComments.
+  const withName = (rest = "") => (`${ds.name}${rest}`.length <= 64 ? `${ds.name}${rest}` : `${ds.id}${rest}`);
+  const patientName = withName(` ${sub}`), patientID = `${ds.id}-${sub}`;
   const comments = [`BIDS dataset "${ds.name}"`, ds.doi && `doi:${ds.doi}`, ds.license && `license ${ds.license}`, ds.authors.length && `authors ${ds.authors.join("; ")}`,
     `imported by SlicerAlbula (bids import ${BIDS_IMPORT_VERSION})`].filter(Boolean).join(" · ");
   const extra: Record<string, unknown> = {
@@ -242,11 +249,11 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
     ...(height > 0 ? { PatientSize: Number((height / 100).toFixed(2)) } : {}),
     ...(weight > 0 ? { PatientWeight: weight } : {}),
     ...(diagnosis && diagnosis.toLowerCase() !== "none" ? { AdmittingDiagnosesDescription: diagnosis.slice(0, 64) } : {}),
-    ClinicalTrialSponsorName: ds.doi?.includes("openneuro") ? "OpenNeuro" : ds.name,
-    ClinicalTrialProtocolID: ds.id, ClinicalTrialProtocolName: ds.name,
+    ClinicalTrialSponsorName: ds.doi?.includes("openneuro") ? "OpenNeuro" : withName(),
+    ClinicalTrialProtocolID: ds.id, ClinicalTrialProtocolName: withName(),
     ClinicalTrialSiteID: "", ClinicalTrialSiteName: "", ClinicalTrialSubjectID: sub,
   };
-  const studyDescription = `${ds.name}${ses ? ` ${ses.slice(4)}` : ""}`;
+  const studyDescription = withName(ses ? ` ${ses.slice(4)}` : "");
   // No study date or time: BIDS keeps none, and every series of the study must say the same (critic finding 3).
   const studyDate = "", studyTime = "";
   const newStudy = { patientName, patientID, patientComments: comments, studyDescription, studyDate, studyTime, patientSex: sex, patientAge: age };
@@ -279,6 +286,13 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
         subject: { patientName, patientID, comments, studyDescription, modality: "MR", studyInstanceUID: studyUID, frameOfReferenceUID: forUID, studyDate, studyTime, extra: { ...extra, ...sidecarToDicom(side) } },
         seriesDescription: desc, seriesNumber: seriesNumber++,
         uids: { series: await uid(m[1], `image rule ${IMAGE_RULE}`, "series"), sops },
+        // Truly fractional values (a resampled float NIfTI) become 16-bit stored numbers with one Rescale Slope, the
+        // rounding stated in the series (export-dicom-image.ts quantizeTo16; Ron, 2026-10-07). Whole numbers, and whole
+        // numbers times a scale, are written exactly as before.
+        quantize: true,
+        // Whole numbers times the NIfTI's own scale (scl_slope) are written exactly with that scale, before any rounding.
+        ...(Number.isFinite(Number(v.meta?.sclSlope)) && Number(v.meta?.sclSlope) !== 0
+          ? { valueScale: { slope: Number(v.meta!.sclSlope), intercept: Number.isFinite(Number(v.meta?.sclInter)) ? Number(v.meta!.sclInter) : 0 } } : {}),
       });
       objects.push({
         role: m[2], description: `${m[2]}: ${e}, ${v.dims.join("×")}`, seriesInstanceUID: exp.seriesInstanceUID,

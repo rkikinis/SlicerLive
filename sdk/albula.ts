@@ -28,8 +28,10 @@
 // them up itself -- setLayout (LAYOUT), orientView, setSliceOffset / sliceOffset, lookFrom3D, closeScene, sliceOrientation.
 // Version 10 (2026-10-06): a module that has the person draw a line and takes it (the Tract review's crus border) --
 // placingMarkupId (the markup being placed, while placement lasts) and endPlacing.
+// Version 11 (2026-10-06): setSlicePlane -- a slice view on any plane (its sliceToRAS), for a module that shows the head
+// in its own frame rather than the scanner's (the Tract review).
 
-export const SDK_VERSION = 10;
+export const SDK_VERSION = 11;
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -90,6 +92,12 @@ export function orientView(cell: string, orientation: "axial" | "coronal" | "sag
   if (!g.__reformatCell) return false;
   g.__reformatCell(cell, orientation);
   return true;
+}
+/** SDK 11: put a slice view on any plane -- `sliceToRAS` (16 numbers, row-major) has the slice's x axis, y axis and
+ *  normal as columns and its origin last, as the views' own nodes hold it; `label` is shown as its orientation. */
+export function setSlicePlane(cell: string, sliceToRAS: number[], label: string): boolean {
+  const g = globalThis as unknown as { __setSlicePlane?: (c: string, m: number[], l: string) => boolean };
+  return g.__setSlicePlane ? g.__setSlicePlane(cell, sliceToRAS, label) : false;
 }
 /** SDK 9: a slice view's position along its normal (mm), set and read, as its slider does. */
 export function setSliceOffset(cell: string, mm: number): boolean {

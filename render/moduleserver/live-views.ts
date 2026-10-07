@@ -957,12 +957,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           if (it.inPlaneOnly && !inPlane) continue;      // a control, not a projection (see OverlayItem)
           const rad = (it.radiusPx ?? 5) * dpr * (inPlane ? 1 : 0.7);
           if (it.ring) {
-            // A RING, as in 3D: a white rim under the markup's color, the center clear. Out of the slice: fainter.
-            const lw = g.lineWidth, a = inPlane ? 1 : 0.55;
-            g.beginPath(); g.arc(p.x, p.y, rad, 0, Math.PI * 2);
-            g.strokeStyle = `rgba(255,255,255,${0.9 * a})`; g.lineWidth = 3.5 * dpr; g.stroke();
-            g.strokeStyle = rgba(it.color, a); g.lineWidth = 1.8 * dpr; g.stroke();
-            g.lineWidth = lw;
+            // A CROSSHAIR WITH A GAP IN THE CENTER (Ron, 2026-10-07: "the markers were largish circles, obstructing what
+            // was being marked. Perhaps a cross hair instead, gaped in the center?"): four thin arms in the markup's
+            // color over a white rim, so it reads on dark and bright tissue, and nothing drawn over the marked spot. The
+            // arms reach as far as the ring did (GlyphScale); the gap is 3 px. Out of the slice: fainter.
+            const lw = g.lineWidth, a = inPlane ? 1 : 0.55, gap = 3 * dpr, out = Math.max(rad * 1.4, gap + 5 * dpr);
+            g.beginPath();
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { g.moveTo(p.x + dx * gap, p.y + dy * gap); g.lineTo(p.x + dx * out, p.y + dy * out); }
+            g.lineCap = "round";
+            g.strokeStyle = `rgba(255,255,255,${0.85 * a})`; g.lineWidth = 3 * dpr; g.stroke();
+            g.strokeStyle = rgba(it.color, a); g.lineWidth = 1.4 * dpr; g.stroke();
+            g.lineWidth = lw; g.lineCap = "butt";
           } else {
             g.beginPath(); g.arc(p.x, p.y, rad, 0, Math.PI * 2);
             if (inPlane) { g.fillStyle = rgba(it.color); g.fill(); } else { g.strokeStyle = rgba(it.color, 0.6); g.stroke(); }
@@ -2831,7 +2836,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     (c as SliceCell & { controller?: SliceController }).controller = mountSliceController(c.el, c.name, {
       orientation: () => orientationShown(c), offset: () => getSliceOffset(c.name), range: () => sliceOffsetRange(c.name),
       setOffset: (mm) => setSliceOffset(c.name, mm), fit: () => fitCell(c.name),
-      setOrientation: (o) => { const lo = parseLineOrientation(o); if (lo) lineReformat(c.name, lo.markupId, lo.view); else if (CARDIAC_VIEWS.some((v) => v.id === o)) void cardiacReformat(c.name, o as CardiacView); else reformatCell(c.name, o as "axial" | "coronal" | "sagittal"); },
+      setOrientation: (o) => { const lo = parseLineOrientation(o); if (lo) lineReformat(c.name, lo.markupId, lo.view); else if (CARDIAC_VIEWS.some((v) => v.id === o)) void cardiacReformat(c.name, o as CardiacView); else if (o === "axial" || o === "coronal" || o === "sagittal") reformatCell(c.name, o); },
       cardiacAvailable,
       lines: () => lineMarkups().map((n) => ({ id: String(n.id), name: String(n.name ?? "Line") })),
       toggle3D: () => setSliceIn3D(c.name, !sliceIn3D.has(c.name)),
@@ -3243,6 +3248,25 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     refreshSlicesIn3D();
     return true;
   };
+  /**
+   * ANY PLANE, set by a module (SDK 11; the Tract review's head frames, Ron 2026-10-06: "You must use anatomic orientation,
+   * not scanner orientation"): `m` is the slice's sliceToRAS -- columns the slice's x and y axes and its normal, then its
+   * origin -- as the heart's planes write it. `label` names it in the orientation menu's place.
+   */
+  const setSlicePlane = (cell: string, m: number[], label: string): boolean => {
+    const id = nativeSliceId(cell); const node = live.nodes.get(id); if (!node || m.length !== 16) return false;
+    const n: Vec3 = [m[2], m[6], m[10]], o: Vec3 = [m[3], m[7], m[11]], l = Math.hypot(...n) || 1;
+    const c = cells.get(cell), ax = n.map((v) => Math.abs(v));
+    if (c) c.orientKey = ax[2] >= ax[0] && ax[2] >= ax[1] ? "axial" : ax[1] >= ax[0] ? "coronal" : "sagittal";
+    live.write({ op: "patch", id, path: "#/sliceToRAS", value: m });
+    live.write({ op: "patch", id, path: "#/orientation", value: label });
+    live.write({ op: "patch", id, path: "#/customPlane", value: true });
+    live.write({ op: "patch", id, path: "#/offset", value: (o[0] * n[0] + o[1] * n[1] + o[2] * n[2]) / l });
+    if (c) c.branched = false;
+    renderSlices();
+    refreshSlicesIn3D();
+    return true;
+  };
   /** The axes once found, for the synchronous callers (the slider's range). */
   const cardiacReady = new Map<string, CardiacAxes>();
   const cardiacRange = (c: SliceCell): { min: number; max: number; step: number } | null => {
@@ -3344,7 +3368,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   });
   /** What the controller shows as the orientation: a cardiac plane or a line's plane by name, else the anatomical axis. */
   const orientationShown = (c: SliceCell): string => {
-    const o = live.nodes.get(nativeSliceId(c.name))?.orientation as string | undefined;
+    const node = live.nodes.get(nativeSliceId(c.name)), o = node?.orientation as string | undefined;
+    // A module's own plane (setSlicePlane, SDK 11) shows its own name, not the nearest axis's (critic 2026-10-07,
+    // finding 5: "Axial" on a plane 3-35 degrees off it).
+    if (o && node?.customPlane && !["Axial", "Sagittal", "Coronal"].includes(o)) return o;
     return o && (CARDIAC_VIEWS.some((v) => v.id === o) || parseLineOrientation(o)) ? o : c.orientKey;
   };
 
@@ -3752,6 +3779,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     },
     // Reformat (W2): set a native slice cell to a standard orientation (vtkMRMLSliceNode::SetOrientation).
     __reformatCell: (cell: string, orientation: "axial" | "sagittal" | "coronal") => reformatCell(cell, orientation),
+    __setSlicePlane: (cell: string, m: number[], label: string) => setSlicePlane(cell, m, label),
     /** A heart plane by name (short-axis, four-chamber, two-chamber), computed from the chambers in the scene now. */
     __cardiacReformat: (cell: string, view: string) => CARDIAC_VIEWS.some((v) => v.id === view) ? cardiacReformat(cell, view as CardiacView) : Promise.resolve(false),
     // Held while a scene loads; released when it has, with the scene's own heart segmentation marked as done, so its

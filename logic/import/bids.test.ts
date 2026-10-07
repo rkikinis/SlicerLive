@@ -178,18 +178,20 @@ Deno.test("BIDS: no invented dates, sex and age for the patient row", async () =
   } finally { await Deno.remove(root, { recursive: true }); }
 });
 
-Deno.test("BIDS: a scan the writers cannot take (fractional after the NIfTI's value scale) is skipped and named, not the end of the subject", async () => {
+Deno.test("BIDS: whole numbers times the NIfTI's value scale are written exactly with that scale (2026-10-07; before, skipped)", async () => {
   const root = await makeDataset();
   try {
     const p = `${root}/sub-01/ses-pre/anat/sub-01_ses-pre_T1w.nii`;
     const b = Deno.readFileSync(p), v = new DataView(b.buffer);
     v.setFloat32(112, 0.5, true);
     Deno.writeFileSync(p, b);
-    // With no extension installed nothing else in this session can be imported: the refusal names every file and why.
-    // (With the diffusion extension, its own test checks that the diffusion scan is still imported.)
-    let err = "";
-    try { await skippedOf(root); } catch (e) { err = String(e); }
-    assert(/T1w\.nii \(the volume holds fractional values/.test(err), err);
-    assert(/no T1 series to draw it on/.test(err), "the mask says why it was not used");
+    const { objects } = await skippedOf(root);
+    const t1 = objects.find((o) => o.role === "T1w");
+    assert(t1, "the T1 is imported");
+    const io = await dicomIO();
+    const d = io.naturalize(io.readFile(ab(t1.files[0].bytes)).dict) as Record<string, unknown>;
+    assertEquals([Number(d.RescaleSlope), Number(d.RescaleIntercept)], [0.5, 0]);
+    assert(!/rounded/.test(String(d.DerivationDescription ?? "")), "exact: no rounding stated");
+    assert(objects.some((o) => o.role === "seg-tumor"), "the mask has its T1 to be drawn on");
   } finally { await Deno.remove(root, { recursive: true }); }
 });

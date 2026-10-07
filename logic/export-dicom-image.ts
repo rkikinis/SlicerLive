@@ -182,6 +182,39 @@ export function toStoredPixels(
   return { ok: true, pixels, signed };
 }
 
+/**
+ * ROUNDING TRULY FRACTIONAL VALUES TO STORED NUMBERS, the way a scanner and a PACS hold them (Ron, 2026-10-07: "Following
+ * established practice and remaining standards compliant is the way to go"). An MR image's pixels are whole numbers;
+ * what is not whole is carried by Rescale Slope / Intercept, which every reader applies (a Philips scanner, a parametric
+ * map). For values that were never whole -- ds004910's T1 and FLAIR, resampled into floats by the dataset's authors,
+ * negatives included -- the series' range is spread over the 16 bits with ONE slope and intercept 0 (so zero stays
+ * zero), and the largest change is measured and stated in DerivationDescription. Only when the caller asks
+ * (ImageExportOpts.quantize); otherwise fractional values are still refused. Rule 1, 2026-10-07.
+ */
+export const QUANTIZE_RULE = 1;
+export function quantizeTo16(data: ArrayLike<number>):
+  { ok: true; pixels: Int16Array | Uint16Array; signed: boolean; slope: number; maxError: number } | { ok: false; reason: string } {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (!Number.isFinite(v)) return { ok: false, reason: "the volume holds values that are not numbers (NaN or infinity)" };
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  const signed = lo < 0, limit = signed ? 32767 : 65535, top = Math.max(Math.abs(lo), Math.abs(hi));
+  // The slope as written (DS, ten significant digits), rounded UP so the largest value still fits.
+  const raw = top > 0 ? top / limit : 1, e = 10 ** (Math.floor(Math.log10(raw)) - 9);
+  const slope = Number((Math.ceil(raw / e) * e).toPrecision(10));
+  const pixels = signed ? new Int16Array(data.length) : new Uint16Array(data.length);
+  let maxError = 0;
+  for (let i = 0; i < data.length; i++) {
+    const w = Math.max(signed ? -32768 : 0, Math.min(limit, Math.round(data[i] / slope)));
+    pixels[i] = w;
+    const err = Math.abs(w * slope - data[i]);
+    if (err > maxError) maxError = err;
+  }
+  return { ok: true, pixels, signed, slope, maxError };
+}
+
 type Ds = Record<string, unknown>;
 
 /**
@@ -224,6 +257,12 @@ export interface ImageExportOpts {
   /** Stable UIDs, for an import that must give the same series the same identity every time it runs (logic/import/
    *  bids.ts): the series, and one SOP instance UID per slice in slice order. Omitted: new UIDs, as for any save. */
   uids?: { series: string; sops: string[] };
+  /** Values that are truly fractional (no source slice's rescale turns them back into whole numbers) are rounded to
+   *  16-bit stored numbers with one Rescale Slope, the rounding stated (quantizeTo16, QUANTIZE_RULE). Omitted: refused. */
+  quantize?: boolean;
+  /** The file's own value scale (a NIfTI's scl_slope / scl_inter), tried before any rounding: when it turns every value
+   *  back into a whole stored number, those numbers are written with it as Rescale Slope / Intercept, exactly. */
+  valueScale?: { slope: number; intercept: number };
 }
 
 /**
@@ -310,8 +349,21 @@ export async function volumeToDicomSeries(
   // ways, and a series with a rescale per slice (PET) saves too (critic, 2026-09-25, finding 10).
   let px = toStoredPixels(data);
   let perSlice: ({ slope: number; intercept: number } | undefined)[] | undefined;
+  let quantized: { slope: number; maxError: number } | undefined;
+  const rsAll = px.ok ? [] : Array.from({ length: nz }, (_, k) => sourceOf(k)?.rescale);
+  let seriesScale: { slope: number; intercept: number } | undefined;
+  if (!px.ok && opts.valueScale && opts.valueScale.slope !== 0 && !rsAll.every((r) => r && r.slope !== 0)) {
+    const e = toStoredPixels(data, opts.valueScale);
+    if (e.ok) { px = e; seriesScale = opts.valueScale; }
+  }
+  if (!px.ok && opts.quantize && !rsAll.every((r) => r && r.slope !== 0)) {
+    const q = quantizeTo16(data);
+    if (!q.ok) throw new Error(q.reason);
+    px = { ok: true, pixels: q.pixels, signed: q.signed };
+    quantized = { slope: q.slope, maxError: q.maxError };
+  }
   if (!px.ok) {
-    const rs = Array.from({ length: nz }, (_, k) => sourceOf(k)?.rescale);
+    const rs = rsAll;
     if (!rs.every((r) => r && r.slope !== 0)) {
       throw new Error("the volume holds fractional values, and not every slice has a source slice whose scaling would turn them back into the scanner's whole numbers — saving it here would change the data");
     }
@@ -417,6 +469,12 @@ export async function volumeToDicomSeries(
   if (perSlice) { delete base.RescaleSlope; delete base.RescaleIntercept; }   // each instance states its own, below
   else if (modality === "CT" || modality === "PT") { base.RescaleSlope = 1; base.RescaleIntercept = 0; }
   else { delete base.RescaleSlope; delete base.RescaleIntercept; }
+  if (seriesScale) { base.RescaleSlope = seriesScale.slope; base.RescaleIntercept = seriesScale.intercept; }
+  if (quantized) {
+    base.RescaleSlope = quantized.slope; base.RescaleIntercept = 0;
+    const said = `values rounded to 16-bit stored numbers with Rescale Slope ${quantized.slope}; largest change ${Number(quantized.maxError.toPrecision(3))} (Albula quantize rule ${QUANTIZE_RULE})`;
+    base.DerivationDescription = opts.derivation ? `${opts.derivation}; ${said}` : said;
+  }
   if (opts.window) { base.WindowCenter = opts.window.center; base.WindowWidth = opts.window.width; }
 
   const instances: DicomImageInstance[] = [];

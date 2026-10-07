@@ -84,6 +84,12 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
         }
         sel.dataset.lines = sig;
       }
+      // A plane a module set (the head's frames): its own name, as an option of its own while it is shown.
+      const known = o ? [...sel.options].some((op) => op.value === o && !op.dataset.custom) : true;
+      sel.querySelectorAll("option[data-custom]").forEach((op) => { if (op.value !== o) op.remove(); });
+      if (o && !known && !sel.querySelector(`option[data-custom][value="${CSS.escape(o)}"]`)) {
+        const op = document.createElement("option"); op.value = o; op.textContent = o; op.dataset.custom = "1"; op.title = "A plane set by the module you are in"; sel.prepend(op);
+      }
       if (o) sel.value = o;
     } else orient.textContent = o ? ORIENT_LABEL[o] ?? o : "";
     const disabled = !r || off == null;
