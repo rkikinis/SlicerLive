@@ -1,6 +1,7 @@
 // "Data" panel (W1): open local volume files (NRRD / NIfTI, gzipped or not), drag-and-drop onto the views,
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
+import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { renameCurrentScene, sceneControl, unsavedMarkups } from "./scene-control.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
@@ -28,6 +29,7 @@ import { openFloatingWindow } from "./floating-window.ts";
 import { chooseFolder, dbName, listDatabases, openDatabasesWindow } from "./databases-window.ts";
 import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
+import { openPackageWindow } from "./package-window.ts";
 import { freesurferStructureByName, lookupStructure, usesFreesurferNumbering } from "../../logic/segment-naming.ts";
 import { segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
@@ -229,6 +231,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
   (globalThis as unknown as { __openLoadFromDisk?: () => void }).__openLoadFromDisk = () => { void shell.showPanel("add-data").then(() => showLoadFromDisk?.()); };
   /** DICOM files that arrived (a dropped folder): viewed, and added to the database when "Also add to" is ticked. Set by the panel. */
   let dicomFilesArrived: ((files: File[]) => Promise<void>) | undefined;
+  /** Re-read the databases after one was made or switched to elsewhere (the package window). Set by the panel. */
+  let afterDatabasesChangedOutside: ((id?: string) => Promise<void>) | undefined;
   async function loadFiles(files: FileList | File[]): Promise<void> {
     const list = Array.from(files);
     // A SCENE FILE DROPPED IN -- `scene.mrson.json` out of a transport folder (SCENE-DESIGN §7), with
@@ -244,7 +248,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const provenance = provFile ? JSON.parse(await provFile.text()) as Record<string, unknown> : undefined;
         const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null) as { databases?: { id: string; current?: boolean; exists?: boolean }[] } | null;
         const cur = (reg?.databases ?? []).find((d) => d.current && d.exists) ?? (reg?.databases ?? []).find((d) => d.exists);
-        if (!cur) { shell.notify({ title: "The scene cannot be imported here", body: "No DICOM database is served by this window." }); return; }
+        if (!cur) { shell.notify({ title: "First the scans, then the scene", body: "There is no database here yet. Drop the whole <b>.albula</b> folder instead, or use Load / Save › Load from files › <b>Packaged scene…</b>: it makes a database, adds the scans and opens the scene in one step." }); return; }
         const r = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scene, provenance }) })
           .then((x) => x.json()) as { uid?: string; v?: number; name?: string; edges?: number; attributes?: number; replaced?: boolean; kept?: boolean; error?: string; missing?: string[]; problems?: { where: string; what: string }[] };
         if (r.error) {
@@ -404,18 +408,18 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <div data-pane="load-files" hidden></div>
       <div data-pane="save-files" hidden></div>
       <div class="sl-load-disk" hidden>
-      <div class="sl-dropzone" title="Drop volumes or DICOM files here, or anywhere on the views.">
-        <strong>Drop files here</strong>
-        <span class="sl-hint">or anywhere on the views — NRRD, NIfTI, DICOM</span>
-      </div>
-      <div class="sl-row">
-        <button class="sl-primary" data-act="open" title="Open a single volume file already on disk: NRRD or NIfTI, gzipped or not.">Volume file…</button>
-        <button data-act="dicom-files" title="Pick individual DICOM files — useful for one series, or when a folder holds more than you want.">DICOM files…</button>
-        <button data-act="dicom-dir" title="A folder of DICOM scans (from a disc, a USB stick, an export): the scans in it are listed to look at, and added to the database below when that is ticked.">DICOM folder…</button>
-      </div>
+      <!-- THE USUAL WAY FIRST (Ron, 2026-10-14, the module review's proposal 1: "yes"): scans arrive as a folder (a disc,
+           a stick, an export), so DICOM folder… is the yellow, at the bottom right; the rarer ways beside it. Dropping
+           files anywhere on the window works too (the section's note). -->
       <div class="sl-row sl-add-row" title="DICOM scans loaded from disk are also copied into this database, so they are there next time, after the disc or stick is gone. Volume files (NRRD, NIfTI) are not DICOM and are not added.">
         <label><input type="checkbox" class="sl-add-db" checked> Also add to</label>
         <select class="sl-add-db-which" style="min-width:0;flex:1"></select>
+      </div>
+      <div class="sl-actions">
+        <button data-act="open" title="Open a single volume file already on disk: NRRD or NIfTI, gzipped or not. Not stored until you save it.">Volume file…</button>
+        <button data-act="dicom-files" title="Pick individual DICOM files — useful for one series, or when a folder holds more than you want.">DICOM files…</button>
+        <button data-act="package" title="A scene packaged on another machine (a folder ending in .albula): its scans go into a database and the scene opens, in one step. A whole database folder works too.">Packaged scene…</button>
+        <button class="sl-primary" data-act="dicom-dir" title="A folder of DICOM scans (from a disc, a USB stick, an export): the scans in it are listed to look at, and added to the database above when that is ticked.">DICOM folder…</button>
       </div>
       </div>
       <div class="sl-load-db" hidden>
@@ -434,14 +438,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const adv = shell.section(el, "Advanced", { open: false, band: "none" });
     adv.innerHTML = `<div class="sl-row">
         <button data-act="terminology" title="Load a terminology: the names, codes and colors a lab or an extension uses for its structures. Slicer's .term.json or a color-table CSV. Once loaded, segmentations can be named in it (Segmentations → Advanced).">Terminology…</button>
-        <span class="sl-hint">.term.json, color-table .csv</span>
-      </div>
-      <p class="sl-hint">What you load is not permanently stored until you save it — to the DICOM database or as a file.</p>`;
+      </div>`;
     // The load panes: sections drawn from the old blocks, green (what exists comes in).
-    for (const [cls, pane, title] of [["sl-load-disk", "load-files", "Load from files"], ["sl-load-db", "load-db", "Load from the DICOM database"]] as const) {
+    for (const [cls, pane, title, note] of [["sl-load-disk", "load-files", "Load from files", "or drop them on the views"], ["sl-load-db", "load-db", "Load from the DICOM database", ""]] as const) {
       const block = panes.querySelector(`.${cls}`) as HTMLElement;
       const holder = panes.querySelector(`[data-pane="${pane}"]`) as HTMLElement;
-      const body = shell.section(holder, title, { open: true, band: "green" });
+      const body = shell.section(holder, title, { open: true, band: "green", note });
       while (block.firstChild) body.appendChild(block.firstChild);
       block.remove();
     }
@@ -549,6 +551,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       catch (e) { if ((e as Error).name !== "AbortError") status((e as Error).message); }
     });
     (el.querySelector('[data-act="dicom-files"]') as HTMLButtonElement).addEventListener("click", () => dicomInput.click());
+    (el.querySelector('[data-act="package"]') as HTMLButtonElement).addEventListener("click", async () => {
+      try {
+        const c = await chooseFolder("Choose a packaged scene (a folder ending in .albula), or a database folder");
+        if (c) await openPackageWindow({ token: c.token, name: c.name }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) });
+      } catch (e) { status((e as Error).message); }
+    });
 
     // ---- DICOM database (an existing ctkDICOM.sql) ----
     // Listing comes from the SQL index, so the whole database appears at once and only the series
@@ -1454,25 +1462,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       delBtn.textContent = "Delete…";
       delBtn.style.cssText = "margin-right:auto;";
       delBtn.title = "Remove the selected series from the DICOM database — files, index rows and all";
-      let armed = false;
       foot.append(msg, delBtn, loadBtn, loadCloseBtn);
       const setBusy = (s: string) => { msg.textContent = s; status(s); };
 
       // --- selection ---
       const selected = new Set<DbSeriesEntry>();
-      const disarm = () => {
-        armed = false;
-        delBtn.textContent = "Delete…";
-        delBtn.className = "sl-danger";
-        delBtn.style.cssText = "margin-right:auto;";
-      };
       const refreshSelection = () => {
         loadBtn.textContent = selected.size > 1 ? `Load ${selected.size} series` : "Load series";
         loadBtn.disabled = loadCloseBtn.disabled = selected.size === 0;
         delBtn.disabled = selected.size === 0;
-        // A CHANGED SELECTION DISARMS IT. Arming the button and then ticking another series must not
-        // leave a primed delete pointing at something else.
-        if (armed) disarm();
         if (selected.size) setBusy(`${selected.size} selected`);
       };
 
@@ -1593,25 +1591,24 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           setBusy("this application's server side cannot delete from the database yet — quit it and run \"Rebuild SlicerAlbula App.command\"");
           return;
         }
-        if (!armed) {
-          // SAY WHAT WILL GO, including what is derived FROM it: those series survive, but they stop
-          // being drawn under a parent, and a person deleting an original should know that.
+        // ASKED IN A DIALOG, NOT BY A SECOND CLICK (Ron, 2026-10-14: "any final delete should have something along the
+        // lines of 'are you sure? or have you clicked by accident?'"; PALETTE.md): a second click on the same button
+        // was exactly what a double-click by accident gives. SAY WHAT WILL GO, including what is derived FROM it: those
+        // series survive, but they stop being drawn under a parent, and a person deleting an original should know.
+        {
           const instances = list.reduce((n, s) => n + s.count, 0);
           const uids = new Set(list.map((s) => s.seriesInstanceUID));
           const orphaned = db.series.filter((s) => !uids.has(s.seriesInstanceUID) && uids.has(parentOf.get(s.seriesInstanceUID) ?? "")).length;
-          armed = true;
-          delBtn.className = "sl-danger";
-          delBtn.style.cssText = "margin-right:auto;background:var(--sl-danger-fill);border-color:var(--sl-danger-fill);color:#fff;font-weight:600;";
-          delBtn.textContent = `Delete ${list.length} series (${instances} images) permanently`;
-          setBusy(
-            `This removes ${list.length === 1 ? `"${list[0].description || list[0].seriesInstanceUID}"` : `${list.length} series`} ` +
-            `from the DICOM database — ${instances} files and their index rows. It cannot be undone.` +
-            (orphaned ? ` ${orphaned} series derived from it will stay, no longer indented under it.` : "") +
-            ` Click again to confirm, or change the selection to cancel.`,
-          );
-          return;
+          const what = list.length === 1 ? `“${escapeHtml(list[0].description || list[0].seriesInstanceUID)}”` : `${list.length} series`;
+          const ok = await shell.confirm({
+            title: `Delete ${list.length === 1 ? "this series" : `${list.length} series`} from the DICOM database?`,
+            ok: "Delete", cancel: "Keep", destructive: true,
+            body: `<p>This removes ${what} from the DICOM database: ${instances} files and their index rows. It cannot be undone.</p>` +
+              (orphaned ? `<p>${orphaned} series made from ${list.length === 1 ? "it" : "them"} will stay, no longer listed under ${list.length === 1 ? "it" : "them"}.</p>` : "") +
+              `<p>Is this what you meant to do, or was it a click by accident?</p>`,
+          });
+          if (!ok) return;
         }
-        disarm();
         delBtn.disabled = loadBtn.disabled = loadCloseBtn.disabled = true;
         let gone = 0, files = 0;
         const failures: string[] = [];
@@ -1966,7 +1963,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
                 if (r.error) { shell.notify({ title: "The scene was not packaged", body: r.error }); setBusy(""); throw new Error(r.error); }
                 setBusy(`packaged: ${r.path}`);
                 shell.notify({ title: `Packaged — "${esc(sc.name)}"`, body: `${r.series} series, ${r.files} files, ${((r.bytes ?? 0) / 1e6).toFixed(0)} MB<br>${esc(r.path ?? "")}${r.missing?.length ? `<br>Not included: ${r.missing.length} series not in this database` : ""}`,
-                  actions: [{ label: "Show in Finder", primary: true, onClick: () => { void fetch(`/_picture/${encodeURIComponent((r.path ?? "").split("/").pop() ?? "")}?reveal=1`); } }, { label: "OK", onClick: () => {} }] });
+                  actions: [{ label: "Show in Finder", primary: true, onClick: () => { void fetch(`/_picture/${encodeURIComponent((r.path ?? "").split(/[\\/]/).pop() ?? "")}?reveal=1`); } }, { label: "OK", onClick: () => {} }] });
               } catch (e) { shell.notify({ title: "The scene was not packaged", body: (e as Error).message }); throw e; }
               }, { busyLabel: "Packaging…", doneLabel: "Packaged ✓", failedLabel: "Not packaged" }).catch(() => {});
             });
@@ -1977,7 +1974,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             delBtn.addEventListener("click", (e) => {
               e.stopPropagation();
               void (async () => {
-              const ok = await shell.confirm({ title: `Delete the scene "${sc.name}"?`, ok: "Delete", cancel: "Cancel", destructive: true, body: `<p>The scene file and its row go. The series it names stay in the database.</p>` });
+              const ok = await shell.confirm({ title: `Delete the scene "${sc.name}"?`, ok: "Delete", cancel: "Keep", destructive: true, body: `<p>The scene file and its row go; this cannot be undone. The series it names stay in the database.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
               if (!ok) return;
               await runAction(delBtn, async () => {
                 const r = await fetch(`/_db/${encodeURIComponent(dbId ?? "")}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then((x) => x.ok).catch(() => false);
@@ -2362,8 +2359,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     /**
      * The source the open database was read from, so it can be RE-read without the browser.
      *
-     * `openDb` is a snapshot of ctkDICOM.sql taken when the database was opened, and everything that
-     * needs a series' instances goes through it -- including the DICOM SEG exporter, which has to
+     * `openDb` holds the series LIST as it was when the database was opened (a series' files are asked of the server
+     * on every read since 2026-10-14, so those are always current), and everything that needs a series goes through
+     * it -- including the DICOM SEG exporter, which has to
      * re-read the very files a segmentation was drawn on. So a series saved from inside the
      * application was invisible to the application until someone reopened the browser by hand. That
      * is one of the two steps between cropping a volume and being able to save a segmentation of it.
@@ -2743,6 +2741,28 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         void shell.showPanel(hasSegs ? "segmentations" : "data");
         return { ok: true, loaded: list.length, missing: [...missing, ...report.missing], seconds, applied: report.applied, timings, failures, v: typeof doc.v === "number" ? doc.v : 1, name };
       },
+      /** Make this database the one Albula opens, and read from it from now on (package-window.ts opens a scene in it). */
+      /** Open a registered database in THIS WINDOW only, without changing the one Albula opens by default (critic
+       *  2026-10-14, 3: the diffusion sample switched the machine-wide database). */
+      __openDatabaseInWindow: async (id: string): Promise<void> => {
+        await loadRegistered();
+        const d = registered.find((x) => x.id === id && x.exists);
+        if (!d) throw new Error(`no database “${id}” is registered`);
+        servedDb = new URL(`/_db/${encodeURIComponent(id)}/`, location.href).href;
+        servedLabel = d.path;
+        lastSource = httpSource(servedDb);
+        openDb = null;
+        forgetProvenance();
+      },
+      /** What is loaded and saved nowhere, by name (a segmentation never saved or edited since, markups in no saved scene). */
+      __unsavedWork: (): string[] => unsavedWork(),
+      __useDatabase: async (id: string) => {
+        await fetch("/_db", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ current: id }) });
+        const was = servedDb;
+        await loadRegistered();
+        if (servedDb && servedDb !== was) { lastSource = httpSource(servedDb); openDb = null; }
+        await afterDatabasesChangedOutside?.(id);
+      },
       /** Load a saved scene by its uid from the current database's store. */
       __loadScene: async (uid: string) => {
         const cur = registered.find((d) => d.current && d.exists) ?? registered.find((d) => d.exists);
@@ -2787,7 +2807,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (!hint) return;
       const cur = registered.find((d) => d.current) ?? registered[0];
       hint.textContent = !registered.length
-        ? "no database registered — add one under [Database] in settings.ini"
+        ? "no database yet — make one with Databases…, or bring scans in with Load from files"
         : cur.exists
         ? cur.path
         : `${cur.path} (not reachable)`;
@@ -2864,6 +2884,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       await loadRegistered();
       await fillAddWhich(madeId);
     };
+    afterDatabasesChangedOutside = afterDatabasesChanged;
     const fillAddWhich = async (select?: string) => {
       const { databases, features } = await listDatabases();
       const keep = select ?? addWhich.value;
@@ -2889,10 +2910,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (addWhich.value !== "_new" && addWhich.value !== "_all") return;
       const startWithNew = addWhich.value === "_new";
       void fillAddWhich();   // back to a real database while the window is open
-      openDatabasesWindow({ startWithNew, onChanged: (id) => void afterDatabasesChanged(id) });
+      openDatabasesWindow({ notify: shell.notify, startWithNew, onChanged: (id) => void afterDatabasesChanged(id) });
     });
     void fillAddWhich();
-    (el.querySelector('[data-act="databases"]') as HTMLButtonElement).addEventListener("click", () => openDatabasesWindow({ onChanged: (id) => void afterDatabasesChanged(id) }));
+    (el.querySelector('[data-act="databases"]') as HTMLButtonElement).addEventListener("click", () => openDatabasesWindow({ notify: shell.notify, onChanged: (id) => void afterDatabasesChanged(id) }));
     (el.querySelector('[data-act="transfer"]') as HTMLButtonElement).addEventListener("click", () => openTransferWindow({ onChanged: () => void afterDatabasesChanged(), onOpenBrowser: () => openDatabase(false) }));
     /** The database DICOM loaded from disk is added to, or null when "Also add to" is unticked. */
     const addTarget = (): { id: string; name: string } | null =>
@@ -2959,7 +2980,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const tdDel = document.createElement("td"); tdDel.style.cssText = "padding:4px 8px;width:1%;";
         const delBtn = document.createElement("button"); delBtn.textContent = "Delete"; delBtn.title = "Delete this scene from the database. Its series stay.";
         delBtn.addEventListener("click", async () => {
-          const ok = await shell.confirm({ title: "Delete the scene?", ok: "Delete", destructive: true, cancel: "Cancel", body: `<p>“${esc(sc.name)}” is removed from the database. The series it lists stay.</p>` });
+          const ok = await shell.confirm({ title: "Delete the scene?", ok: "Delete", destructive: true, cancel: "Keep", body: `<p>“${esc(sc.name)}” is removed from the database; this cannot be undone. The series it lists stay.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
           if (!ok) return;
           void runAction(delBtn, async () => {
             const done = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then((x) => x.ok).catch(() => false);
@@ -3007,15 +3028,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     order: 2,
     tip: "What is loaded, and which view shows it; rename or remove",
     help: `<p>Everything currently in the scene — volumes, segmentations, markups, transforms — as a
-      Subject Hierarchy, with what is shown in which view. Rename with a double-click, delete with a
-      right-click.</p>
+      list (Slicer calls it the Subject Hierarchy), with what is shown in which view. Click a name to rename it; ⋯ at the
+      end of a row (or a right-click on it) offers Remove from scene.</p>
       <p>This is the session, not the archive: what is listed here came from a file or from the
       DICOM database, and closing the application ends it. Use Save to keep a result.</p>`,
     mount(el) {
     el.innerHTML = `
       <h2>Scenes</h2>
       <div class="sl-scene-id sl-hint" title="The scene this window is in. Click its name to rename it."></div>
-      <div class="sl-row sl-sh-head"><h3>Subject Hierarchy</h3><label class="sl-sh-link" title="Off: R/Y/G switch one view. On: all three together."><input type="checkbox" class="sl-sh-link-cb"> Link slice views</label><span class="sl-scene-slot"></span></div>
+      <div class="sl-row sl-sh-head"><h3>In this scene</h3><label class="sl-sh-link" title="Off: R/Y/G switch one view. On: all three together."><input type="checkbox" class="sl-sh-link-cb"> Link slice views</label><span class="sl-scene-slot"></span></div>
       <div class="sl-sh"></div>`;
 
     // Subject Hierarchy: every data node (any type) unless hidden.
@@ -3026,41 +3047,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // like paragraph text once four buttons and a name did not fit the sidebar, which is what
     // "spill over" was. Fixed here two ways: real flexbox with a non-wrapping, ellipsis-truncated
     // name (so a long name shortens instead of breaking the row), and two of the three actions
-    // moved OFF the row entirely -- rename is now a double-click on the name and delete a
-    // right-click on the row, both Ron: "like in Mac Finder" / "delete is a right click". Only the
-    // visibility toggle, the one used constantly, stays as a persistent control.
+    // moved OFF the row entirely -- rename was a double-click on the name and delete a right-click on the row (Ron, then:
+    // "like in Mac Finder" / "delete is a right click"); since 2026-10-14 a click on the name renames and the row's ⋯
+    // (or a right-click) holds Remove (row-actions.ts). Only the visibility toggles stay as persistent controls.
     const shEl = el.querySelector(".sl-sh") as HTMLElement;
     const DATA_TYPES = new Set(["image", "segmentation", "markup", "model", "transform", "sequence"]);
     const ICON: Record<string, string> = { image: "🧊", segmentation: "🎨", markup: "📍", model: "🧩", transform: "⭮" };
 
-    // One shared right-click menu for every row, built once. Ron: "delete is a right click."
-    const shMenu = document.createElement("div");
-    shMenu.className = "sl-sh-menu";
-    shMenu.hidden = true;
-    // "REMOVE FROM SCENE", not "Delete". Ron deleted a saved segmentation here and found it still in
-    // the archive: "I deleted the lungvessel from the data module, but is still there when I bring up
-    // the dicom db." This module owns the SESSION -- unloading is the right thing for it to do -- but
-    // a verb that does not name the place it acts on invites exactly that. The rule now applies
-    // everywhere: Remove from scene, Save to DICOM database, Delete from DICOM database, Delete
-    // autosave. Every destructive verb says where.
-    shMenu.innerHTML = `<button class="sl-sh-menu-item" data-menu-del title="Unloads it from this session. Anything saved to the DICOM database stays there.">Remove from scene</button>`;
-    document.body.appendChild(shMenu);
-    let shMenuTarget: string | null = null;
-    const hideShMenu = () => { shMenu.hidden = true; shMenuTarget = null; };
-    shMenu.querySelector("[data-menu-del]")!.addEventListener("click", () => {
-      if (shMenuTarget) {
-        // A VOLUME is not just its node: the slice composites name it as a layer, and a plain
-        // `del` leaves them pointing at an id that is gone -- three blank slice views and no way
-        // to tell why. removeVolumeFromScene re-points them (see logic/ingest.ts).
-        const n = opts.live.nodes.get(shMenuTarget);
-        if (n?.type === "image") removeVolumeFromScene(opts.live, shMenuTarget);
-        else opts.live.write({ op: "del", id: shMenuTarget });
-      }
-      hideShMenu();
-    });
-    document.addEventListener("click", hideShMenu);
-    document.addEventListener("contextmenu", (e) => { if (!shMenu.contains(e.target as Node)) hideShMenu(); });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideShMenu(); });
+    // (The shared right-click menu that stood here -- Ron, earlier: "delete is a right click" -- is the row's ⋯ menu since
+    // 2026-10-14, opened by ⋯ or a right-click: row-actions.ts, the template's rule.)
 
     // R/Y/G/3D visibility. Ron: "visibility should be per viewer and not global... each view
     // independently, with the option to link all the slice viewers... two layers: gray scale and
@@ -3245,27 +3240,46 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           `<span class="sl-sh-icon">${ICON[n.type as string] ?? "•"}</span>` +
           `<span class="sl-sh-name">${escapeHtml(n.name ?? n.id)}</span>` +
           `<span class="sl-sh-views">${controls}</span>` +
-          // VISIBLE, not only on right-click. Ron, 2026-09-22: "the remove scene function is
-          // completely hidden. This needs to get better." The × unloads it from this session; the
-          // DICOM database is untouched, and unsaved work asks first.
-          `<button class="sl-sh-remove" data-remove="${n.id}" title="Remove from the scene. Unloads it from this session; anything saved to the DICOM database stays there.">×</button>` +
+          // VISIBLE, not only on right-click (Ron, 2026-09-22: "the remove scene function is completely hidden"): since
+          // 2026-10-14 it is the first item of the row's ⋯ menu (row-actions.ts, the template's rule), which right-click
+          // also opens; the × it replaced is gone (the approved mockup, mockups/rename-2026-10-14.html).
           `</div>` + (n.type === "image" && !isLabelmap ? lookRow(n.id as string) : "");
       }).join("") : `<p class="sl-hint">No data yet — open a file or load sample data.</p>`;
 
-      shEl.querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const id = (b as HTMLElement).dataset.remove!;
+      // REMOVE FROM SCENE: unloads it from this session; the DICOM database is untouched, and unsaved work asks first.
+      const removeFromScene = async (id: string) => {
         const n = opts.live.nodes.get(id);
         if (!n) return;
         const org = n.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string; local?: boolean } | undefined;
-        const unsaved = n.type === "segmentation" && !(org?.savedSeriesInstanceUID || org?.seriesInstanceUID);
+        // SAVED NOWHERE, so removing it is final and it asks first (PALETTE.md, "A final delete asks first"; Ron,
+        // 2026-10-14): a segmentation never saved or edited since; a volume that came from a file or a crop (no DICOM
+        // series behind it); a markup not in a saved scene. A saved series can be loaded again and does not ask.
+        const fromDicom = !!(org?.savedSeriesInstanceUID || org?.seriesInstanceUID);
+        const unsaved = (n.type === "segmentation" && (!fromDicom || n.edited === true)) ||
+          (n.type === "image" && !fromDicom && !(n as { labelmap?: boolean }).labelmap) ||
+          (n.type === "markup" && unsavedMarkups().includes(String(n.name ?? n.id)));
         if (unsaved) {
-          const ok = await shell.confirm({ title: `Remove "${n.name}" from the scene?`, ok: "Remove", cancel: "Keep", destructive: true, body: `<p>It is not saved to the DICOM database. Removing it from the scene loses it, except for the temporary copy under AI Segmentations → Advanced → Recent results, if there is one.</p>` });
+          const why = n.type === "markup" ? "It is not in a saved scene." : n.type === "image" ? "It came from a file or a crop and is not in the DICOM database." : n.edited === true ? "Its edits are not saved." : "It is not saved to the DICOM database.";
+          const ok = await shell.confirm({ title: `Remove “${n.name}” from the scene?`, ok: "Remove", cancel: "Keep", destructive: true, body: `<p>${escapeHtml(why)} Removing it from the scene loses it${n.type === "segmentation" ? ", except for the temporary copy under AI Segmentations › Advanced › Recent results, if there is one" : ""}.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
           if (!ok) return;
         }
         if (n.type === "image") removeVolumeFromScene(opts.live, id);
         else opts.live.write({ op: "del", id });
-      }));
+      };
+      // NAMES AND ROW ACTIONS (Ron, 2026-10-14; row-actions.ts): the name renames on a click; ⋯ and a right-click open
+      // one menu, Rename and Remove from scene.
+      shEl.querySelectorAll<HTMLElement>(".sl-sh-row").forEach((row) => {
+        const id = row.dataset.id!;
+        const nameEl = row.querySelector(".sl-sh-name") as HTMLElement | null;
+        if (!nameEl) return;
+        const get = () => (opts.live.nodes.get(id)?.name as string) ?? id;
+        const commit = (v: string) => opts.live.write({ op: "patch", id, path: "#/name", value: v });
+        makeNameEditable(nameEl, { get, commit });
+        addRowMenu(row, () => [
+          { label: "Rename", run: () => startEditing(nameEl, get(), commit) },
+          { label: "Remove from scene", title: "Unloads it from this session. Anything saved to the DICOM database stays there.", run: () => void removeFromScene(id) },
+        ], `“${get()}”`);
+      });
       shEl.querySelectorAll("[data-vis]").forEach((b) => b.addEventListener("click", (e) => {
         e.stopPropagation();
         const id = (b as HTMLElement).dataset.vis!;
@@ -3339,43 +3353,6 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         refresh();
       }));
 
-      shEl.querySelectorAll<HTMLElement>(".sl-sh-row").forEach((row) => {
-        const id = row.dataset.id!;
-        const nameEl = row.querySelector(".sl-sh-name") as HTMLElement;
-
-        // Finder-style rename: double-click turns the name into a text field in place -- Enter or
-        // clicking away commits, Escape reverts.
-        nameEl.addEventListener("dblclick", (e) => {
-          e.stopPropagation();
-          const current = (opts.live.nodes.get(id)?.name as string) ?? id;
-          const input = document.createElement("input");
-          input.className = "sl-sh-rename";
-          input.value = current;
-          nameEl.replaceWith(input);
-          input.focus();
-          input.select();
-          const commit = () => {
-            const val = input.value.trim();
-            input.replaceWith(nameEl);
-            if (val && val !== current) opts.live.write({ op: "patch", id, path: "#/name", value: val });
-          };
-          input.addEventListener("keydown", (ke) => {
-            if (ke.key === "Enter") { ke.preventDefault(); commit(); }
-            else if (ke.key === "Escape") { ke.preventDefault(); input.replaceWith(nameEl); }
-          });
-          input.addEventListener("blur", commit);
-          input.addEventListener("click", (ce) => ce.stopPropagation());
-        });
-
-        row.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          shMenuTarget = id;
-          shMenu.style.left = `${e.clientX}px`;
-          shMenu.style.top = `${e.clientY}px`;
-          shMenu.hidden = false;
-        });
-      });
     });
     // Also "volumeRenderingDisplay", not just DATA_TYPES: it drives every image row's 3D button, and
     // changes to it without this went unnoticed here -- silently, since the Volume Rendering module
@@ -3467,7 +3444,34 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         if (f) picked.push(f);
       }
     }
-    if (picked.some((f) => /\.mrson\.json$/i.test(f.name))) { await loadFiles(picked); return; }
+    // A PACKAGED SCENE (`.albula`): the one window (render/demos/package-window.ts; Ron, 2026-10-13), with every file of
+    // its dicom/ folder in hand -- they are uploaded (copied), since a dropped folder's place on disk is not known.
+    const sceneF = picked.find((f) => /\.mrson\.json$/i.test(f.name));
+    if (sceneF) {
+      const provF = picked.find((f) => /^provenance\.json$/i.test(f.name));
+      const pkgDir = dirs.find((d) => /\.albula$/i.test(d.name)) ?? dirs[0];
+      const dicom: File[] = [];
+      const take = async (dir: FileSystemDirectoryEntry) => {
+        const reader = dir.createReader();
+        for (;;) {
+          const batch = await new Promise<FileSystemEntry[]>((resolve) => reader.readEntries((r) => resolve(r), () => resolve([])));
+          if (!batch.length) return;
+          for (const en of batch) {
+            if (en.name.startsWith(".")) continue;
+            if (en.isDirectory) await take(en as FileSystemDirectoryEntry);
+            else { const f = await new Promise<File | null>((resolve) => (en as FileSystemFileEntry).file((x) => resolve(x), () => resolve(null))); if (f) dicom.push(f); }
+          }
+        }
+      };
+      const sub = await new Promise<FileSystemEntry | null>((resolve) => pkgDir.getDirectory("dicom", {}, (d) => resolve(d), () => resolve(null)));
+      if (sub?.isDirectory) await take(sub as FileSystemDirectoryEntry);
+      try {
+        const scene = JSON.parse(await sceneF.text()) as Record<string, unknown>;
+        const provenance = provF ? JSON.parse(await provF.text()) as Record<string, unknown> : undefined;
+        if (dicom.length) { await openPackageWindow({ dropped: { name: pkgDir.name, scene, provenance, dicom } }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) }); return; }
+      } catch (e) { shell.notify({ title: "The package could not be read", body: (e as Error).message }); return; }
+      await loadFiles(picked); return;
+    }
     // NOT A SCENE: a folder of scans (a disc, a stick). Every file in it, viewed and -- with "Also add to" ticked --
     // added to the database (Ron, 2026-10-01: "Drag and drop?").
     const all: File[] = [];

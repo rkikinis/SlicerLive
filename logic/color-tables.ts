@@ -32,8 +32,8 @@ function hsv2rgb(h: number, s: number, v: number): RGB {
 }
 
 export const COLOR_TABLES: ColorTable[] = [
-  { id: "vtkMRMLColorTableNodeGrey", name: "Grey", ramp: (t) => [clamp01(t), clamp01(t), clamp01(t)] },
-  { id: "vtkMRMLColorTableNodeInvertedGrey", name: "InvertedGrey", ramp: (t) => [1 - clamp01(t), 1 - clamp01(t), 1 - clamp01(t)] },
+  { id: "vtkMRMLColorTableNodeGrey", name: "Gray", ramp: (t) => [clamp01(t), clamp01(t), clamp01(t)] },
+  { id: "vtkMRMLColorTableNodeInvertedGrey", name: "Inverted gray", ramp: (t) => [1 - clamp01(t), 1 - clamp01(t), 1 - clamp01(t)] },
   { id: "vtkMRMLColorTableNodeRainbow", name: "Rainbow", ramp: rainbow },
   { id: "vtkMRMLColorTableNodeOcean", name: "Ocean", ramp: pw([[0, 0, 0], [0, 0.25, 0.5], [0, 0.6, 0.85], [0.6, 0.95, 1], [1, 1, 1]]) },
   { id: "vtkMRMLColorTableNodeIron", name: "Iron", ramp: pw([[0, 0, 0], [0.5, 0, 0], [0.9, 0.45, 0], [1, 0.85, 0.2], [1, 1, 1]]) },

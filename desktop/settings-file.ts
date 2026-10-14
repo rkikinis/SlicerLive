@@ -30,7 +30,10 @@
 // SLICERLIVE_CONFIG_DIR redirects the per-user store. Tests must never write the real one -- it is
 // the user's only copy of their preferences.
 import { formatIni, parseIni } from "../logic/settings.ts";
-const CONFIG_DIR = Deno.env.get("SLICERLIVE_CONFIG_DIR") ?? `${Deno.env.get("HOME")}/.config/slicerlive`;
+// HOME on macOS and Linux; Windows has USERPROFILE (where Albula keeps things on Windows is decided in the cross-platform
+// plan, step 2). Never "undefined/.config" (critic 2026-10-13, texts and docs, finding 11).
+const HOME_DIR = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? ".";
+const CONFIG_DIR = Deno.env.get("SLICERLIVE_CONFIG_DIR") ?? `${HOME_DIR}/.config/slicerlive`;
 const USER_SETTINGS = `${CONFIG_DIR}/settings.ini`;
 const FILE_NAME = "settings.ini";
 
@@ -50,13 +53,17 @@ const exists = (p: string) => {
  * each level for a settings.ini. Only an EXISTING file counts: absent one, the per-user path is
  * used, so nothing is ever silently created inside the user's folder.
  */
+/** The folder a path is in, by either separator: a Windows path has no "/" (critic 2026-10-13 cross-platform, B5: the
+ *  last "/" made a folder named "settings.in"). */
+const parentDir = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
+
 export function resolveSettingsPath(galleryRoot?: string): string {
   if (galleryRoot) {
-    let dir = galleryRoot.replace(/\/+$/, "");
+    let dir = galleryRoot.replace(/[\\/]+$/, "");
     for (let up = 0; up < 3 && dir && dir !== "/"; up++) {
       const candidate = `${dir}/${FILE_NAME}`;
       if (exists(candidate)) return candidate;
-      dir = dir.slice(0, dir.lastIndexOf("/"));
+      dir = parentDir(dir);
     }
   }
   return USER_SETTINGS;
@@ -84,7 +91,7 @@ export async function readSettings(path: string): Promise<string> {
  * the only copy of the user's preferences, and rename is atomic within a filesystem.
  */
 export async function writeSettings(path: string, text: string): Promise<void> {
-  const dir = path.slice(0, path.lastIndexOf("/"));
+  const dir = parentDir(path);
   await Deno.mkdir(dir, { recursive: true });
   const tmp = `${path}.tmp-${crypto.randomUUID().slice(0, 8)}`;
   await Deno.writeTextFile(tmp, text);

@@ -2,6 +2,7 @@
 // The second half pins the critic's findings of 2026-10-02 (Contents/docs/qa/2026-10-02-database-transfer.md).
 //
 //   deno test -A --no-check desktop/db-transfer.test.ts
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import dcmjs from "../logic/dcmjs.ts";
 import { setDcmjs } from "../logic/readers/dicom-series.ts";
@@ -19,10 +20,9 @@ const made: string[] = [];
 globalThis.addEventListener("unload", () => { for (const d of made) try { Deno.removeSync(d, { recursive: true }); } catch { /* gone */ } });
 const tmp = async (prefix: string) => { const d = await Deno.realPath(await Deno.makeTempDir({ prefix })); made.push(d); return d; };
 
+// Albula's own SQLite, not the sqlite3 program: the suite runs on Windows too (critic, 2026-10-13, finding 9).
 async function sql(db: string, text: string): Promise<string> {
-  const { stdout, code, stderr } = await new Deno.Command("/usr/bin/sqlite3", { args: ["-readonly", db, text] }).output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-  return new TextDecoder().decode(stdout).trim();
+  return runScript(db, text, { readonly: true }).trim();
 }
 const images = (dir: string, where = "1") => sql(`${dir}/ctkDICOM.sql`, `SELECT COUNT(*) FROM Images WHERE ${where}`).then(Number);
 
@@ -243,7 +243,7 @@ Deno.test("finding 12: a scan whose files lie outside the first database is repo
   const rows = (await sql(`${a}/ctkDICOM.sql`, `SELECT Filename FROM Images WHERE SeriesInstanceUID='${ct.seriesInstanceUID}'`)).split("\n");
   const upd: string[] = [];
   for (const [i, f] of rows.entries()) { await Deno.rename(`${a}/${f}`, `${outside}/${i}.dcm`); upd.push(`UPDATE Images SET Filename='${outside}/${i}.dcm' WHERE Filename='${f}';`); }
-  await new Deno.Command("/usr/bin/sqlite3", { args: [`${a}/ctkDICOM.sql`, upd.join("\n")] }).output();
+  runScript(`${a}/ctkDICOM.sql`, upd.join("\n"));
   const r = await transferSeries(side("p", a), side("w", b), [ct.seriesInstanceUID], { move: true });
   const gone = await removeTransferred(side("p", a), side("w", b), r);
   assertEquals(gone.series, 2, "the scan, and the outline made from it (finding 3)");

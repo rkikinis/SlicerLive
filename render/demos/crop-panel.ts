@@ -16,6 +16,7 @@
 // This takes a sub-box of the existing grid: the voxels out are the voxels in, and only the origin
 // of ijkToRAS moves. See logic/crop.ts.
 
+import { makeNameEditable } from "./row-actions.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
@@ -218,11 +219,11 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
     // cropping?" -- and the answer should not have to be "find the Markups panel". Pressing either
     // button here brings it back, since both write a visible box, so nothing is lost by hiding it.
     if (chosenBox) live.write({ op: "patch", id: chosenBox, path: "#/visible", value: false });
-    note = `${name}: ${out.dims.join("×")} voxels, ${Math.round(100 - (after / before) * 100)}% smaller. ` +
-      `The original is untouched and still in the scene. The box is hidden now — fit or cut again to ` +
-      `bring it back.`;
-    opts.status?.(note);
+    opts.status?.(`${name}: ${out.dims.join("×")} voxels, ${Math.round(100 - (after / before) * 100)}% smaller; the original is untouched and still in the scene`);
+    note = "The box is hidden now — fit or cut again to bring it back.";
     render();
+    // THE RESULT WHERE THE EYE IS (critic 2026-10-14, 19: its Save to DICOM sat below the fold).
+    root?.querySelector(".sl-crop-result")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
 
   /** Rebuild the panel, keeping the scroll position (see panel-scroll.ts). */
@@ -267,9 +268,11 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
       // WHAT IT WILL BE CALLED, beside how big it will be. Ron: "The module gives the size of the
       // crop, but not the name of the file." A panel that reports a size and no name leaves the
       // reader to find the result by elimination in the Scene list.
-      const nameCell = shell.row(sec, "New volume", { wide: true });
+      // "WILL BE", not "New volume" / "Result": those words name what a crop made, in the Result section below (critic
+      // 2026-10-14, 20: the same name in three places after a crop).
+      const nameCell = shell.row(sec, "Will be called", { wide: true });
       nameCell.textContent = croppedName(img);
-      const resCell = shell.row(sec, "Result", { wide: true });
+      const resCell = shell.row(sec, "Size", { wide: true });
       resCell.textContent = shown;
       const extCell = shell.row(sec, "Extent", { wide: true });
       extCell.textContent = box.size.map((x) => `${Math.round(x)}`).join(" × ") + " mm";
@@ -308,11 +311,27 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
     // says it in a sentence, and puts the button that fixes it right there. Not a hint at the
     // bottom: the state and the remedy in the same place, while the crop is the thing being
     // looked at.
+    // A RESULT SECTION OF ITS OWN, green (what exists), once a crop has been made: what came out, where it lives, and the
+    // button that keeps it (Ron, 2026-10-14, the module review's proposal 6: "yes").
     const fresh = lastCrop ? live.nodes.get(lastCrop) : undefined;
     if (fresh) {
       const savedUid = (fresh.origin as { savedSeriesInstanceUID?: string } | undefined)?.savedSeriesInstanceUID;
       const anc = hooks().__dicomAncestorOf?.(lastCrop) ?? null;
-      const whereRow = shell.row(sec, "Where it lives", { wide: true });
+      const fd = fresh.dims as number[] | undefined, m = fresh.ijkToRAS as number[] | undefined;
+      const mm = m ? [0, 1, 2].map((c) => Math.hypot(m[c], m[4 + c], m[8 + c])) : undefined;
+      const size = fd ? `${fd.join(" × ")}${mm ? ` · ${mm.map((x) => x.toFixed(2).replace(/\.?0+$/, "")).join(" × ")} mm` : ""}` : "";
+      const res = shell.section(root, "Result", { open: true, band: "green", note: size });
+      res.classList.add("sl-crop-result");
+      // ITS NAME IS EDITABLE where it is shown (Ron, 2026-10-14: "yes, with a way to edit the name"; row-actions.ts).
+      const nameCell = shell.row(res, "New volume", { wide: true });
+      const nameEl = document.createElement("span");
+      nameEl.textContent = String(fresh.name ?? "");
+      nameCell.replaceChildren(nameEl);
+      makeNameEditable(nameEl, {
+        get: () => String(live.nodes.get(lastCrop)?.name ?? ""),
+        commit: (v) => { live.write({ op: "patch", id: lastCrop, path: "#/name", value: v }); render(); },
+      });
+      const whereRow = shell.row(res, "Where it lives", { wide: true });
       // PLAIN WORDS, both states. "A DICOM SEG has to reference a series that exists" is true and is
       // not something a first-time user can act on; what they need to know is that the work they are
       // about to do on this volume cannot be kept either.
@@ -323,9 +342,9 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
           `does anything you segment on it — a saved segmentation has to point at a volume that is ` +
           `in the database.`;
       if (!savedUid && anc) {
-        const saveRow = shell.row(sec, "", { wide: true });
+        const saveRow = shell.actions(res);
         saveRow.innerHTML = `<button class="sl-primary sl-crop-save"${busy ? " disabled" : ""}
-          title="Writes it as a DICOM series in the current database, indexed under ${escapeHtml(anc.name)}">Put it in the DICOM database</button>`;
+          title="Writes it as a DICOM series in the current database, indexed under ${escapeHtml(anc.name)}">Save to DICOM</button>`;
         const cropSave = saveRow.querySelector(".sl-crop-save") as HTMLButtonElement | null;
         cropSave?.addEventListener("click", () => void runAction(cropSave, async () => {
           note = "writing the DICOM series…";
@@ -350,7 +369,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
           `This one cannot go into the DICOM database: it does not descend from a series that is ` +
           `already there, so there is no patient or study to attach it to. Save it as a NRRD from ` +
           `the Save panel instead.`;
-        sec.appendChild(p);
+        res.appendChild(p);
       }
     }
 
@@ -396,9 +415,9 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
 
     const acts = shell.actions(sec);
     acts.innerHTML =
-      `<button class="sl-crop-red"${busy || !chosen ? " disabled" : ""}>Cut at the red slice</button>` +
-      `<button class="sl-crop-fit"${busy || !chosen ? " disabled" : ""}>Fit a box to the tissue</button>` +
-      `<button class="sl-primary sl-crop-go"${busy || !chosen || !box ? " disabled" : ""}>Crop to the box</button>`;
+      `<button class="sl-crop-red" title="Trim the box to everything above the line of the red (axial) slice"${busy || !chosen ? " disabled" : ""}>Cut at the red slice</button>` +
+      `<button class="sl-crop-fit" title="A box around everything above the background"${busy || !chosen ? " disabled" : ""}>Fit a box to the tissue</button>` +
+      `<button class="sl-primary sl-crop-go" title="A new volume holding the voxels inside the box, unchanged and aligned with the original, which stays in the scene. On a tilted scan it keeps a little more than the box, never less."${busy || !chosen || !box ? " disabled" : ""}>Crop to the box</button>`;
 
     if (note) {
       const p = document.createElement("p");
@@ -406,14 +425,6 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
       p.textContent = note;
       sec.appendChild(p);
     }
-    const g = document.createElement("p");
-    g.className = "sl-hint";
-    g.innerHTML = `The crop takes a sub-box of the existing voxel grid — nothing is resampled, so the
-      voxels that come out are the voxels that went in and the result stays exactly aligned with the
-      original. It therefore keeps a little more than the box asks for: an oblique volume's grid is
-      tilted relative to a box in patient space, and the smallest whole-voxel region that holds the
-      box is slightly larger than the box. It errs by keeping too much, never by cutting.`;
-    sec.appendChild(g);
 
     const q = <T extends HTMLElement>(s: string) => root!.querySelector(s) as T | null;
     q<HTMLSelectElement>(".sl-crop-vol")?.addEventListener("change", (e) => {
@@ -442,7 +453,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
     groups: ["Geometry"],
     help: `<p>Takes a smaller box out of a volume. Drag its <b>handles</b> in any view — a face to move
       that face, a corner to resize the two sides you can see, the green one in the middle to move the
-      whole box — or use the two buttons below. On a slice the box shows as an outline where the slice
+      whole box — or use the buttons below. On a slice the box shows as an outline where the slice
       cuts it, with the handles that lie near that slice; a corner drag there leaves the
       through-plane side alone, since the cursor cannot aim it.</p>
       <p>The box hides itself once you crop, because its job is done. Fit or cut again to bring it
@@ -465,9 +476,9 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
       the neck cut it is about 306³, which is roughly half, and the run fits.</p>
       <p>The original stays in the scene; the crop arrives beside it as a new volume.</p>
       <p><b>The crop lives in the scene only</b> until you say otherwise, and the scene is empty
-      again after a restart — so <b>Put it in the DICOM database</b> is offered as soon as a crop
+      again after a restart — so <b>Save to DICOM</b> is offered, in the Result section, as soon as a crop
       exists. That writes it as a DICOM series of its own, indexed under the series it came from,
-      carrying the same patient, study and acknowledgement: it is the original's data, cropped, and
+      carrying the same patient, study and acknowledgment: it is the original's data, cropped, and
       it should say so. It matters beyond convenience — a segmentation is saved as a DICOM SEG, and a
       SEG has to reference instances that exist, so a segmentation of a scene-only crop cannot be
       saved at all.</p>

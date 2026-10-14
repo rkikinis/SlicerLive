@@ -3,6 +3,7 @@
 // disk while its row was gone and the series was reported deleted.
 //
 //   deno test -A --no-check desktop/db-delete-names.test.ts
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { dbWithSeries } from "./duckn-copy.fixture.ts";
 import { deleteSeriesFromDatabase } from "./db-index.ts";
@@ -28,8 +29,7 @@ Deno.test("a file a row names OUTSIDE the database folder is left in place and s
     const theirs = `${outside}/their-own.dcm`;
     await Deno.copyFile(files[0], theirs);
     const rel = files[0].slice(dir.length + 1);
-    const sql = new Deno.Command("sqlite3", { args: [`${dir}/ctkDICOM.sql`, `UPDATE Images SET Filename='${theirs}' WHERE Filename='${rel.replace(/'/g, "''")}';`] }).outputSync();
-    assertEquals(sql.code, 0);
+    runScript(`${dir}/ctkDICOM.sql`, `UPDATE Images SET Filename='${theirs}' WHERE Filename='${rel.replace(/'/g, "''")}';`);
     const r = await deleteSeriesFromDatabase(dir, series.seriesInstanceUID);
     assert(Deno.statSync(theirs).isFile, "the file outside the database folder was deleted");
     assertEquals(r.leftInPlace, [theirs]);

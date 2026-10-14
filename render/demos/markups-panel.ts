@@ -3,6 +3,7 @@
 // native placer wired in live-views (interaction node + placeClick); this panel only drives it through the
 // exposed hooks, so it works standalone. Plain DOM, theme.css. RAS/geometry handled downstream.
 import { escapeHtml } from "./html.ts";
+import { unsavedMarkups } from "./scene-control.ts";
 import type { AppShell } from "./app-shell.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { MarkupType } from "../../logic/markups/measurements.ts";
@@ -33,7 +34,7 @@ const g = () => globalThis as unknown as Hooks;
 
 const TYPES: { t: PlaceType; label: string; tip?: string }[] = [
   { t: "fiducial", label: "Point" }, { t: "line", label: "Line" }, { t: "angle", label: "Angle" },
-  { t: "curve", label: "Curve" }, { t: "closedCurve", label: "Closed Curve" }, { t: "roi", label: "ROI" },
+  { t: "curve", label: "Curve" }, { t: "closedCurve", label: "Closed Curve" }, { t: "roi", label: "Box", tip: "A box you can resize, around a region (Slicer's ROI)" },
   // NAME CARDS (logic/markups/name-cards.ts; Ron, 2026-09-25: "just another type of markup and that module is the full home").
   { t: "nameCard", label: "Name card", tip: "A card pinned where you click, in the 3D view or a slice: the structure's name from the file when you click one, and a title and description you type. A right-click in a view offers it too." },
 ];
@@ -92,7 +93,18 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     glyph?.addEventListener("pointerdown", () => { dragging = true; });
     glyph?.addEventListener("input", (e) => g().__setGlyphScale(Number((e.target as HTMLInputElement).value)));
     glyph?.addEventListener("change", () => { dragging = false; render(); });
-    root.querySelectorAll(".sl-markup-list [data-del]").forEach((b) => b.addEventListener("click", () => { g().__deleteMarkup((b as HTMLElement).dataset.del!); render(); }));
+    // A FINAL DELETE ASKS FIRST when the markup is in no saved scene (PALETTE.md; Ron, 2026-10-14: "are you sure? or have
+    // you clicked by accident?"). One question per markup list, not per point: SlicerMorph-scale work places hundreds.
+    root.querySelectorAll(".sl-markup-list [data-del]").forEach((b) => b.addEventListener("click", async () => {
+      const id = (b as HTMLElement).dataset.del!;
+      const name = String(live.nodes.get(id)?.name ?? id);
+      if (unsavedMarkups().includes(name)) {
+        const ok = await shell.confirm({ title: `Delete “${name}”?`, ok: "Delete", cancel: "Keep", destructive: true,
+          body: `<p>It is in no saved scene, so deleting it cannot be undone.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
+        if (!ok) return;
+      }
+      g().__deleteMarkup(id); render();
+    }));
     root.querySelectorAll(".sl-markup-list [data-vis]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.vis!, "visible", el.dataset.on !== "1"); render(); }));
     // THREE SLICES FROM THIS LINE (logic/line-axes.ts; Ron, 2026-09-25: "two markups … would define the axis").
     root.querySelectorAll(".sl-markup-list [data-align]").forEach((b) => b.addEventListener("click", () => {
@@ -183,7 +195,9 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     __markupsSelectCard: (id: string) => { selCard = id; cardsOpen = true; render(); },
     __markupsShowCard: (id: string) => { selCard = id; cardsOpen = true; void shell.showPanel("markups").then(() => { render(); g().__cardSelect?.(id); }); },
   });
-  shell.registerPanel({ id: "markups", title: "Markups", groups: ["Geometry"], tip: "Points, lines and curves placed in the views, with their measurements", mount(el) { root = el; render(true); } });
+  shell.registerPanel({ id: "markups", title: "Markups", groups: ["Geometry"], tip: "Points, lines and curves placed in the views, with their measurements",
+    help: `<p>Points, lines, angles, curves, closed curves and boxes placed in the views, with their measurements. Press what to place, then click in a view; <b>Place multiple</b> keeps placing until you stop. <b>Name card</b> pins a label with a title and a description.</p>`,
+    mount(el) { root = el; render(true); } });
   live.subscribe((c) => { if (!dragging && !editing && (c.type === "markup" || c.type === "interaction" || c.type === "segmentation" || c.kind === "remove")) renderSoon(); });
   addEventListener("keydown", (e) => { if (e.key === "Escape") { const ps = g().__placeState?.(); if (ps?.mode === "place") { g().__endPlace(); render(); } } });
 }

@@ -238,7 +238,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const checkLabels = (key: string, spots: { label: string; x: number; y: number; r: number }[], w: number, h: number) => {
     if (labelCheckTimer) clearTimeout(labelCheckTimer);
     labelCheckTimer = setTimeout(async () => {
-      if (!scene || labelCheckRunning) return;
+      if (!scene || labelCheckRunning || stereoActive) return;
       labelCheckRunning = true;
       try {
         const covering = new Set<string>(), gen = labelCheckGen;
@@ -399,37 +399,42 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView({ format: srgb }), clearValue: { r: 0.02, g: 0.024, b: 0.04, a: 1 }, loadOp: "clear", storeOp: "store" }] });
     pass.end(); gpu.device.queue.submit([enc.finish()]);
   };
+  // WHILE THE GLASSES SHOW STEREO THE 3D VIEW HERE STANDS STILL (Ron, 2026-10-13: dragging in the glasses grew the page
+  // by about a gigabyte a second until it was killed). This view and the two eye pictures share one renderer, at
+  // different sizes, and the renderer's full-size working images (about 33 MB each) are made again whenever the size
+  // asked for changes -- so with both drawing every frame, as when a drag and the head both moved the camera, it made
+  // and discarded them back and forth faster than the browser gave the memory back. Measured in the session log
+  // ("stereo memory" lines). The view keeps its last picture and catches up when stereo ends.
+  let stereoActive = false;
+  // THE 3D VIEW'S PICTURE QUALITY: one resolution for moving and still pictures, chosen by the person (Ron, 2026-10-14,
+  // on the hospital Mac showing "30 fps · 25%": "I like the desk view to follow the same rule" as the glasses -- a
+  // picture whose resolution changes while you look reads as flicker). Best by default; remembered on this Mac.
+  let deskQuality = 1;
+  try { const v = localStorage.getItem("sl-3d-quality"); if (v && ["1", "0.7", "0.5"].includes(v)) deskQuality = Number(v); } catch { /* not remembered */ }
   const a3d = mountAdaptive3d({
     scene: () => scene,
     // A sequence playing changes the content on a schedule: full-quality frames, not moving ones (accum-loop.ts).
     steady: () => { for (const n of live.nodes.values()) if (n.type === "sequenceBrowser" && n.playbackActive === true) return true; return false; },
     view: () => three.ctx.getCurrentTexture().createView({ format: srgb }),
-    size: () => ({ w: threeVisible ? three.canvas.width : 0, h: three.canvas.height }),
+    size: () => ({ w: threeVisible && !stereoActive ? three.canvas.width : 0, h: three.canvas.height }),
     setCamera: (s, w, h) => {
       // Nothing re-asserted here any more: a volume's lighting is its transfer function's (see
       // applyShade), and the surfaces' is set once on the renderer.
       s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h,
         camera.parallelProjection ? camera.parallelScale : undefined);
     },
-    // THE MOVING RESOLUTION IS CAPPED ONLY WHEN A VOLUME IS BEING RENDERED. Every frame during a
-    // drag was drawn at 40% and the still frame at 100%, so a rotation flickered between soft and
-    // sharp (Ron, 2026-09-20: "when I rotate, there is a flickering. Is there some downsampling
-    // going on during movement? Is it necessary?"). Measured on C3N-01524 at 1354x1642: surfaces
-    // alone orbit at 61 frames/s at full resolution (28 with the cap), so the cap only cost
-    // sharpness there; with the volume rendering on, full resolution drops to 12 frames/s and the
-    // budget controller alone oscillates, so the 40% cap stays for that case.
-    //
-    // 2026-09-23, Ron on CT-Training-LC003: the moving frames took 13-18 ms and were still drawn at 25%,
-    // chasing a 16 ms (60 frames a second) target, and the noise of a single low-resolution frame read as
-    // "a snow globe". His target: "15 frames per second are borderline, 30 are more than enough." So:
-    // aim for 33 ms, no fixed 40% cap, and let the budget lower the resolution only as far as a volume
-    // needs it -- on a small CT not at all. The rate is shown in the 3D view's bar (onFps).
-    gpu, movingScaleCap: 1, budgeted: () => !!last3DFields.volume, targetMs: 33, target: 8,
+    // ONE RESOLUTION FOR THE WHOLE SESSION (Ron, 2026-10-14). Until then a budget lowered the resolution while the
+    // view moved with a volume rendered (to 25% on the hospital's M2 Pro) and drew the still view at full resolution --
+    // the soft-then-sharp Ron called flicker on 2026-09-20 and again in the glasses on 2026-10-13. Now the person
+    // chooses Best / Balanced / Fastest (the 3D view's gear) and every picture is drawn at that; a slow card gives
+    // fewer frames a second, shown in the view's bar. His target stands: "15 frames per second are borderline, 30 are
+    // more than enough" (2026-09-23).
+    gpu, fixedScale: () => deskQuality, targetMs: 33, target: 8,
     onFrame: () => { drawThreeOverlay(); cfg.onFrame?.(); },
     onFps: (fps, scale) => {
       if (!fpsEl) return;
-      fpsEl.textContent = `${fps.toFixed(0)} fps${scale < 0.98 ? ` · ${Math.round(scale * 100)}%` : ""}`;
-      fpsEl.title = `While the view moves: ${fps.toFixed(0)} frames a second, drawn at ${Math.round(scale * 100)}% resolution. A still view is always drawn at full resolution.`;
+      fpsEl.textContent = `${fps.toFixed(0)} fps`;
+      fpsEl.title = `While the view moves: ${fps.toFixed(0)} frames a second. Moving and still, the view is drawn at ${Math.round(scale * 100)}% resolution (Picture quality, in the 3D view's settings).`;
     },
   });
   let meshes: SceneMeshData[] = [];
@@ -1752,6 +1757,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const ortho = document.createElement("button"); ortho.textContent = "⬚"; ortho.title = "Orthographic projection (Slicer's 3D view controller)";
     ortho.addEventListener("click", () => { const on = !camera.parallelProjection; setOrthographic(on); ortho.setAttribute("aria-pressed", String(on)); });
     bar.appendChild(ortho);
+    // VR / AR (desktop/headset.ts; Ron, 2026-10-12: "Right now it would be confusing for our use case user. Multiple
+    // potential showstoppers"): ONE button, shown only while glasses are plugged in; it does everything (the glasses to
+    // 3D, Albula full screen on them, two pictures, head tracking) and Esc undoes everything. Wired in the Glasses section.
+    const vrBtn = document.createElement("button"); vrBtn.textContent = "VR/AR"; vrBtn.hidden = true; vrBtn.className = "sl-3d-word";
+    vrBtn.title = "Show the 3D view in your VR / AR glasses, in 3D, following your head. Esc to come back";
+    bar.appendChild(vrBtn);
     fpsEl = document.createElement("span"); fpsEl.className = "sl-3d-fps";
     fpsEl.title = "Frames a second while the view moves; shown after the first turn of the view";
     bar.appendChild(fpsEl);
@@ -1913,6 +1924,21 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     paintShade(); onShadingVersion(paintShade); panelRepaints.push(paintShade);
     panel.appendChild(shadeRow);
 
+    // PICTURE QUALITY, the same three words as the glasses' (Ron, 2026-10-14: the desk view follows the glasses' rule).
+    const qualRow = document.createElement("div"); qualRow.className = "sl-3d-panel-row";
+    qualRow.innerHTML = `<label title="How much detail the 3D view has. More detail is slower when you turn the view; the choice holds the whole time, so the picture never changes while you look.">Picture quality</label>`;
+    const qualSel = document.createElement("select");
+    qualSel.innerHTML = `<option value="1">Best</option><option value="0.7">Balanced</option><option value="0.5">Fastest</option>`;
+    qualSel.title = "Best: the most detail. Balanced and Fastest: less detail, smoother when you turn the view. The frames a second show in the view's bar.";
+    qualSel.value = String(deskQuality);
+    qualSel.addEventListener("change", () => {
+      deskQuality = Number(qualSel.value) || 1;
+      try { localStorage.setItem("sl-3d-quality", qualSel.value); } catch { /* not remembered */ }
+      a3d.refresh();
+    });
+    qualRow.appendChild(qualSel);
+    panel.appendChild(qualRow);
+
     // The drawing look, beside the lighting it replaces for surfaces (the presets still light the
     // volumes; a surface in the drawing look is matte whatever the preset says).
     const drawRow = document.createElement("div"); drawRow.className = "sl-3d-panel-row";
@@ -2015,14 +2041,39 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // from where it is (Viture's libraries may not be copied into Albula) and serves it on ws://127.0.0.1:8779. The math
     // is his Slicer script's: the head's rigid motion since the start (or Recenter), in its own frame -- x right, y up,
     // z backward, the same as a camera's -- applied to the camera as it was then; meters to mm. ──
-    subHead("Glasses", "Viture glasses: the 3D view follows your head. Needs the pose helper running (Contents/tools/viture/viture-pose.ts).");
+    subHead("VR / AR glasses", "The 3D view in VR / AR glasses, in 3D and following your head: start it with the VR/AR button in the view's bar. Here: how sharp the pictures are, the distance between the eyes, what a head turn does.");
+    // THE STEP-BY-STEP ROWS are for development, behind Settings › For developers (Ron, 2026-10-14, the module review's
+    // proposal 4: "developer setting"): the VR/AR button does them all. Each carries the class sl-dev-step (theme.css).
     {
-      const row = document.createElement("div"); row.className = "sl-3d-panel-row";
+      // THE ONE BUTTON, here too, with the state in plain words, and what to do when the maker's software is missing.
+      const vrow = document.createElement("div"); vrow.className = "sl-3d-panel-row sl-dev-step";
+      vrow.innerHTML = `<label title="The glasses to 3D, Albula full screen on them, two pictures, head tracking. Esc to come back">In the glasses</label>`;
+      const vgo = document.createElement("button"); vgo.type = "button"; vgo.textContent = "View in the glasses";
+      const vsay = document.createElement("span"); vsay.className = "sl-hint";
+      vrow.append(vgo, vsay); adv.appendChild(vrow);
+      const swrow = document.createElement("div"); swrow.className = "sl-3d-panel-row"; swrow.hidden = true;
+      const swText = document.createElement("span"); swText.className = "sl-hint";
+      const swHow = document.createElement("button"); swHow.type = "button"; swHow.textContent = "How to get it…";
+      const swFind = document.createElement("button"); swFind.type = "button"; swFind.textContent = "Find it on this Mac…";   // visible: How to get it's last step names it (critic 2026-10-14, 15)
+      swrow.append(swText, swHow, swFind); adv.appendChild(swrow);
+      const swSteps = document.createElement("div"); swSteps.className = "sl-hint"; swSteps.hidden = true; adv.appendChild(swSteps);
+      const row = document.createElement("div"); row.className = "sl-3d-panel-row sl-dev-step";
       row.innerHTML = `<label title="The 3D camera moves as your head moves, from where it is when you start">Follow my head</label>`;
       const go = document.createElement("button"); go.type = "button"; go.textContent = "Start"; go.setAttribute("aria-pressed", "false");
-      const rc = document.createElement("button"); rc.type = "button"; rc.textContent = "Recenter"; rc.title = "Take the head's position now as the start, keeping the view as it is";
+      const rc = document.createElement("button"); rc.type = "button"; rc.textContent = "Recenter"; rc.title = "Look straight ahead and press: the view goes back to where it was when you pressed Start, and where you look now counts as straight ahead";
       const say = document.createElement("span"); say.className = "sl-hint";
       row.append(go, rc, say); adv.appendChild(row);
+      // HEAD TURNS TURN THE ANATOMY (Ron, 2026-10-12, on the Pro XR, which reports rotation only: "some headtracking is
+      // happening, but it is mostly translation, not rotation. when i turn left the picture translates right"). Turning
+      // the camera about the eye -- as a head turns in a room -- sweeps the anatomy across the view. "Turn the anatomy"
+      // keeps it centered: the camera goes round the point it looks at, by the head's turn. "Look around" is the room
+      // behavior (the anatomy stays put in space; with a Luma Ultra, which also reports position, you can walk round it).
+      const mrow = document.createElement("div"); mrow.className = "sl-3d-panel-row";
+      mrow.innerHTML = `<label title="What a turn of the head does">Head turns</label>`;
+      const mode = document.createElement("select");
+      mode.innerHTML = `<option value="orbit" title="The anatomy stays in the middle and turns as you turn your head">Turn the anatomy</option><option value="look" title="The anatomy stays where it is in space; turning your head looks past it">Look around</option>`;
+      mode.addEventListener("change", () => { H0inv = null; });   // continue from the view as it is
+      mrow.append(mode); adv.appendChild(mrow);
       type M = number[];   // 4x4 row-major
       const mul = (a: M, b: M): M => { const r = new Array(16).fill(0); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) r[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j]; return r; };
       const inv = (m: M): M => {   // rigid: R^T, -R^T t
@@ -2040,6 +2091,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const nrm = (v: Vec3): Vec3 => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
       const crs = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
       let ws: WebSocket | null = null, H0inv: M | null = null, C0: M | null = null, dist0 = 0, n = 0;
+      // The view when Start was pressed: what Recenter goes back to.
+      let startView: { position: Vec3; focalPoint: Vec3; viewUp: Vec3 } | null = null;
       let stereoOn = () => false;
       const capture = (p: number[]) => {
         H0inv = inv(poseM(p));
@@ -2048,7 +2101,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         C0 = [right[0], up[0], back[0], camera.position[0], right[1], up[1], back[1], camera.position[1], right[2], up[2], back[2], camera.position[2], 0, 0, 0, 1];
         dist0 = camera.distance;
       };
-      let pending: number[] | null = null;
+      let pending: number[] | null = null, pendingT = 0;
+      /** When the pose the camera now follows reached Albula's server (Date.now()): how old the head is in a picture. */
+      let appliedPoseT = 0;
       // THE MOUSE AND THE HEAD TOGETHER (Ron: "can I use the mouse to turn the object?"): while the mouse turns, pans or
       // zooms, the head waits; on release the head goes on from the view the mouse left, as after Recenter.
       let mouseHeld = false;
@@ -2069,12 +2124,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         if (cam3d.action !== "none") { mouseHeld = true; return; }
         if (mouseHeld) { mouseHeld = false; H0inv = null; }
         if (H0inv && still(p)) return;
-        used = p;
+        used = p; appliedPoseT = pendingT;
         if (!H0inv) capture(p);
         const m = mul(C0!, mul(H0inv!, poseM(p)));
-        const pos: Vec3 = [m[3], m[7], m[11]], up: Vec3 = [m[1], m[5], m[9]], back: Vec3 = [m[2], m[6], m[10]];
-        camera.position = pos; camera.viewUp = up;
-        camera.focalPoint = [pos[0] - back[0] * dist0, pos[1] - back[1] * dist0, pos[2] - back[2] * dist0];
+        const up: Vec3 = [m[1], m[5], m[9]], back: Vec3 = [m[2], m[6], m[10]];
+        if (mode.value === "orbit") {
+          // Round the point looked at when following began: the same orientation, the camera on the sphere around it.
+          const f: Vec3 = [C0![3] - C0![2] * dist0, C0![7] - C0![6] * dist0, C0![11] - C0![10] * dist0];
+          camera.position = [f[0] + back[0] * dist0, f[1] + back[1] * dist0, f[2] + back[2] * dist0]; camera.viewUp = up; camera.focalPoint = f;
+        } else {
+          const pos: Vec3 = [m[3], m[7], m[11]];
+          camera.position = pos; camera.viewUp = up;
+          camera.focalPoint = [pos[0] - back[0] * dist0, pos[1] - back[1] * dist0, pos[2] - back[2] * dist0];
+        }
         // refresh, not draw: a head is never quite still, so draw() kept the view flipping between the reduced
         // "moving" resolution and the settled one -- the flicker. Every head frame is drawn at full resolution.
         if (!stereoOn()) a3d.refresh();
@@ -2083,57 +2145,160 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       go.addEventListener("click", () => {
         if (ws) { stop(); say.textContent = "stopped"; return; }
         n = 0; H0inv = null;
-        ws = new WebSocket("ws://127.0.0.1:8779");
+        startView = { position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3 };
+        ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_headset/ws`);
         go.textContent = "Stop"; go.setAttribute("aria-pressed", "true"); say.textContent = "connecting…";
-        ws.onerror = () => { say.textContent = "no pose helper on this Mac — start Contents/tools/viture/viture-pose.ts"; stop(); };
+        ws.onerror = () => { say.textContent = "the head tracking did not answer"; notify("Head tracking stopped", "The glasses' head tracking did not answer. Press VR/AR to start again."); stop(); };
         ws.onmessage = (e) => {
-          const msg = JSON.parse(String(e.data)) as { pose?: number[]; status?: string };
+          const msg = JSON.parse(String(e.data)) as { pose?: number[]; status?: string; recenter?: boolean; mode?: string };
+          // The helper put the glasses back in 2D (this Mac did not take their 3D mode): the button says 2D again.
+          if (msg.mode === "2d") { sbsOn = false; sbs.setAttribute("aria-pressed", "false"); }
           if (msg.status) say.textContent = msg.status;
-          if (msg.pose) { if (++n === 1) say.textContent = "following your head"; const first = !pending; pending = msg.pose; if (first) requestAnimationFrame(apply); }
+          // The glasses window: the main window's scene as it changes, and the end of the glasses view.
+          const ext = msg as { scene?: Record<string, unknown>; end?: boolean };
+          if (ext.scene && inGlassesWindow) (globalThis as unknown as { __glassesScene?: (d: Record<string, unknown>) => void }).__glassesScene?.(ext.scene);
+          if (ext.end && inGlassesWindow) { void nat.albulaGlassesClose?.(); }
+          // OTHER GLASSES, OR THE SAME ONES PLUGGED IN AGAIN (Ron, 2026-10-12: "switching between these glasses and the
+          // luma [should be] seamless"): the helper says so, and the next pose becomes the reference -- the view goes on
+          // from where it is instead of jumping to the new glasses' own zero.
+          if (msg.recenter) { H0inv = null; used = null; }
+          if (msg.pose) { if (++n === 1) say.textContent = "following your head"; const first = !pending; pending = msg.pose; pendingT = (msg as { t?: number }).t ?? Date.now(); if (first) requestAnimationFrame(apply); }
         };
       });
-      rc.addEventListener("click", () => { H0inv = null; say.textContent = "recentered"; });
+      // RECENTER (Ron, 2026-10-12: "recenter doesn't work"): it used to take the head's direction now as the reference and
+      // keep the view as it was -- so nothing on screen changed, and it looked broken. Now the view goes back to where it
+      // was at Start, and the head's direction now becomes straight ahead, as a headset's recenter does.
+      rc.addEventListener("click", () => {
+        if (startView) { camera.position = [...startView.position] as Vec3; camera.focalPoint = [...startView.focalPoint] as Vec3; camera.viewUp = [...startView.viewUp] as Vec3; a3d.refresh(); }
+        H0inv = null; used = null; say.textContent = "recentered";
+      });
 
       // ── STEREO: one picture per eye, side by side, for the glasses' 3D mode (3840 x 1080: 1920 per eye). The window
-      // is covered by two canvases; each frame the scene is drawn twice, the eye cameras parallel, IPD apart (the
+      // is covered by two canvases; each frame the scene is drawn twice, the eye cameras IPD apart and aimed at the point looked at (the
       // glasses' own 3D mode fuses them). Put the Albula window on the glasses (as a second screen, not mirrored), make
       // it full screen, press "Glasses 3D" to switch the glasses to side-by-side, then Start stereo. Esc ends it. The
       // field of view is the glasses', not the screen's (review finding 4): default 27 degrees vertical -- from a 52
       // degree diagonal, the figure believed to be Viture's for the Luma line, NOT verified; adjust until the world
       // holds still as the head turns. ──
-      const srow = document.createElement("div"); srow.className = "sl-3d-panel-row";
+      const srow = document.createElement("div"); srow.className = "sl-3d-panel-row sl-dev-step";
       srow.innerHTML = `<label title="Two pictures side by side, one per eye, filling the window. Esc ends it.">Stereo</label>`;
       const sgo = document.createElement("button"); sgo.type = "button"; sgo.textContent = "Start stereo";
       const sbs = document.createElement("button"); sbs.type = "button"; sbs.textContent = "Glasses 3D"; sbs.title = "Switch the glasses to their side-by-side 3D mode (again: back to 2D)";
       srow.append(sgo, sbs); adv.appendChild(srow);
-      const frow = document.createElement("div"); frow.className = "sl-3d-panel-row";
+      const frow = document.createElement("div"); frow.className = "sl-3d-panel-row sl-dev-step";
       frow.innerHTML = `<label title="The glasses' vertical field of view per eye. Too small and the anatomy looks too big and swims as the head turns; too large, the reverse.">Field of view</label>`;
       const fov = document.createElement("input"); fov.type = "range"; fov.min = "15"; fov.max = "50"; fov.step = "0.5"; fov.value = "27";
       const fovV = document.createElement("span"); fovV.className = "sl-hint"; fovV.textContent = "27°";
       fov.addEventListener("input", () => { fovV.textContent = `${fov.value}°`; });
       frow.append(fov, fovV); adv.appendChild(frow);
       const irow = document.createElement("div"); irow.className = "sl-3d-panel-row";
-      irow.innerHTML = `<label title="The distance between the two eye cameras, in mm (a typical adult: 63). Larger makes the anatomy look smaller and nearer.">Eye distance</label>`;
+      irow.innerHTML = `<label title="Your pupillary distance (PD) in millimeters: it is on most eyeglass prescriptions. To measure it: face a mirror, hold a ruler against your brow, close your right eye and put the 0 under the center of your left pupil; then close your left eye and read the mark under your right pupil. Most adults: 54–74 mm, typically about 63.">Eye distance</label>`;
       const ipd = document.createElement("input"); ipd.type = "range"; ipd.min = "0"; ipd.max = "150"; ipd.step = "1"; ipd.value = "63";
       const ipdV = document.createElement("span"); ipdV.className = "sl-hint"; ipdV.textContent = "63 mm";
       ipd.addEventListener("input", () => { ipdV.textContent = `${ipd.value} mm`; });
       irow.append(ipd, ipdV); adv.appendChild(irow);
+      // SHARPNESS IN THE GLASSES: ONE RESOLUTION FOR THE WHOLE SESSION (Ron, 2026-10-13, on a picture drawn soft while
+      // moving and sharp when still: "there is an annoying flickering that makes the display not useful. We had similar
+      // experience with adaptive rendering in the past"). A head is never quite still, so the view kept crossing between
+      // the two and flickered. Now the resolution chosen here holds while you look; Faster trades sharpness for speed.
+      const qrow = document.createElement("div"); qrow.className = "sl-3d-panel-row";
+      // "PICTURE QUALITY", not "Sharpness" (Ron, 2026-10-14: is that the appropriate term?): the gaming word for this trade.
+      qrow.innerHTML = `<label title="How much detail the pictures in the glasses have. More detail is slower; the choice holds the whole time, so the picture never changes while you look.">Picture quality</label>`;
+      const sharp = document.createElement("select");
+      sharp.innerHTML = `<option value="1">Best</option><option value="0.7">Balanced</option><option value="0.5">Fastest</option>`;
+      sharp.title = "Best: the most detail. Balanced and Fastest: less detail, smoother when you turn your head.";
+      try { const v = localStorage.getItem("sl-glasses-sharpness"); if (v && ["1", "0.7", "0.5"].includes(v)) sharp.value = v; } catch { /* not remembered */ }
+      sharp.addEventListener("change", () => { stereoKey = ""; try { localStorage.setItem("sl-glasses-sharpness", sharp.value); } catch { /* not remembered */ } });
+      qrow.append(sharp); adv.appendChild(qrow);
       let sbsOn = false;
+      /** The glasses' own 3D mode (one picture per eye) or 2D, through Albula's server (desktop/headset.ts). */
+      const glassesMode = async (on: boolean): Promise<boolean> => {
+        const r = await fetch("/_headset/mode", { method: "POST", body: JSON.stringify({ mode: on ? "3d" : "2d" }) }).then((x) => x.json()).catch(() => ({ ok: false })) as { ok?: boolean; why?: string };
+        if (r.ok) { sbsOn = on; sbs.setAttribute("aria-pressed", String(on)); }
+        else say.textContent = r.why ?? `the glasses refused ${on ? "3D" : "2D"}`;
+        return !!r.ok;
+      };
       sbs.addEventListener("click", () => {
-        const w2 = new WebSocket("ws://127.0.0.1:8779");
-        w2.onopen = () => { w2.send(sbsOn ? "2d" : "sbs"); sbsOn = !sbsOn; sbs.setAttribute("aria-pressed", String(sbsOn)); setTimeout(() => w2.close(), 500); };
-        w2.onmessage = (e) => { const m = JSON.parse(String(e.data)) as { status?: string }; if (m.status && m.status !== "streaming the head pose") say.textContent = m.status; };
-        w2.onerror = () => { say.textContent = "no pose helper on this Mac — start Contents/tools/viture/viture-pose.ts"; };
+        if (!ws) { say.textContent = "press Start (follow my head) first: the glasses are reached through it"; return; }
+        void glassesMode(!sbsOn);
       });
       let stereo: { el: HTMLDivElement; eyes: { canvas: HTMLCanvasElement; ctx: GPUCanvasContext }[]; raf: number } | null = null;
       const stopStereo = () => {
         if (!stereo) return;
-        cancelAnimationFrame(stereo.raf); stereo.el.remove(); stereo = null;
+        cancelAnimationFrame(stereo.raf); stereo.el.remove(); stereo = null; stereoActive = false;
+        pointerTick = () => {}; stereoKey = ""; sTime.lastDrawn = 0;
+        if (scene) scene.onStageTimes = null;
+        clearInterval(memWatch); memWatch = undefined;
         sgo.textContent = "Start stereo"; sgo.setAttribute("aria-pressed", "false");
-        removeEventListener("keydown", escStereo, true);
+        removeEventListener("keydown", keysInStereo, true);
         a3d.refresh();
       };
-      const escStereo = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); stopStereo(); } };
+      // KEYS IN THE GLASSES (Ron, 2026-10-12: "you do not have access to buttons, when you are in full screen stereo";
+      // "try to keep the same ones as slicer"): Esc ends it (with VR/AR: everything back to the laptop); R recenters
+      // (Slicer's "r" resets a view); the arrows turn the anatomy, as in Slicer's 3D view; - and + less or more depth.
+      // PAN (Ron, 2026-10-12: "Pan is missing. would be very useful, once you zoom in"): as in Slicer's 3D view -- Shift
+      // with the arrows, or Shift with a drag -- the view and the point it looks at move together, sideways or up / down,
+      // by a share of the distance; the head goes on from there.
+      const panBy = (dx: number, dy: number) => {
+        const f = camera.focalPoint as Vec3, up = nrm(camera.viewUp as Vec3);
+        const back = nrm([camera.position[0] - f[0], camera.position[1] - f[1], camera.position[2] - f[2]]), right = nrm(crs(up, back));
+        const d = camera.distance, mx = -dx * d, my = dy * d;
+        const mv: Vec3 = [right[0] * mx + up[0] * my, right[1] * mx + up[1] * my, right[2] * mx + up[2] * my];
+        camera.focalPoint = [f[0] + mv[0], f[1] + mv[1], f[2] + mv[2]];
+        camera.position = [camera.position[0] + mv[0], camera.position[1] + mv[1], camera.position[2] + mv[2]];
+        H0inv = null; used = null;
+      };
+      const keysInStereo = (e: KeyboardEvent) => {
+        const k = e.key;
+        if (e.shiftKey && k.startsWith("Arrow")) {
+          e.preventDefault();
+          panBy(k === "ArrowLeft" ? -0.05 : k === "ArrowRight" ? 0.05 : 0, k === "ArrowUp" ? 0.05 : k === "ArrowDown" ? -0.05 : 0);
+          return;
+        }
+        if (k === "Escape") { e.preventDefault(); if (inGlassesWindow) void endFromGlasses(); else if (vrOn) void stopVR(); else stopStereo(); return; }
+        // R: THE VIEW FROM THE FRONT, fitted, as the 3D bar's A (Ron, 2026-10-13: "R did not reset the view to anterior");
+        // where the head looks now counts as straight ahead.
+        if (k === "r" || k === "R") { e.preventDefault(); resetCamera3D("A"); H0inv = null; used = null; return; }
+        if (k === "?" || k === "/") { e.preventDefault(); toggleKeys(); return; }
+        if (k === "-" || k === "_") { e.preventDefault(); ipd.value = String(Math.max(0, Number(ipd.value) - 5)); ipd.dispatchEvent(new Event("input")); return; }
+        if (k === "=" || k === "+") { e.preventDefault(); ipd.value = String(Math.min(150, Number(ipd.value) + 5)); ipd.dispatchEvent(new Event("input")); return; }
+        const turn = k === "ArrowLeft" ? [-5, 0] : k === "ArrowRight" ? [5, 0] : k === "ArrowUp" ? [0, 5] : k === "ArrowDown" ? [0, -5] : null;
+        if (turn) {
+          e.preventDefault();
+          // Round the point looked at, about the view's up (left / right) or its right (up / down); the head goes on from here.
+          const f = camera.focalPoint as Vec3, up = nrm(camera.viewUp as Vec3);
+          const back = nrm([camera.position[0] - f[0], camera.position[1] - f[1], camera.position[2] - f[2]]), right = nrm(crs(up, back));
+          const axis = turn[0] ? up : right, a = ((turn[0] || -turn[1]) * Math.PI) / 180;
+          const rot = (v: Vec3): Vec3 => { const c = Math.cos(a), s = Math.sin(a), d = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2], x = crs(axis, v); return [v[0] * c + x[0] * s + axis[0] * d * (1 - c), v[1] * c + x[1] * s + axis[1] * d * (1 - c), v[2] * c + x[2] * s + axis[2] * d * (1 - c)]; };
+          const dist = camera.distance, nb = rot(back);
+          camera.position = [f[0] + nb[0] * dist, f[1] + nb[1] * dist, f[2] + nb[2] * dist]; camera.viewUp = rot(up);
+          H0inv = null; used = null;
+        }
+      };
+      // SPEED (Ron, 2026-10-13: "more is better"). The two pictures are drawn only when something changed -- a still
+      // view costs nothing -- at the one resolution Sharpness sets (no adapting: it flickered, see Sharpness).
+      let stereoKey = "", stereoDrawnAt = 0;
+      // WHERE THE TIME GOES (Ron, 2026-10-13: "can you instrument the pipeline so we know where time is lost"). Per eye, the
+      // card's own clock for each stage (SceneRenderer.onStageTimes); per picture, the page's time to set up and send both
+      // eyes, how long after that the card finished, and the time from one picture to the next. Summarized every 2 seconds
+      // into the session log ("stereo time" lines), with the memory line.
+      const sTime = { stages: [] as { surfacesMs: number; marchMs: number; gapMs: number; compositeMs: number; totalMs: number }[],
+        pageMs: [] as number[], cardDoneMs: [] as number[], betweenMs: [] as number[], poseAtSendMs: [] as number[], poseAtDoneMs: [] as number[], lastDrawn: 0, waiting: false };
+      const stageSink = (t: (typeof sTime.stages)[number]) => { sTime.stages.push(t); };
+      const median = (a: number[]) => { if (!a.length) return NaN; const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
+      const timeLine = () => {
+        const f = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : "–");
+        const st = sTime.stages, m = (k: keyof (typeof st)[number]) => median(st.map((x) => x[k]));
+        const clock = scene?.stageClock() ?? "no scene";
+        const line = `stereo time: ${sTime.pageMs.length} pictures · per eye on the card (${st.length} measured${st.length ? "" : `; ${clock}`}): surfaces ${f(m("surfacesMs"))} ms, ` +
+          `ray march ${f(m("marchMs"))} ms, between ${f(m("gapMs"))} ms, composite ${f(m("compositeMs"))} ms, all ${f(m("totalMs"))} ms · ` +
+          `per picture: the page ${f(median(sTime.pageMs))} ms to set up both eyes, the card done ${f(median(sTime.cardDoneMs))} ms later (its time for both eyes), ` +
+          `${f(median(sTime.betweenMs))} ms from one picture to the next · resolution ${Math.round((Number(sharp.value) || 1) * 100)}% · ` +
+          `the head pose drawn was ${f(median(sTime.poseAtSendMs))} ms old when the picture was sent and ${f(median(sTime.poseAtDoneMs))} ms old when it was finished (from its arrival in Albula; the glasses' own processing and display come on top)`;
+        sTime.stages = []; sTime.pageMs = []; sTime.cardDoneMs = []; sTime.betweenMs = []; sTime.poseAtSendMs = []; sTime.poseAtDoneMs = [];
+        return line;
+      };
+      let pointerTick = () => {};
       const frameStereo = () => {
         if (!stereo) return;
         stereo.raf = requestAnimationFrame(frameStereo);
@@ -2141,35 +2306,506 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         const dop = nrm([camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]]);
         const right = nrm(crs(dop, camera.viewUp as Vec3));
         const half = Number(ipd.value) / 2, va = Number(fov.value);
+        const sizeKey = stereo.eyes.map((e) => `${e.canvas.clientWidth}x${e.canvas.clientHeight}`).join(",");
+        const key = `${camera.position.join(",")};${camera.focalPoint.join(",")};${camera.viewUp.join(",")};${ipd.value};${fov.value};${sizeKey}`;
+        pointerTick();
+        // ONE PICTURE ON THE CARD AT A TIME (2026-10-13, the timing lines: each picture was finished 200-580 ms after it
+        // was sent while new ones went every 65-500 ms -- two to four always waiting, so the glasses showed the head where
+        // it had been a third of a second before). A new picture is sent only when the last one is done, from the newest
+        // head position, as the 3D view here paces itself (accum-loop.ts, "GPU-paced: no backlog").
+        if (sTime.waiting) return;
+        // Nothing moved: the pictures stay as they are -- but twice a second they are drawn again (the same picture, at the
+        // same resolution), so a change in the scene itself, a segment hidden on the desk's screen, reaches the glasses.
+        const now = performance.now();
+        if (key === stereoKey && now - stereoDrawnAt < 500) return;
+        stereoKey = key; stereoDrawnAt = now;
+        const s = Number(sharp.value) || 1;
+        sCount.frames++; sCount.scaleSum += s;
+        sc.onStageTimes = stageSink;
+        if (sTime.lastDrawn) sTime.betweenMs.push(now - sTime.lastDrawn);
+        sTime.lastDrawn = now;
+        const tPage = performance.now();
         stereo.eyes.forEach((e, i) => {
-          const w = Math.max(16, Math.round(e.canvas.clientWidth * dpr)), h = Math.max(16, Math.round(e.canvas.clientHeight * dpr));
+          const w = Math.max(16, Math.round(e.canvas.clientWidth * stereoDpr)), h = Math.max(16, Math.round(e.canvas.clientHeight * stereoDpr));
           if (e.canvas.width !== w || e.canvas.height !== h) { e.canvas.width = w; e.canvas.height = h; }
           const k = i === 0 ? -half : half;
           const off: Vec3 = [right[0] * k, right[1] * k, right[2] * k];
-          sc.setCamera([camera.position[0] + off[0], camera.position[1] + off[1], camera.position[2] + off[2]],
-            [camera.focalPoint[0] + off[0], camera.focalPoint[1] + off[1], camera.focalPoint[2] + off[2]], camera.viewUp, va, w, h);
-          sc.renderToView(e.ctx.getCurrentTexture().createView({ format: srgb }), w, h);
+          // BOTH EYES AIM AT THE POINT LOOKED AT (Ron, 2026-10-12, on the Pro XR: "i still have trouble fusing"; Steve, 2026-09-26:
+          // the Viture is hard to fuse closer than about a meter). With the two cameras parallel, only infinity lined up
+          // between the eyes and the anatomy, half a meter in front, landed hundreds of pixels apart in the two pictures.
+          // Now the anatomy's center has no disparity -- it appears at the glasses' own screen distance -- and only its
+          // depth around that center differs between the eyes. (Aimed cameras, "toe-in": about 3 degrees each at 60 cm.)
+          const eye: Vec3 = [camera.position[0] + off[0], camera.position[1] + off[1], camera.position[2] + off[2]];
+          const view = e.ctx.getCurrentTexture().createView({ format: srgb });
+          if (s > 0.98) {
+            sc.setCamera(eye, [camera.focalPoint[0], camera.focalPoint[1], camera.focalPoint[2]], camera.viewUp, va, w, h);
+            sc.renderToView(view, w, h);
+          } else {
+            const rw = Math.max(16, Math.round(w * s)), rh = Math.max(16, Math.round(h * s));
+            sc.setCamera(eye, [camera.focalPoint[0], camera.focalPoint[1], camera.focalPoint[2]], camera.viewUp, va, rw, rh);
+            sc.renderUpscaled(view, rw, rh, w, h);
+          }
         });
+        // THE SHARED RENDERER BACK ON THIS VIEW'S OWN CAMERA (the critic, 2026-10-13, finding 2): the probe, the axis
+        // labels and markup placement read "the camera set last", which was the right eye's.
+        sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, three.canvas.width, three.canvas.height,
+          camera.parallelProjection ? camera.parallelScale : undefined);
+        const tSent = performance.now();
+        sTime.pageMs.push(tSent - tPage);
+        sTime.waiting = true;   // released when the card is done with this picture
+        const poseT = appliedPoseT;
+        if (poseT) sTime.poseAtSendMs.push(Date.now() - poseT);
+        void gpu.device.queue.onSubmittedWorkDone().then(() => {
+          sTime.cardDoneMs.push(performance.now() - tSent);
+          if (poseT) sTime.poseAtDoneMs.push(Date.now() - poseT);
+        }).finally(() => { sTime.waiting = false; });
       };
-      sgo.addEventListener("click", () => {
-        if (stereo) { stopStereo(); return; }
+      // `at`: the part of the window that lies on the glasses (one window across the desk's screen and the glasses);
+      // without it the two pictures fill the window. On the glasses the pixels are 1:1 (their screen is not Retina).
+      let stereoDpr = dpr, toggleKeys = () => {};
+      // THE PAGE'S MEMORY WHILE IN STEREO (Ron, 2026-10-13: twice the glasses view grew the page by about half a gigabyte
+      // a second until macOS's web engine killed it -- blank white window; on the desk's screen the same view stays flat).
+      // Every 2 seconds: the page's footprint (desktop/macmenu.ts pageFootprintMB) into the session log with what happened
+      // since, so the cause shows; and past 4 GB above where it started the stereo view ends itself instead of crashing.
+      let memWatch: ReturnType<typeof setInterval> | undefined;
+      const sCount = { frames: 0, moves: 0, scaleSum: 0 };
+      const MEM_GROWTH_LIMIT_MB = 4096;
+      const watchMemory = (where: string) => {
+        const read = (globalThis as unknown as { albulaPageMemory?: () => Promise<number> }).albulaPageMemory;
+        if (!read) return;
+        let start = -1, posesWas = n, busy = false;
+        sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0;
+        memWatch = setInterval(async () => {
+          if (busy || !stereo) return;
+          busy = true;
+          try {
+            const mb = await read(); if (mb < 0) return;
+            if (start < 0) start = mb;
+            const line = `stereo memory (${where}): ${mb} MB, ${mb - start >= 0 ? "+" : ""}${mb - start} since it started · ` +
+              `last 2 s: ${sCount.frames} pictures drawn${sCount.frames ? ` at ${Math.round(100 * sCount.scaleSum / sCount.frames)}% resolution` : ""}, ${sCount.moves} pointer moves, ${n - posesWas} head poses · keys panel ${toggleKeysShown() ? "shown" : "hidden"}`;
+            sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0; posesWas = n;
+            void fetch("/_log", { method: "POST", body: line, keepalive: true }).catch(() => {});
+            void fetch("/_log", { method: "POST", body: timeLine(), keepalive: true }).catch(() => {});
+            if (mb - start > MEM_GROWTH_LIMIT_MB) {
+              const why = `the stereo view was using ${Math.round((mb - start) / 1024)} GB more memory than when it started and was closed before the page crashed`;
+              void fetch("/_log", { method: "POST", body: `stereo memory: CLOSED — ${why}`, keepalive: true }).catch(() => {});
+              if (vrOn) await stopVR(); else stopStereo();
+              notify("The glasses view was closed", `It ${why.replace(/^the stereo view /, "")}. Albula keeps running.`);
+            }
+          } finally { busy = false; }
+        }, 2000);
+      };
+      let toggleKeysShown = () => false;
+      const startStereo = (hint = false, at?: { x: number; y: number; w: number; h: number }) => {
+        if (stereo) return;
         const el = document.createElement("div");
-        el.style.cssText = "position:fixed;inset:0;z-index:20000;display:flex;background:#000;cursor:none";
+        stereoDpr = at ? 1 : dpr;
+        el.style.cssText = at
+          ? `position:fixed;left:${at.x}px;top:${at.y}px;width:${at.w}px;height:${at.h}px;z-index:20000;display:flex;background:#000;cursor:none`
+          : "position:fixed;inset:0;z-index:20000;display:flex;background:#000;cursor:none";
         el.title = "Stereo — Esc ends it";
+        // Each eye's half holds its picture, a pointer and the keys panel: the panel at the same place in both (at the
+        // glasses' screen distance), the pointer where what it points at falls in each eye's picture (below).
+        const halves: HTMLDivElement[] = [];
         const eyes = [0, 1].map(() => {
-          const canvas = document.createElement("canvas"); canvas.style.cssText = "flex:1 1 50%;width:50%;height:100%;display:block";
-          el.appendChild(canvas);
+          const half = document.createElement("div"); half.style.cssText = "position:relative;flex:1 1 50%;width:50%;height:100%;overflow:hidden";
+          const canvas = document.createElement("canvas"); canvas.style.cssText = "width:100%;height:100%;display:block";
+          half.appendChild(canvas); el.appendChild(half); halves.push(half);
           const ctx = canvas.getContext("webgpu") as GPUCanvasContext;
           ctx.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
           return { canvas, ctx };
         });
+        // THE POINTER IN THE GLASSES (Ron, 2026-10-13: "I could not find the mouse pointer in the stereo display"). The
+        // Mac's own pointer is in ONE half, so one eye saw it and the other did not. It is hidden here and drawn in both
+        // halves instead; the whole width of the two pictures is one sweep across the picture, so the pointer moves on
+        // smoothly from one half to the other.
+        const ARROW = `<svg width="20" height="24" viewBox="0 0 20 24"><path d="M1 1 L1 19 L6 14.5 L9.5 22 L12.5 20.7 L9 13.3 L15.5 13.3 Z" fill="#fff" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+        const pointers = halves.map((h) => {
+          const p = document.createElement("div"); p.innerHTML = ARROW;
+          p.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;display:none;z-index:2";
+          h.appendChild(p); return p;
+        });
+        /** Where the pointer is in one eye's picture: the window's x halved across the two pictures. */
+        const inEye = (e: PointerEvent) => {
+          const r = el.getBoundingClientRect();
+          return { x: Math.max(0, Math.min(r.width / 2, (e.clientX - r.left) / 2)), y: Math.max(0, Math.min(r.height, e.clientY - r.top)) };
+        };
+        // THE POINTER AT THE DEPTH OF WHAT IT POINTS AT (Ron, 2026-10-13: "When I looked from the top at the open humerus
+        // and moved the mouse there, I had trouble fusing the mouse pointer. Moving it elsewhere fixed it"). Drawn at the
+        // same place in both pictures it sat at the glasses' screen distance, while the bone under it was nearer: two
+        // depths at one spot. Now a ray from between the eyes through the pointer finds the first surface (the renderer's
+        // probe, the same as the 3D view's), and each eye's pointer is drawn where that point falls in its own picture --
+        // the pointer lies on the anatomy. With nothing under it, it stays at the screen distance.
+        let ptr: { x: number; y: number } | null = null, ptrDepth = NaN, probing = false, probedAt = 0, probedKey = "";
+        const centerRay = () => {
+          if (!ptr) return null;
+          const eyeW = halves[0].clientWidth || 1, eyeH = halves[0].clientHeight || 1, t = Math.tan((Number(fov.value) * Math.PI) / 360), aspect = eyeW / eyeH;
+          const pos = camera.position as Vec3, f = camera.focalPoint as Vec3;
+          const fwd = nrm([f[0] - pos[0], f[1] - pos[1], f[2] - pos[2]]), rt = nrm(crs(fwd, camera.viewUp as Vec3)), up2 = crs(rt, fwd);
+          const a = (2 * ptr.x / eyeW - 1) * t * aspect, b = (1 - 2 * ptr.y / eyeH) * t;
+          return { pos, f, rt, dir: nrm([fwd[0] + a * rt[0] + b * up2[0], fwd[1] + a * rt[1] + b * up2[1], fwd[2] + a * rt[2] + b * up2[2]]), t, aspect, eyeW, eyeH };
+        };
+        const placePointers = () => {
+          const r = centerRay();
+          pointers.forEach((p, i) => {
+            if (!r || !ptr) { p.style.display = "none"; return; }
+            let x = ptr.x, y = ptr.y;
+            if (Number.isFinite(ptrDepth)) {
+              const P: Vec3 = [r.pos[0] + r.dir[0] * ptrDepth, r.pos[1] + r.dir[1] * ptrDepth, r.pos[2] + r.dir[2] * ptrDepth];
+              const k = (i === 0 ? -1 : 1) * Number(ipd.value) / 2;
+              const eye: Vec3 = [r.pos[0] + r.rt[0] * k, r.pos[1] + r.rt[1] * k, r.pos[2] + r.rt[2] * k];
+              const ef = nrm([r.f[0] - eye[0], r.f[1] - eye[1], r.f[2] - eye[2]]), er = nrm(crs(ef, camera.viewUp as Vec3)), eu = crs(er, ef);
+              const d: Vec3 = [P[0] - eye[0], P[1] - eye[1], P[2] - eye[2]], z = d[0] * ef[0] + d[1] * ef[1] + d[2] * ef[2];
+              if (z > 1) {
+                x = ((d[0] * er[0] + d[1] * er[1] + d[2] * er[2]) / z / (r.t * r.aspect) + 1) / 2 * r.eyeW;
+                y = (1 - (d[0] * eu[0] + d[1] * eu[1] + d[2] * eu[2]) / z / r.t) / 2 * r.eyeH;
+              }
+            }
+            p.style.display = "block"; p.style.transform = `translate(${x}px,${y}px)`;
+          });
+        };
+        pointerTick = () => {
+          placePointers();
+          const sc = scene, now = performance.now();
+          if (!ptr || probing || !sc || now - probedAt < 50) return;   // at most 20 rays a second, one at a time
+          const key = `${ptr.x},${ptr.y};${stereoKey}`;
+          if (key === probedKey) return;                                // nothing moved since the last ray
+          const r = centerRay(); if (!r) return;
+          probing = true; probedAt = now; probedKey = key;
+          void sc.probe(r.pos, r.dir).then((d) => { ptrDepth = Number.isFinite(d) && d > 0 ? d : NaN; }).catch(() => { ptrDepth = NaN; })
+            .finally(() => { probing = false; placePointers(); });
+        };
+        const showPointer = (e: PointerEvent | null) => { ptr = e ? inEye(e) : null; placePointers(); };
+        // THE KEYS, SHOWN ALL THE TIME (Ron, 2026-10-13: "It might be good to have a popup to remind of the shortcuts during
+        // the entire session. For the 01524 case, the upper right corner would be good. But other scenes might require a
+        // different position"): upper right at first, dragged anywhere with the pointer, remembered; ? hides or shows it.
+        const KEYS_AT = "sl-stereo-keys-at";
+        let keysAt: { x: number; y: number } | null = null;   // top-left, as shares of the picture's width and height
+        try { const s = JSON.parse(localStorage.getItem(KEYS_AT) ?? "null"); if (s && Number.isFinite(s.x) && Number.isFinite(s.y)) keysAt = s; } catch { /* not remembered */ }
+        let keysShown = hint;
+        const panels = halves.map((h) => {
+          const k = document.createElement("div");
+          k.style.cssText = "position:absolute;z-index:1;pointer-events:none;padding:8px 12px;border-radius:8px;background:rgba(0,0,0,.62);" +
+            "color:#fff;font:500 13px/1.55 system-ui;white-space:nowrap;box-shadow:0 0 0 1px rgba(255,255,255,.25)";
+          k.innerHTML = "<b>Esc</b> back to the desk<br><b>R</b> straight ahead again<br><b>scroll</b> zoom<br><b>drag</b> or <b>arrows</b> turn<br>" +
+            "<b>Shift</b> + drag or arrows: move<br><b>−</b> <b>+</b> less or more depth<br><span style=\"opacity:.7\">drag this box to move it · <b>?</b> hides it</span>";
+          h.appendChild(k); return k;
+        });
+        const placeKeys = () => {
+          for (const k of panels) {
+            k.style.display = keysShown ? "block" : "none";
+            if (keysAt) { k.style.left = `${keysAt.x * 100}%`; k.style.top = `${keysAt.y * 100}%`; k.style.right = ""; }
+            else { k.style.right = "3%"; k.style.top = "4%"; k.style.left = ""; }
+          }
+        };
+        placeKeys();
+        const onKeys = (q: { x: number; y: number }) => {
+          if (!keysShown) return false;
+          const hr = halves[0].getBoundingClientRect(), kr = panels[0].getBoundingClientRect();
+          const x = q.x - (kr.left - hr.left), y = q.y - (kr.top - hr.top);
+          return x >= 0 && y >= 0 && x <= kr.width && y <= kr.height;
+        };
+        toggleKeys = () => { keysShown = !keysShown; placeKeys(); };
+        toggleKeysShown = () => keysShown;
+        // ZOOM WITH THE MOUSE OR TRACKPAD (Ron, 2026-10-12, in the glasses: "How do I zoom in?"): the two pictures cover the
+        // window, so the 3D view's own mouse handling never sees the pointer. Scrolling (or a pinch) zooms toward the point
+        // looked at; the head then goes on from the new view. A drag goes to the 3D view's interactor (pointerdown below).
+        el.addEventListener("wheel", (e) => {
+          e.preventDefault();
+          const f = camera.focalPoint as Vec3, d0 = camera.distance, k = Math.exp(Math.max(-0.5, Math.min(0.5, e.deltaY * (e.ctrlKey ? 0.01 : 0.002))));
+          const back = nrm([camera.position[0] - f[0], camera.position[1] - f[1], camera.position[2] - f[2]]), d = Math.max(20, d0 * k);
+          camera.position = [f[0] + back[0] * d, f[1] + back[1] * d, f[2] + back[2] * d];
+          H0inv = null; used = null;
+        }, { passive: false });
+        let keysDrag: { dx: number; dy: number } | null = null;
+        el.addEventListener("pointerdown", (e) => {
+          el.setPointerCapture(e.pointerId);
+          const q = inEye(e);
+          if (onKeys(q)) {   // the keys panel is grabbed where the pointer is drawn, not where the Mac's pointer is
+            const hr = halves[0].getBoundingClientRect(), kr = panels[0].getBoundingClientRect();
+            keysDrag = { dx: q.x - (kr.left - hr.left), dy: q.y - (kr.top - hr.top) };
+            return;
+          }
+          // THE 3D VIEW'S OWN MOUSE (Ron, 2026-10-13: "the model moves opposite to the mouse"): the same interactor as
+          // the 3D view here (VTK's, as Slicer's), in one eye's picture -- left button turns, Shift pans, right zooms --
+          // and the head waits while the mouse holds the view (apply above), then goes on from where the mouse left it.
+          cam3d.start(e.button as 0 | 1 | 2, q.x, q.y, halves[0].clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+        });
+        el.addEventListener("pointermove", (e) => {
+          sCount.moves++;
+          showPointer(e);
+          if (keysDrag) {
+            const hr = halves[0].getBoundingClientRect(), kr = panels[0].getBoundingClientRect(), q = inEye(e);
+            const x = Math.max(0, Math.min(hr.width - kr.width, q.x - keysDrag.dx)), y = Math.max(0, Math.min(hr.height - kr.height, q.y - keysDrag.dy));
+            keysAt = { x: x / Math.max(1, hr.width), y: y / Math.max(1, hr.height) }; placeKeys();
+            return;
+          }
+          if (cam3d.action === "none") return;
+          if (e.buttons === 0) { cam3d.end(); pushCamera(); return; }   // the release went elsewhere
+          const q = inEye(e);
+          cam3d.move(q.x, q.y, halves[0].clientWidth, halves[0].clientHeight);
+        });
+        el.addEventListener("pointerup", () => {
+          if (keysDrag && keysAt) { try { localStorage.setItem(KEYS_AT, JSON.stringify(keysAt)); } catch { /* not remembered */ } }
+          keysDrag = null;
+          if (cam3d.action !== "none") { cam3d.end(); pushCamera(); }
+        });
+        el.addEventListener("pointerleave", () => showPointer(null));
         document.body.appendChild(el);
-        stereo = { el, eyes, raf: 0 };
+        stereo = { el, eyes, raf: 0 }; stereoActive = true;
         stereoOn = () => !!stereo;
-        addEventListener("keydown", escStereo, true);
+        addEventListener("keydown", keysInStereo, true);
         sgo.textContent = "Stop stereo"; sgo.setAttribute("aria-pressed", "true");
+        watchMemory(at ? "across the glasses" : "in the window");
         frameStereo();
+      };
+      sgo.addEventListener("click", () => { if (stereo) stopStereo(); else startStereo(); });
+      // ── VR / AR, ALL IN ONE (desktop/headset.ts, desktop/macmenu.ts; Ron, 2026-10-12, mockup glasses-v2-2026-10-12.html:
+      // "anything that simplifies things for the user"). In order: the glasses a screen of their own if the Mac was
+      // mirroring onto them; head tracking on; the glasses to 3D; wait for the Mac to show them (it may ask once what to
+      // show: "Extend Display"); Albula full screen on them; two pictures; recentered. Esc undoes it in reverse. The window
+      // and display steps need the app (its webview bindings); in a browser they are skipped. ──
+      type Native = { albulaHeadsetScreens?: () => Promise<string>; albulaHeadsetSeparate?: () => Promise<number>; albulaHeadsetRestore?: () => Promise<number>;
+        albulaHeadsetWindowTo?: (name: string) => Promise<string>; albulaHeadsetLeaveFullScreen?: () => Promise<boolean>;
+        albulaHeadsetIsFullScreen?: () => Promise<boolean>; albulaHeadsetWindowRestore?: () => Promise<string>;
+        albulaGlassesOpen?: (screen: string) => Promise<string>; albulaGlassesClose?: () => Promise<string>;
+        albulaHeadsetToTheRight?: (screen: string) => Promise<boolean>; albulaHeadsetPlaceBack?: () => Promise<boolean>;
+        albulaGlassesBesideWindow?: (screen: string) => Promise<string>; albulaWindowAcrossGlasses?: (screen: string) => Promise<string>; albulaGlassesBack?: () => Promise<string>;
+        albulaWindowMovable?: (on: boolean) => Promise<boolean>; albulaGlassesLeftover?: () => Promise<string> };
+      const nat = globalThis as unknown as Native;
+      /** This page is the glasses window (desktop/main.ts --glasses-window): the 3D view alone, in the glasses. */
+      const inGlassesWindow = new URLSearchParams(location.search).has("glasses");
+      let vrOn = false, vrBusy = false, spanOn = false;
+      const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+      const vrSay = (t: string) => { vsay.textContent = t; say.textContent = t; };
+      const notify = (title: string, body: string) => cfg.onNotify?.({ title, body });
+      /** The glasses' own screen in 3D: named by their maker (macOS reads the name off the glasses: "VITURE") AND as wide as
+       *  two pictures side by side (3840 x 1080, or its scaled form). The shape alone also took a 32:9 desk monitor for
+       *  the glasses (the critic, 2026-10-13, finding 4). */
+      let headsetMaker = "VITURE";
+      const wideScreen = async (): Promise<string | null> => {
+        if (!nat.albulaHeadsetScreens) return null;
+        const list = JSON.parse(await nat.albulaHeadsetScreens()) as { name: string; w: number; h: number; main: boolean }[];
+        const maker = headsetMaker.toLowerCase();
+        return list.find((sc) => !sc.main && sc.w / sc.h >= 3 && sc.name.toLowerCase().includes(maker))?.name ?? null;
+      };
+      // TWO WINDOWS (Ron, 2026-10-12: "I like 1 as it minimizes changes and decisions"): the main window stays as it is,
+      // with all its panels, and opens a second one -- the 3D view alone -- full screen in the glasses. The main window
+      // sends its scene (the document a saved scene is) whenever it changes; the glasses window loads it and follows.
+      // The main window does not follow the head: it only keeps the glasses streaming (a control connection) and hears
+      // when the glasses window ends.
+      let ctl: WebSocket | null = null, scenePush: ReturnType<typeof setInterval> | undefined, lastSent = "";
+      type SceneHook = { __sceneForGlasses?: () => Promise<Record<string, unknown> | null> };
+      const sceneNow = async () => (globalThis as unknown as SceneHook).__sceneForGlasses?.() ?? null;
+      /** The scene without its camera: the glasses window keeps its own (the head moves it). */
+      const withoutCamera = (doc: Record<string, unknown>) => {
+        const nodes = { ...(doc.nodes as Record<string, Record<string, unknown>> ?? {}) };
+        for (const [k, v] of Object.entries(nodes)) if (v.type === "camera") delete nodes[k];
+        return { ...doc, nodes };
+      };
+      const pushScene = async (first = false) => {
+        const doc = await sceneNow(); if (!doc) return false;
+        const body = JSON.stringify(first ? doc : withoutCamera(doc));
+        const key = JSON.stringify(withoutCamera(doc));
+        if (!first && key === lastSent) return true;
+        lastSent = key;
+        await fetch("/_headset/scene", { method: "POST", body }).catch(() => {});
+        return true;
+      };
+      // A glasses session left behind by the page before this one (a reload or a page crash during it): put back.
+      if (!inGlassesWindow) void nat.albulaGlassesLeftover?.().then((what) => { if (what) void fetch("/_log", { method: "POST", body: what, keepalive: true }).catch(() => {}); });
+      const keepLayoutLeftOf = (x: number | null) => {
+        (globalThis as unknown as { __glassesSpan?: boolean }).__glassesSpan = x !== null;
+        const app = document.querySelector<HTMLElement>(".sl-app"); if (!app) return;
+        app.style.width = x === null ? "" : `${Math.max(320, Math.round(x))}px`;
+        dispatchEvent(new Event("resize"));   // the views size their canvases from the layout
+      };
+      const startVR = async () => {
+        if (vrOn || vrBusy) return;
+        vrBusy = true;
+        try {
+          const st = await fetch("/_headset").then((r) => r.json()).catch(() => null) as { plugged?: boolean; software?: string | null; headset?: { name: string } | null; maker?: string; spansDisplays?: boolean } | null;
+          if (!st?.plugged) { notify("No glasses plugged in", "Plug the glasses into a USB-C port of this Mac, then press VR/AR again."); return; }
+          if (st.maker) headsetMaker = st.maker;
+          // ONE WINDOW ACROSS TWO SCREENS NEEDS macOS's "Displays have separate Spaces" OFF (its default is on); with it on
+          // the window cannot reach the glasses, and the glasses stayed empty while Albula said the view was on (the critic,
+          // 2026-10-13, finding 5). The setting is the person's to change; Albula says where it is.
+          if (st.spansDisplays === false) {
+            notify("One more macOS setting is needed for the glasses", "Open System Settings › Desktop & Dock, scroll to Mission Control, and turn OFF \"Displays have separate Spaces\". Then log out and back in, and press VR/AR again.");
+            vrSay("macOS's \"Displays have separate Spaces\" must be off for the glasses view (System Settings › Desktop & Dock)");
+            return;
+          }
+          if (!st.software || !st.headset) { panel.hidden = false; paintOpeners(); swrow.hidden = false; notify("The glasses' software is missing", "Albula needs the glasses maker's software on this Mac: see the 3D view's settings, VR / AR glasses."); return; }
+          // ONE WINDOW ACROSS THE DESK'S SCREEN AND THE GLASSES (Ron, 2026-10-13: "Couldn't we just have a single layout
+          // with two additional 3d view which happen to be on the viture, instead of having two albulas who try to be
+          // synched?"; macOS's "Displays have separate Spaces" turned off). The two-window way (a second copy of the app
+          // following this one's scene) is left in the code, not used: it failed in his hands twice.
+          const span = !!nat.albulaWindowAcrossGlasses;
+          const twoWindows = false;
+          if (twoWindows && !(await sceneNow())) { notify("Nothing to show in the glasses yet", "Load a case from the database first; the glasses window opens it too."); return; }
+          if (nat.albulaHeadsetSeparate) await nat.albulaHeadsetSeparate();   // no mirroring onto the glasses
+          if (twoWindows) {
+            // A control connection keeps the glasses streaming (their mode is switched through it) without moving this view.
+            ctl = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_headset/ws`);
+            ctl.onmessage = (e) => { const m = JSON.parse(String(e.data)) as { end?: boolean; status?: string }; if (m.end) void stopVR(); else if (m.status && !vrOn) vrSay(m.status); };
+            for (let i = 0; i < 30; i++) { await wait(150); const s2 = await fetch("/_headset").then((r) => r.json()).catch(() => null) as { streaming?: boolean } | null; if (s2?.streaming) break; }
+          } else {
+            if (!ws) go.click();                                              // head tracking on
+            for (let i = 0; i < 20 && n === 0; i++) await wait(150);         // the first pose
+          }
+          vrSay("switching the glasses to 3D…");
+          const giveUp = async () => { await glassesMode(false); ctl?.close(); ctl = null; if (nat.albulaHeadsetRestore) await nat.albulaHeadsetRestore(); };
+          if (!(await glassesMode(true))) { await giveUp(); notify("The glasses did not switch to 3D", say.textContent || "Albula put them back as they were. Press VR/AR to try again."); return; }
+          let screen: string | null = null;
+          if (nat.albulaHeadsetScreens) {
+            notify("Switching the glasses to 3D", "If the Mac asks what to show on the glasses, click Extend Display.");
+            for (let i = 0; i < 60 && !screen; i++) { await wait(500); screen = await wideScreen(); }
+            if (!screen) {
+              await giveUp();
+              vrSay("this Mac did not show the glasses in 3D; they are back in 2D");
+              notify("This Mac did not show the glasses in 3D", "Albula put them back in 2D. Most often the Mac was asking what to show on the glasses: next time click Extend Display when it asks.");
+              return;
+            }
+          }
+          // The glasses to the right of the main screen while in use (Ron, 2026-10-13: the Dock, on the left, came up in the
+          // glasses; macOS keeps it on the leftmost screen). Put back at the end. With one window across both screens the
+          // glasses go beside the window's content top instead (albulaGlassesBesideWindow, below).
+          if (!span && screen && nat.albulaHeadsetToTheRight && await nat.albulaHeadsetToTheRight(screen)) await wait(800);
+          if (span && screen) {
+            await nat.albulaGlassesBesideWindow!(screen);
+            await wait(1200);                                                  // macOS moves the screen
+            // WHERE EVERYTHING LANDED, into the session log (2026-10-14: on the hospital mini and then on the laptop the
+            // pictures were not where the glasses are, and the log could not say why): the screens as macOS reports
+            // them, the glasses' place in the page, and the window's size as the page sees it.
+            const glog = (what: string) => { void fetch("/_log", { method: "POST", body: `glasses placement: ${what}` }).catch(() => {}); };
+            const screensJson = async () => { try { return await nat.albulaHeadsetScreens?.() ?? "?"; } catch { return "?"; } };
+            glog(`screens before ${await screensJson()} · page ${innerWidth}x${innerHeight} at ${devicePixelRatio}x`);
+            const at = JSON.parse(await nat.albulaWindowAcrossGlasses!(screen)) as { x: number; y: number; w: number; h: number } | null;
+            await wait(100);
+            glog(`screens after ${await screensJson()} · glasses at ${JSON.stringify(at)} in the page · page now ${innerWidth}x${innerHeight}`);
+            await wait(500);
+            if (!at) { await nat.albulaGlassesBack?.(); await giveUp(); vrSay("the window could not be put across the glasses"); notify("The glasses view could not open", "The window could not be put across the glasses. Press VR/AR to try again."); return; }
+            // Held in place while across the glasses: a moved window took the two pictures with it (Ron, 2026-10-13).
+            await nat.albulaWindowMovable?.(false);
+            // THE LAYOUT STAYS ON THE DESK'S SCREEN (Ron, 2026-10-13: "the xdr version of albula does not show the right
+            // side of the layout, no 2d viewers and no access to the gear icon"): the widened window spread the panels and
+            // views over the glasses too, under the two pictures. The app is held to the part of the window left of them.
+            keepLayoutLeftOf(at.x);
+            // One picture of the desk's 3D view at its new, narrower size BEFORE it stands still for the glasses view --
+            // otherwise its last picture, made for the wider view, is shown squeezed (Ron, 2026-10-13: "the geometry of
+            // the rendering on the xdr is not correct. The torso is squeezed left right").
+            a3d.refresh();
+            await wait(400);
+            vrOn = true; spanOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view";
+            startStereo(true, at);
+            setTimeout(() => {
+              const el = document.querySelector<HTMLElement>("body > div[style*='z-index:20000'], body > div[style*='z-index: 20000']");
+              const r = el?.getBoundingClientRect(), app = document.querySelector<HTMLElement>(".sl-app")?.getBoundingClientRect();
+              glog(`stereo element ${r ? `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}` : "not found"} · layout ${app ? `${Math.round(app.width)}x${Math.round(app.height)}` : "?"} · page ${innerWidth}x${innerHeight}`);
+            }, 1500);
+            rc.click();
+            vrSay(`in the glasses (${st.headset.name}); the panels stay here. Esc ends it`);
+            return;
+          }
+          if (twoWindows && screen) {
+            await pushScene(true);
+            await nat.albulaGlassesOpen!(screen);
+            scenePush = setInterval(() => void pushScene(), 700);              // what changes here appears there
+            vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view";
+            vrSay(`the 3D view is in the glasses (${st.headset.name}); the controls stay here. Esc in the glasses, or VR/AR here, ends it`);
+            return;
+          }
+          if (screen) { await nat.albulaHeadsetWindowTo!(screen); await wait(1200); }   // one window (no app): this one goes there
+          vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "Back to the laptop";
+          startStereo(true);
+          rc.click();
+          vrSay(`in the glasses (${st.headset.name}) — Esc to come back`);
+        } finally { vrBusy = false; }
+      };
+      const stopVR = async () => {
+        if (!vrOn) return;
+        vrOn = false; vrBtn.setAttribute("aria-pressed", "false"); vgo.textContent = "View in the glasses";
+        if (spanOn) {   // one window across both screens: its own size and place back, the glasses back, 2D
+          spanOn = false;
+          stopStereo();
+          keepLayoutLeftOf(null);
+          await nat.albulaWindowMovable?.(true);
+          if (nat.albulaHeadsetWindowRestore) await nat.albulaHeadsetWindowRestore();
+          await nat.albulaGlassesBack?.();
+          await wait(500);
+          await glassesMode(false);
+          if (ws) stop();
+          if (nat.albulaHeadsetRestore) { await wait(1500); if (await nat.albulaHeadsetRestore() && nat.albulaHeadsetWindowRestore) { await wait(1500); await nat.albulaHeadsetWindowRestore(); } }
+          vrSay("the glasses view is closed");
+          return;
+        }
+        if (ctl) {   // two windows: close the glasses window, the glasses to 2D, the Mac's arrangement back
+          clearInterval(scenePush); scenePush = undefined; lastSent = "";
+          if (nat.albulaGlassesClose) await nat.albulaGlassesClose();
+          await wait(500);
+          await nat.albulaHeadsetPlaceBack?.();
+          await glassesMode(false);
+          ctl.close(); ctl = null;
+          if (nat.albulaHeadsetRestore) { await wait(1500); await nat.albulaHeadsetRestore(); }
+          vrSay("the glasses view is closed");
+          return;
+        }
+        stopStereo();
+        // BACK IN STEPS (Ron, 2026-10-12, after Esc: "it exits stereo and full screen but does not show the albula window.
+        // The pointer is confused where it is"): leave full screen and WAIT for the animation, put the window back where it
+        // was (or in the middle of the main screen), in front with the pointer in it -- and only then switch the glasses
+        // to 2D and undo the mirroring change, which make macOS rearrange its screens.
+        if (nat.albulaHeadsetLeaveFullScreen && await nat.albulaHeadsetLeaveFullScreen()) {
+          for (let i = 0; i < 30 && await nat.albulaHeadsetIsFullScreen!(); i++) await wait(100);
+          await wait(300);
+        }
+        if (nat.albulaHeadsetWindowRestore) await nat.albulaHeadsetWindowRestore();
+        await nat.albulaHeadsetPlaceBack?.();
+        await glassesMode(false);
+        if (ws) stop();
+        if (nat.albulaHeadsetRestore) { await wait(1500); if (await nat.albulaHeadsetRestore() && nat.albulaHeadsetWindowRestore) { await wait(1500); await nat.albulaHeadsetWindowRestore(); } }
+        vrSay("back on the laptop");
+      };
+      // THE GLASSES WINDOW'S OWN START (render/demos/slicer-app.ts calls it once the scene is loaded): full screen on the
+      // glasses, the head followed, two pictures, recentered. Its Esc ends the glasses for both windows.
+      const endFromGlasses = async () => { await fetch("/_headset/end", { method: "POST" }).catch(() => {}); stopStereo(); if (ws) stop(); await nat.albulaGlassesClose?.(); };
+      (globalThis as unknown as { __glassesStart?: (screen: string) => Promise<void> }).__glassesStart = async (screen: string) => {
+        if (screen && nat.albulaHeadsetWindowTo) { await nat.albulaHeadsetWindowTo(screen); await wait(1200); }
+        if (!ws) go.click();
+        for (let i = 0; i < 20 && n === 0; i++) await wait(150);
+        startStereo(true);
+        rc.click();
+      };
+      vrBtn.addEventListener("click", () => { if (vrOn) void stopVR(); else void startVR(); });
+      vgo.addEventListener("click", () => { if (vrOn) void stopVR(); else void startVR(); });
+      // THE MAKER'S SOFTWARE (Ron, 2026-10-12: "we will provide directions for downloading, permission request later").
+      let help: { maker: string; url: string; steps: string[] } | null = null;
+      swHow.addEventListener("click", () => {
+        if (!help) return;
+        swSteps.hidden = !swSteps.hidden;
+        swSteps.innerHTML = `<ol style="margin:4px 0 4px 18px;padding:0">${help.steps.map((t) => `<li>${t}</li>`).join("")}</ol><a href="${help.url}" target="_blank">${help.url}</a>`;
       });
+      swFind.addEventListener("click", async () => {
+        const r = await fetch("/_headset/find", { method: "POST" }).then((x) => x.json()).catch(() => ({ ok: false, why: "no answer" })) as { ok: boolean; why?: string };
+        swText.textContent = r.ok ? "found — the glasses can be used" : (r.why === "cancelled" ? swText.textContent : (r.why ?? "not found"));
+        void poll();
+      });
+      // WHAT IS PLUGGED IN, every few seconds while this page is shown: the VR/AR button appears with the glasses.
+      const poll = async () => {
+        if (document.hidden && !vrOn) return;
+        const st = await fetch("/_headset").then((r) => r.json()).catch(() => null) as { plugged?: boolean; software?: string | null; headset?: { name: string; rotationOnly: boolean } | null; help?: typeof help; loadError?: string | null } | null;
+        if (!st) return;
+        help = st.help ?? help;
+        vrBtn.hidden = !st.plugged && !vrOn;
+        // GLASSES UNPLUGGED: head tracking ends with them, so the panel no longer says Stop with nothing plugged in
+        // (Ron's screenshot on the hospital Mac, 2026-10-14).
+        if (!st.plugged && ws && !vrOn) { stop(); say.textContent = "the glasses were unplugged"; }
+        swrow.hidden = !st.plugged || (!!st.software && !!st.headset);
+        if (st.plugged && !st.software) swText.textContent = `Albula needs ${st.help?.maker ?? "the maker"}'s software for the glasses on this Mac (it cannot come with Albula).`;
+        else if (st.plugged && !st.headset) swText.textContent = st.loadError ? "The glasses' software is on this Mac, but macOS would not load it." : "The software on this Mac does not know these glasses.";
+        if (!vrOn && !vrBusy) vsay.textContent = !st.plugged ? "no glasses plugged in" : st.headset ? `${st.headset.name}${st.headset.rotationOnly ? " · follows head turns" : ""}` : "";
+      };
+      void poll(); setInterval(() => void poll(), 4000);
       (globalThis as unknown as { __headTracking?: () => { on: boolean; poses: number } }).__headTracking = () => ({ on: !!ws, poses: n });
     }
     subHead("Picture", "What Save… leaves out by default, and how large. The defaults are in Settings › Pictures.");
@@ -2298,7 +2934,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
    *  than a voxel nearer -- else where the volume becomes substance. The probe names it; a
    *  click while placing a markup puts a point there (as Slicer places markups on what is shown in 3D). */
   const pickRas3d = async (x: number, y: number): Promise<Vec3 | null> => {
-    if (!scene) return null;
+    // Not while the glasses show stereo: this view stands still then, and what is under the pointer here is not what
+    // the camera now sees (the critic, 2026-10-13, finding 2).
+    if (!scene || stereoActive) return null;
       const u = x / Math.max(1, three.canvas.clientWidth), v = y / Math.max(1, three.canvas.clientHeight);
       let ras: Vec3 | null = null;
       // The finest voxel spacing on screen: the march step below, and the nudge just after.

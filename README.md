@@ -112,6 +112,7 @@ AI-generated code is often creative and performant but can hide subtle bugs. **C
 
 - **[ARCHITECTURE-2026-08-02.md](docs/ARCHITECTURE-2026-08-02.md)** — System design and invariants
 - **[MRSON-LIVESCENE.md](docs/MRSON-LIVESCENE.md)** — Scene format and protocol
+- **[DATABASE-LAYOUT.md](docs/DATABASE-LAYOUT.md)** — How Albula keeps its data: databases, DICOM, the working copy, scenes
 - **[RENDER-PERFORMANCE.md](docs/RENDER-PERFORMANCE.md)** — GPU profiling and optimization
 - **[ALGORITHMS.md](docs/ALGORITHMS.md)** — Segment editing engine design
 - **[UNIFIED-RENDERING-PLAN.md](docs/UNIFIED-RENDERING-PLAN.md)** — Progressive refinement and remote GPU rendering

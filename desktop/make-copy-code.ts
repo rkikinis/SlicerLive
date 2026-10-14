@@ -59,6 +59,11 @@ export async function computeCopyCode(): Promise<string> {
   const bySpec = new Map(info.modules.map((m) => [m.specifier, m]));
   const resolve = (sp: string) => info.redirects?.[sp] ?? sp;
   // From the converter, following only imports that exist at run time.
+  // NOT COVERED: how SQLite is opened, waited on and printed (desktop/sqlite.ts) -- it cannot change which files a copy
+  // reads or what it holds; the query that chooses the files is in series-files.ts, which is covered. Covered, every
+  // change to it retired every copy: five times on 2026-10-13, and a re-sweep of the main database takes 217 s (critic,
+  // 2026-10-13 round 2, finding 3). The same reasoning that split series-files.ts out of db-index.ts.
+  const NOT_CONTENT = new Set([join(ROOT, "desktop/sqlite.ts")]);
   const files = new Set<string>();
   const seen = new Set<string>();
   const walk = (sp: string) => {
@@ -67,6 +72,7 @@ export async function computeCopyCode(): Promise<string> {
     seen.add(sp);
     const m = bySpec.get(sp);
     if (!m) return;
+    if (m.local && NOT_CONTENT.has(m.local)) return;
     // A MODULE THE HASH CANNOT SEE STOPS THE GENERATOR (critic, 2026-09-23, finding 9): a `jsr:` or
     // `https:` import lives in Deno's cache, outside this tree, and a version range can resolve to new
     // code without any hashed text changing. Local files, npm packages (their versions are hashed
@@ -85,7 +91,7 @@ export async function computeCopyCode(): Promise<string> {
   const parts: Uint8Array[] = [];
   const enc = new TextEncoder();
   for (const f of [...files].sort()) {
-    parts.push(enc.encode(`\n--- ${relative(ROOT, f)}\n`));
+    parts.push(enc.encode(`\n--- ${relative(ROOT, f).replaceAll("\\", "/")}\n`));   // the same on every system (B8)
     parts.push(await codeOf(f));
   }
   parts.push(enc.encode(`\n--- npm\n${Object.keys(info.npmPackages ?? {}).sort().join("\n")}\n`));
@@ -104,12 +110,12 @@ export async function computeCopyCode(): Promise<string> {
  * `exclude`: the generated file holding the result (relative path).
  */
 export async function interpreterFingerprint(extensionRoot: string, entry: string, exclude: string[] = []): Promise<string> {
-  const rootDir = extensionRoot.replace(/\/$/, "");
+  const rootDir = extensionRoot.replace(/[\\/]$/, "");
   const out = await new Deno.Command(Deno.execPath(), { args: ["info", "--no-lock", "--json", join(rootDir, entry)], cwd: ROOT, stdout: "piped", stderr: "piped" }).output();
   if (!out.success) throw new Error(`deno info failed: ${new TextDecoder().decode(out.stderr)}`);
   const info = JSON.parse(new TextDecoder().decode(out.stdout)) as { modules: { local?: string }[] };
-  const files = info.modules.map((m) => m.local).filter((f): f is string => !!f && f.startsWith(rootDir + "/"))
-    .map((f) => relative(rootDir, f)).filter((f) => !exclude.includes(f)).sort();
+  const files = info.modules.map((m) => m.local).filter((f): f is string => !!f && (f.startsWith(rootDir + "/") || f.startsWith(rootDir + "\\")))
+    .map((f) => relative(rootDir, f).replaceAll("\\", "/")).filter((f) => !exclude.includes(f)).sort();
   const enc = new TextEncoder(), parts: Uint8Array[] = [];
   for (const f of files) { parts.push(enc.encode(`\n--- ${f}\n`)); parts.push(await codeOf(join(rootDir, f))); }
   parts.push(enc.encode(`\n--- printed by esbuild ${esbuild.version}\n`));

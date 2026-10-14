@@ -600,6 +600,8 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
 .sl-3d-fps { margin-left: 8px; font: 600 11px var(--sl-font); color: var(--sl-view-ink); opacity: 0.85; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sl-3d-bar button[aria-pressed=true] { background: var(--sl-accent); color: var(--sl-accent-fg); border-color: var(--sl-accent); }
 .sl-3d-bar button:last-child { margin-left: auto; width: 22px; }
+/* A word, not a letter (Ron, 2026-10-12, on the VR/AR button running out of its box): as wide as its text. */
+.sl-3d-bar button.sl-3d-word { width: auto; padding: 0 5px; }
 
 /* ---- the 3D view panel (the corner gear) ---- */
 /* Anchored under the gear, which the rule above pins to the right edge. Slicer's view controllers
@@ -1183,6 +1185,21 @@ button.sl-primary:hover { background: var(--sl-accent-hover); }
 .sl-save-foot { margin-top: 8px; }
 
 
+/* A row a script hides must stay hidden: .sl-3d-panel-row's display:flex overrode [hidden] (critic 2026-10-14, 16). */
+.sl-3d-panel-row[hidden] { display: none !important; }
+
+/* NAMES AND ROW ACTIONS (row-actions.ts; PALETTE.md, 2026-10-14): a pencil on a name a click would rename, the text box,
+   the ⋯ button and its menu. */
+.sl-name-edit { cursor: text; border-radius: 3px; }
+.sl-name-edit:hover { background: var(--sl-surface-3); }
+.sl-name-edit:hover::after { content: " ✎"; color: var(--sl-fg-muted); }
+.sl-name-input { width: 100%; box-sizing: border-box; font: inherit; color: var(--sl-fg); background: var(--sl-bg); border: 1px solid var(--sl-accent); border-radius: 3px; padding: 0 3px; }
+.sl-more, .sl-panel .sl-more { border: none; background: none; color: var(--sl-fg-muted); font-size: 15px; line-height: 1; padding: 0 5px; cursor: pointer; border-radius: 3px; min-width: 0; }
+.sl-more:hover, .sl-panel .sl-more:hover { background: var(--sl-surface-3); color: var(--sl-fg); }
+.sl-row-menu { position: fixed; z-index: 1000; background: var(--sl-bg); border: 1px solid var(--sl-border); border-radius: 6px; padding: 3px; min-width: 150px; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+.sl-row-menu button { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--sl-fg); font: inherit; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+.sl-row-menu button:hover { background: var(--sl-surface-3); }
+
 /* ------------------------------------------------------------------------------------------------
    THE PRESS, ACKNOWLEDGED FOR A FIXED BEAT, on every button in the application (the pointerdown and
    keydown listeners in app-shell). `:active` covers the press while it is held; this covers a tap,
@@ -1306,3 +1323,5 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 .sl-view-menu .hd2 { padding: 2px 12px 3px; font-size: 11px; color: var(--sl-fg-muted); }
 .sl-view-menu .sep { border-top: 1px solid var(--sl-line); margin: 4px 0; }
 
+/* Controls for development only (Settings › For developers; 2026-10-14): hidden unless that setting is on. */
+html:not(.sl-dev) .sl-dev-step { display: none !important; }

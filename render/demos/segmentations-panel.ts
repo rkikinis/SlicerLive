@@ -22,6 +22,7 @@
 // ACCESSIBILITY IS A CONSTRAINT, NOT A POLISH STEP. Ron: "the user interface be friendly for people
 // with poor fine motor control." So every move has a NON-DRAG path first: select rows, then choose
 // a destination from a menu. Drag, when it lands, is the fast path on top — never the only one.
+import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
@@ -325,7 +326,7 @@ export function registerSegmentationsPanel(
       title: "New segmentation",
       ok: "Create",
       body: `<p>Creates an empty segmentation on <b>${escapeHtml((vols[0].name as string) ?? "the loaded volume")}</b>.</p>` +
-        `<p>You can rename it afterwards by double-clicking its name.</p>`,
+        `<p>You can rename it afterwards: click its name.</p>`,
     });
     if (!ok) return;
     const made = await createSegmentation(live, store, vols[0].id as string, { name: "Segmentation" });
@@ -417,24 +418,19 @@ export function registerSegmentationsPanel(
     return box;
   }
 
-  function renameRoot(id: string, el: HTMLElement) {
+  /** Remove from scene: unloads it from this session; unsaved work asks first (the same rule as Scenes). */
+  async function removeSegmentation(id: string) {
     const n = live.nodes.get(id);
     if (!n) return;
-    const input = document.createElement("input");
-    input.className = "sl-seg-rename";
-    input.value = (n.name as string) ?? "";
-    el.replaceChildren(input);
-    input.focus();
-    input.select();
-    const commit = (save: boolean) => {
-      if (save && input.value.trim()) live.write({ op: "patch", id, path: "#/name", value: input.value.trim() });
-      render();
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") commit(true);
-      if (e.key === "Escape") commit(false);
-    });
-    input.addEventListener("blur", () => commit(true));
+    const org = n.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
+    if (!(org?.savedSeriesInstanceUID || org?.seriesInstanceUID) || n.edited === true) {
+      const ok = await shell.confirm({ title: `Remove "${n.name}" from the scene?`, ok: "Remove", cancel: "Keep", destructive: true,
+        body: `<p>${n.edited === true ? "Its edits are not saved" : "It is not saved to the DICOM database"}. Removing it from the scene loses it.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
+      if (!ok) return;
+    }
+    live.write({ op: "del", id });
+    if (chosen === id) chosen = "";
+    render();
   }
 
   /**
@@ -605,8 +601,12 @@ export function registerSegmentationsPanel(
       // that differ only past the cut read as one. Ron, 2026-09-22, having mixed up two lung-vessel
       // sets: "the full name of the segmentation was not readable in the listing. Perhaps showing
       // that on hover would have prevented me."
-      nm.title = `${r.name} — double-click to rename`;
-      nm.addEventListener("dblclick", (e) => { e.stopPropagation(); renameRoot(r.id, nm); });
+      nm.title = r.name;
+      // NAMES AND ROW ACTIONS (Ron, 2026-10-14; row-actions.ts): the first click on a row chooses it (the tree below shows
+      // it); a click on the name of the chosen row renames it, as in Finder. ⋯ and a right-click hold Rename and Remove.
+      const getName = () => (live.nodes.get(r.id)?.name as string) ?? r.name;
+      const commitName = (v: string) => { live.write({ op: "patch", id: r.id, path: "#/name", value: v }); render(); };
+      makeNameEditable(nm, { get: getName, commit: commitName, selected: () => chosen === r.id });
       const cnt = document.createElement("span");
       cnt.className = "sl-hint";
       cnt.textContent = `${r.segments.length}`;
@@ -668,7 +668,7 @@ export function registerSegmentationsPanel(
       const act = document.createElement("button");
       act.type = "button";
       act.className = "sl-seg-edit" + (edited ? " sl-primary" : "");
-      act.textContent = edited ? "Save…" : "✎ Edit";
+      act.textContent = edited ? "Save…" : "Edit";        // no ✎: the pencil now means "rename" (row-actions.ts)
       act.title = edited ? "Save the edits: a new series beside the original (the original stays unchanged); the Segment Editor says more" : "Change this segmentation by hand in the Segment Editor";
       act.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -682,6 +682,10 @@ export function registerSegmentationsPanel(
         }, { busyLabel: "Saving…", doneLabel: "Saved", failedLabel: "Not saved" }).catch(() => {});
       });
       item.append(eye, ghost, nm, cnt, act);
+      addRowMenu(item, () => [
+        { label: "Rename", run: () => startEditing(nm, getName(), commitName) },
+        { label: "Remove from scene", title: "Unloads it from this session. Anything saved to the DICOM database stays there.", run: () => void removeSegmentation(r.id) },
+      ], `“${getName()}”`);
       // A CLICK ON THE ROW THAT IS ALREADY CHOSEN CHANGES NOTHING, so it must not redraw: a
       // double-click is two clicks first, and a redraw after the second one detached the name the
       // dblclick was then delivered to -- the rename input went into an element no longer on the

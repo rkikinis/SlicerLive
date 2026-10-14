@@ -22,6 +22,7 @@ import { importFiles, type ImportProgress } from "./db-import.ts";
 import { deleteScene, importScene, listScenes, mergeProvenance, type SceneRow } from "./scenes.ts";
 import { seriesNamed } from "../logic/scene/check.ts";
 
+import { sqliteScript } from "./sqlite.ts";
 export const RECORD_FILE = "albula-record.jsonl";
 const UID = /^[0-9][0-9.]{0,63}$/;
 
@@ -90,11 +91,8 @@ export interface RecordEntry {
 }
 
 async function sqlite(dbPath: string, sql: string): Promise<string> {
-  const p = new Deno.Command("sqlite3", { args: ["-readonly", dbPath], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(".timeout 5000\n" + sql)); await w.close();
-  const out = await p.output();
-  if (!out.success) throw new Error(new TextDecoder().decode(out.stderr).trim() || "sqlite failed");
-  return new TextDecoder().decode(out.stdout);
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  return await sqliteScript(dbPath, ".timeout 5000\n" + sql, true);
 }
 const q = (s: string) => "'" + s.replace(/'/g, "''") + "'";
 const json = async <T>(db: string, sql: string): Promise<T[]> => { const raw = (await sqlite(db, ".mode json\n" + sql)).trim(); return raw ? JSON.parse(raw) as T[] : []; };

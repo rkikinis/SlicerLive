@@ -24,9 +24,11 @@
 // GET /_db            what is registered, with full paths, and which is current
 // PUT /_db            change the current one, or register a path
 // GET /_db/<id>/<rel> a file from that database, Range honored so a header read stays a header read
+import { listSeries, seriesFileNames } from "./db-listing.ts";
 import { serveDir } from "jsr:@std/http@1/file-server";
 import { COPY_FOLDER } from "./duckn-copy-code.ts";
 import { copyStatus } from "./duckn-copy-check.ts";
+import { provenancePathFor } from "./db-index.ts";
 import { auditDatabase, cohorts, createCohort, deleteCohort, deleteSeriesFromDatabase, setCohortMembers, type CohortLevel, indexFilesIntoDatabase, provenanceEdges, seriesAttributes, setSeriesAttribute, seriesSizes, type IndexMeta } from "./db-index.ts";
 import { handleSceneRoutes } from "./scenes.ts";
 import { picturesFolder } from "./pictures.ts";
@@ -36,7 +38,9 @@ import { readSettings, resolveSettingsPath, writeSettings } from "./settings-fil
 import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
-import { getTestCases, TEST_CASES, testCasesComplete, type TestCaseProgress } from "./test-cases.ts";
+import { bringDatabase, carryRecords, inspectFolder, packageFacts } from "./package-open.ts";
+import { isInside, placeOf } from "./paths.ts";
+import { DTI_SAMPLE, getDtiSample, getTestCases, SampleError, TEST_CASES, testCasesComplete, type DtiSampleProgress, type DtiSampleResult, type TestCaseProgress } from "./test-cases.ts";
 import { readRecord, recordKept, removeTransferred, sameDatabase, transferSeries, type TransferProgress, type TransferResult, type TransferSide } from "./db-transfer.ts";
 
 const SECTION = "Database";
@@ -135,12 +139,15 @@ const FEATURES = [
   "scenes",        // GET /_db/<id>/_scenes, GET/PUT/DELETE /_db/<id>/_scene/<uid> -- saved scenes (desktop/scenes.ts)
   "cohorts",       // GET /_db/<id>/_cohorts; PUT /_db/<id>/_cohort/<name> {add, remove}; DELETE /_db/<id>/_cohort/<name>
   "audit",
+  "listing",       // GET /_db/<id>/_series, GET /_db/<id>/_files?series=<uid> -- what the page asks instead of downloading the index
   "checkpoints",
   "create",        // POST /_db/_create {name, token?, ...description}; POST /_db/_register {token, name?}
   "describe",      // GET/PUT /_db/<id>/_description
   "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
-  "import",        // POST /_db/<id>/_import {token} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
+  "import",        // POST /_db/<id>/_import {token, sub?, move?} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
+  "package",       // POST /_db/_package/inspect {token}; POST /_db/_adopt {token, move, name?} (desktop/package-open.ts)
+  "dti-sample",    // POST /_db/_dti-sample starts it (the database "Sample data" made the first time); GET /_db/_dti-sample/<job>
   "test-cases",    // GET /_db/_test-cases (what, how big, which database has them); POST to start; GET /_db/_test-cases/<job>
   "transfer",      // POST /_db/_transfer {from, to, series, move?, scenes?}; GET /_db/_transfer/<job>; POST /_db/_transfer/<job>/_remove
   "record",        // GET /_db/<id>/_record -- what came in and went out (transfers), newest first
@@ -148,6 +155,8 @@ const FEATURES = [
 
 /** The test-case download (desktop/test-cases.ts): one at a time, its progress kept while the server runs. */
 let testCasesJob: { job: string; db: string; progress: TestCaseProgress; error?: string; ended?: number } | undefined;
+/** The diffusion sample (Sample Data › Brain with DTI; desktop/test-cases.ts getDtiSample): one at a time. */
+let sampleJob: { job: string; db: string; progress: DtiSampleProgress; result?: DtiSampleResult; error?: string; ended?: number } | undefined;
 
 /** Imports running or finished in this process, by job id: their progress, then their result. Finished ones go after an hour. */
 const imports = new Map<string, { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number }>();
@@ -277,8 +286,51 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     }
   }
 
+  // POST /_db/_package/inspect {token} -- what a chosen folder is (a packaged scene, a database, neither) and, for a
+  // package, what is in it and which databases already hold what (desktop/package-open.ts; the page's one window,
+  // render/demos/package-window.ts). Reads only.
+  if (url.pathname === "/_db/_package/inspect" && req.method === "POST") {
+    try {
+      const b = await jsonBody();
+      // A DROPPED package: the page sends its two documents (it holds the files; their place on disk is unknown).
+      if (b.scene && typeof b.scene === "object") {
+        return Response.json(await packageFacts(b.scene as Record<string, unknown>, (b.provenance ?? {}) as { attributes?: { uid: string; key: string; value: string }[] }, await registeredDatabases(galleryRoot)), noStore);
+      }
+      const c = chosenFolder(String(b.token ?? ""));
+      if (!c) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+      return Response.json(await inspectFolder(c.path, c.name, await registeredDatabases(galleryRoot)), noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+  // POST /_db/_adopt {token, move, name?} -- a whole database folder moved (the default) or copied into "SlicerAlbulaDatabases",
+  // its records carried with it, and registered (Ron, 2026-10-13: "move or copy into the albula databases folder. User
+  // decides, move is the default").
+  if (url.pathname === "/_db/_adopt" && req.method === "POST") {
+    try {
+      const b = await jsonBody();
+      const c = chosenFolder(String(b.token ?? ""));
+      if (!c) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+      if (!(await Deno.stat(join(c.path, "ctkDICOM.sql")).then((x) => x.isFile, () => false))) return Response.json({ error: "that folder holds no DICOM database (no ctkDICOM.sql)" }, { status: 400 });
+      const registered = await registeredDatabases(galleryRoot);
+      for (const d of registered) if (await sameDatabase(d.path, c.path)) return Response.json({ error: `that database is already in the list, as “${d.description?.name ?? d.id}”` }, { status: 409 });
+      const description = (await readDescription(c.path)) ?? cleanDescription({ name: String(b.name ?? c.name) });
+      const path = await bringDatabase(c.path, description.name, b.move !== false);
+      // LISTED WHATEVER HAPPENS NEXT (the critic, 2026-10-13, A3): the folder has moved, so a failure to carry its
+      // records must not leave it moved and unlisted; the records' failure is said instead (the old store is untouched).
+      let carried: { edges: number; attributes: number; scenes: number } | null = null, warning: string | undefined;
+      try { carried = await carryRecords(c.path, path); } catch (e) { warning = (e as Error).message; }
+      if (!(await Deno.stat(join(path, DESCRIPTION_FILE)).then(() => true, () => false))) await writeDescription(path, description).catch(() => {});
+      const id = idFor(description.name, registered.map((d) => d.id));
+      const list = await updateDatabases(galleryRoot, { register: { id, path } });
+      return Response.json({ id, path, carried, databases: list, features: FEATURES, ...(warning ? { warning } : {}) }, noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 400 });
+    }
+  }
+
   // POST /_db/_create {name, token?, holds, patientData, approval, contact, source} -- a new, empty database, registered.
-  // Without a token it goes to "Albula Databases" in the home folder (Ron, 2026-10-01), in a folder named after it.
+  // Without a token it goes to "SlicerAlbulaDatabases" in the home folder (Ron, 2026-10-01), in a folder named after it.
   // POST /_db/_register {token, name?} -- a folder that already holds a database, registered as it is.
   if ((url.pathname === "/_db/_create" || url.pathname === "/_db/_register") && req.method === "POST") {
     try {
@@ -311,11 +363,11 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         const folderName = description.name.replace(/[\/:]/g, "-").replace(/^\.+/, "").trim() || "Database";
         // NOT INSIDE ANOTHER DATABASE (finding 10): its audit would count the new one's files as orphans from then on.
         if (chosen && await hasIndex(chosen.path)) return Response.json({ error: "that folder already holds a DICOM database; use “Add an existing database folder” for it, or choose another folder" }, { status: 400 });
-        path = chosen ? chosen.path : `${defaultDatabasesFolder()}/${folderName}`;
+        path = chosen ? chosen.path : join(defaultDatabasesFolder(), folderName);
         // A FOLDER OF THAT NAME ALREADY THERE gets a number (two databases may share a name: "Start fresh" keeps the old
         // one as an archive and makes a new one under its name; transfer-window.ts).
-        if (!chosen) for (let i = 2; await Deno.stat(path).then(() => true, () => false); i++) path = `${defaultDatabasesFolder()}/${folderName} ${i}`;
-        if (chosen && (await Array.fromAsync(Deno.readDir(path))).some((e) => !e.name.startsWith("."))) path = `${path}/${folderName}`;
+        if (!chosen) for (let i = 2; await Deno.stat(path).then(() => true, () => false); i++) path = join(defaultDatabasesFolder(), `${folderName} ${i}`);
+        if (chosen && (await Array.fromAsync(Deno.readDir(path))).some((e) => !e.name.startsWith("."))) path = join(path, folderName);
         const inside = registered.find((d) => path.startsWith(d.path.replace(/\/+$/, "") + "/"));
         if (inside) return Response.json({ error: `that folder is inside the database “${inside.description?.name ?? inside.id}”; choose a folder outside it` }, { status: 400 });
         await createDatabase(path, description);
@@ -332,7 +384,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
 
   // THE BRAIN TUMOR TEST CASES (Ron, 2026-10-01: "a good feature to have, with a warning about the size").
   // GET: what they are and how big, and which registered database already holds them (by its description's source).
-  // POST: make that database if there is none ("Albula Databases" in the home folder), then download and convert into it.
+  // POST: make that database if there is none ("SlicerAlbulaDatabases" in the home folder), then download and convert into it.
   if (url.pathname === "/_db/_test-cases") {
     // Recognized by its folder as well as by its description's source (critic, finding 16: an edited "where from" made a
     // second registration of the same folder).
@@ -369,6 +421,53 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         return Response.json({ error: (e as Error).message }, { status: 500 });
       }
     }
+  }
+  // THE DIFFUSION SAMPLE (Ron, 2026-10-14: "DB of its own"): a database named "Sample data" in the databases folder, made
+  // and registered the first time, then CON03 of ds001226 fetched into it (or found there already).
+  if (url.pathname === "/_db/_dti-sample" && req.method === "POST") {
+    if (sampleJob && !sampleJob.ended) return Response.json({ job: sampleJob.job, id: sampleJob.db }, noStore);
+    // TAKEN AT ONCE, before anything is awaited (critic 2026-10-14, 7: two presses at the same moment both made the
+    // database, and the loser removed the winner's index).
+    const rec: NonNullable<typeof sampleJob> = { job: crypto.randomUUID(), db: "", progress: { phase: "starting", bytes: 0 } };
+    sampleJob = rec;
+    try {
+      let defaultPath = ""; try { defaultPath = `${defaultDatabasesFolder()}/${DTI_SAMPLE.name}`; } catch { /* no home folder */ }
+      if (!defaultPath) throw new Error("there is no home folder to keep the sample in");
+      const dbs = await registeredDatabases(galleryRoot);
+      // ITS OWN DATABASE, recognized by the path AND its description (critic 2026-10-14, 6 and 13): an entry for that path
+      // is reused whether or not its folder is there; a database the person made under that name is not filled.
+      const atPath = dbs.find((d) => d.path === defaultPath);
+      const hasIndex = await Deno.stat(`${defaultPath}/ctkDICOM.sql`).then(() => true, () => false);
+      if (hasIndex) {
+        const desc = await readDescription(defaultPath).catch(() => null);
+        if (desc && desc.source !== DTI_SAMPLE.source) throw new Error(`there is already a database named “${DTI_SAMPLE.name}” that is not Albula's sample; rename it (Databases…) and press again`);
+      } else {
+        await createDatabase(defaultPath, { name: DTI_SAMPLE.name, holds: DTI_SAMPLE.holds, patientData: false, source: DTI_SAMPLE.source });
+      }
+      const id = atPath?.id ?? idFor(DTI_SAMPLE.name, dbs.map((d) => d.id));
+      if (!atPath) await updateDatabases(galleryRoot, { register: { id, path: defaultPath } });
+      rec.db = id;
+      const dbPath = defaultPath;
+      const prev = importQueue.get(dbPath) ?? Promise.resolve();
+      const run = prev.catch(() => {}).then(() => getDtiSample(dbPath, (p) => { rec.progress = p; }))
+        .then((r) => { rec.result = r; })
+        .catch((e) => {
+          // One plain sentence for the person; the detail in the session log (critic 2026-10-14, 12).
+          rec.error = e instanceof SampleError ? e.plain : `the sample could not be made (${(e as Error).message})`;
+          console.log(`Brain with DTI: ${(e as Error).message}`);
+        })
+        .finally(() => { rec.ended = Date.now(); rec.progress = { ...rec.progress, phase: "done" }; });
+      importQueue.set(dbPath, run);
+      return Response.json({ job: rec.job, id, approxBytes: DTI_SAMPLE.approxBytes }, noStore);
+    } catch (e) {
+      rec.error = (e as Error).message; rec.ended = Date.now();
+      return Response.json({ error: rec.error }, { status: 500 });
+    }
+  }
+  const sj = /^\/_db\/_dti-sample\/([0-9a-f-]{36})$/.exec(url.pathname);
+  if (sj && req.method === "GET") {
+    if (sampleJob?.job !== sj[1]) return Response.json({ error: "no such download" }, { status: 404 });
+    return Response.json({ db: sampleJob.db, progress: sampleJob.progress, result: sampleJob.result, error: sampleJob.error, done: !!sampleJob.ended }, noStore);
   }
   const tcj = /^\/_db\/_test-cases\/([0-9a-f-]{36})$/.exec(url.pathname);
   if (tcj && req.method === "GET") {
@@ -441,6 +540,12 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         for (const d of await registeredDatabases(galleryRoot)) {
           if (d.id !== body.id && await sameDatabase(d.path, body.path)) return Response.json({ error: `that database is already in the list, as “${d.description?.name ?? d.id}”` }, { status: 409 });
         }
+      }
+      // AN UNKNOWN DATABASE IS REFUSED, not accepted: the page then opened the first registered database instead --
+      // whichever that was, holding data the person never chose to open (critic 2026-10-14, page asks the server,
+      // "Outside the target").
+      if (body.current && !(body.id && body.path && body.current === body.id) && !(await registeredDatabases(galleryRoot)).some((d) => d.id === body.current)) {
+        return Response.json({ error: `no database “${body.current}” is registered` }, { status: 404 });
       }
       const list = await updateDatabases(galleryRoot, {
         register: body.id && body.path ? { id: body.id, path: body.path } : undefined,
@@ -618,12 +723,23 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     if (b.token) {
       const c = chosenFolder(String(b.token));
       if (!c) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
-      if (c.path === db.path || c.path.startsWith(db.path + "/")) return Response.json({ error: "that folder is inside the database already" }, { status: 400 });
+      // A SUB-FOLDER of the chosen one (a packaged scene's dicom/; package-window.ts), and MOVE instead of copy when asked.
+      const sub = typeof b.sub === "string" ? normalize("/" + b.sub).slice(1) : "";
+      if (sub.startsWith("..")) return Response.json({ error: "bad sub-folder" }, { status: 400 });
+      const root = sub ? join(c.path, ...sub.split("/").filter(Boolean)) : c.path;
+      // THE DATABASE'S OWN FILES are never walked: the database folder itself, a folder that holds it, or its dicom/ store.
+      // A folder that merely lies inside the database's folder -- a package someone put there, Ron's case on 2026-10-13 --
+      // is added like any other (it was refused: "that folder is inside the database already").
+      const ownStore = join(db.path, "dicom");
+      if ((await placeOf(root, db.path)) === "same" || await isInside(db.path, root) || (await placeOf(root, ownStore)) !== "outside") {
+        return Response.json({ error: "that folder holds this database's own files" }, { status: 400 });
+      }
       // EVERY DATABASE'S OWN FOLDER IS LEFT OUT of the walk (finding 11): a chosen folder that holds one (the home
-      // folder, "Albula Databases") would otherwise read it whole and pull another database's scans in.
-      const dbFolders = (await registeredDatabases(galleryRoot)).map((d) => d.path);
+      // folder, "SlicerAlbulaDatabases") would otherwise read it whole and pull another database's scans in.
+      const dbFolders: string[] = [];
+      for (const d of await registeredDatabases(galleryRoot)) if (!(await isInside(root, d.path))) dbFolders.push(d.path);
       await clearStaleUploads(db.path);
-      return Response.json({ job: startImport(db.id, db.path, () => filesUnder(c.path, dbFolders)) }, noStore);
+      return Response.json({ job: startImport(db.id, db.path, () => filesUnder(root, dbFolders), { move: b.move === true }) }, noStore);
     }
     if (typeof b.upload === "string" && JOB.test(b.upload)) {
       const dir = `${db.path}/${IMPORT_FOLDER}/${b.upload}`;
@@ -779,7 +895,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
   if (prov) {
     const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(prov[1]));
     if (!db) return Response.json({ error: "no such database" }, { status: 404 });
-    const path = `${db.path.replace(/\/+$/, "").replace(/\/[^/]+$/, "")}/provenance.sqlite`;
+    const path = provenancePathFor(db.path);
     try {
       await Deno.stat(path);
     } catch {
@@ -800,7 +916,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     const id = decodeURIComponent((coh ?? cohOne)![1]);
     const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === id);
     if (!db) return Response.json({ error: "no such database" }, { status: 404 });
-    const path = `${db.path.replace(/\/+$/, "").replace(/\/[^/]+$/, "")}/provenance.sqlite`;
+    const path = provenancePathFor(db.path);
     try {
       if (coh) return Response.json({ cohorts: await cohorts(path) });
       const name = decodeURIComponent(cohOne![2]);
@@ -820,7 +936,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
   if (attr && req.method === "PUT") {
     const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(attr[1]));
     if (!db) return Response.json({ error: "no such database" }, { status: 404 });
-    const path = `${db.path.replace(/\/+$/, "").replace(/\/[^/]+$/, "")}/provenance.sqlite`;
+    const path = provenancePathFor(db.path);
     const body = await req.json().catch(() => ({})) as { uid?: string; key?: string; value?: string; source?: string };
     if (!body.uid || !body.key) return Response.json({ error: "uid and key required" }, { status: 400 });
     try {
@@ -842,6 +958,26 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       return Response.json({ sizes: await seriesSizes(db.path) });
     } catch (e) {
       return Response.json({ sizes: {}, error: (e as Error).message });
+    }
+  }
+
+  // WHAT A DATABASE HOLDS, asked by the page instead of downloading the index (desktop/db-listing.ts; 2026-10-14).
+  const lst = /^\/_db\/([^/]+)\/_(series|files)$/.exec(url.pathname);
+  if (lst && req.method === "GET") {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(lst[1]));
+    if (!db) return Response.json({ error: "no such database" }, { status: 404 });
+    if (!db.exists) return Response.json({ error: `the database “${db.description?.name ?? db.id}” is not where it was registered (its folder is gone or its disk is not attached)` }, { status: 404 });
+    try {
+      if (lst[2] === "series") return Response.json(await listSeries(db.path), { headers: { "cache-control": "no-store" } });
+      const uid = url.searchParams.get("series") ?? "";
+      if (!uid) return Response.json({ error: "which series? (?series=<uid>)" }, { status: 400 });
+      return Response.json({ files: await seriesFileNames(db.path, uid) }, { headers: { "cache-control": "no-store" } });
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/database is locked|database table is locked/i.test(msg)) {
+        return Response.json({ error: `the DICOM database “${db.description?.name ?? db.id}” is busy: another program is writing to it. Try again when it has finished.` }, { status: 503 });
+      }
+      return Response.json({ error: msg }, { status: 500 });
     }
   }
 

@@ -2,6 +2,7 @@
 // a stale one, records what it will not copy and why, and never reads a segmentation.
 //
 //   deno test -A --no-check desktop/duckn-sweep.test.ts
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { addSeries, emptyDb } from "./duckn-copy.fixture.ts";
 import { outcomeOf, sweep } from "./duckn-sweep.ts";
@@ -14,8 +15,7 @@ Deno.test("the sweep copies, then leaves valid copies alone, remakes a stale one
   const frac = await addSeries(dir, 8, 8, 3, { extra: { RescaleSlope: 3.774114 } });
   const flat = await addSeries(dir, 8, 8, 3, { extra: { ImagePositionPatient: undefined, ImageOrientationPatient: undefined } });
   // A segmentation in the index: must never be read for a copy.
-  const p = new Deno.Command("/usr/bin/sqlite3", { args: [`${dir}/ctkDICOM.sql`], stdin: "piped" }).spawn();
-  const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode("INSERT INTO Series VALUES ('7.7.7', '1.2.3', 'SEG');")); await w.close(); await p.status;
+  runScript(`${dir}/ctkDICOM.sql`, "INSERT INTO Series VALUES ('7.7.7', '1.2.3', 'SEG');");
 
   const dry = await sweep(dir, { dryRun: true });
   assertEquals(dry.entries.length, 4, "the SEG is not a candidate");

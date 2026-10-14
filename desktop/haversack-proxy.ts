@@ -280,8 +280,10 @@ export async function handleOpenRequest(req: Request): Promise<Response | null> 
     return Response.json({ error: "only https is opened", got: parsed.protocol }, { status: 400 });
   }
 
-  const cmd = Deno.build.os === "darwin" ? "open" : Deno.build.os === "windows" ? "cmd" : "xdg-open";
-  const args = Deno.build.os === "windows" ? ["/c", "start", "", parsed.href] : [parsed.href];
+  // Windows: the URL handler directly, as main.ts does -- never `cmd /c start`, which reads "&" in a URL as "run the
+  // next command" (critic, 2026-10-13 cross-platform, B1): a link from a catalog could run a program.
+  const cmd = Deno.build.os === "darwin" ? "open" : Deno.build.os === "windows" ? "rundll32" : "xdg-open";
+  const args = Deno.build.os === "windows" ? ["url.dll,FileProtocolHandler", parsed.href] : [parsed.href];
   try {
     const out = await new Deno.Command(cmd, { args, stdout: "null", stderr: "piped" }).output();
     if (!out.success) {

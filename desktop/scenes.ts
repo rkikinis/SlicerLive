@@ -15,32 +15,29 @@
 //                                       pictures), the provenance rows, a README; copies, never moves
 //   POST   /_db/<id>/_scene/_import     the other end: the body is `{ scene, provenance }` read
 //                                       from such a folder. Every series it names must already be
-//                                       in this database (Albula does not import DICOM; Slicer's
-//                                       DICOM module does); then the provenance rows and the scene
-//                                       row are added and the scene's row appears under its study.
+//                                       in this database (the one-step way in, desktop/package-open.ts,
+//                                       adds the package's DICOM first); then the provenance rows and
+//                                       the scene row are added and the scene's row appears under its study.
 import { checkScene, seriesNamed } from "../logic/scene/check.ts";
 import { provenancePathFor, provenanceEdges, seriesAttributes, type ProvenanceEdge, type SeriesAttribute } from "./db-index.ts";
 
+import { sqliteScript } from "./sqlite.ts";
 export const SCENES_FOLDER = "SlicerAlbula-Scenes";
 const UID = /^2\.25\.\d{1,40}$/;
 
 export interface SceneRow { uid: string; study: string; name: string; producer: string; producedAt: string; v: number; origin: string; bytes: number; path: string; series?: number; /** Every study the file names (one patient); `study` is the first. */ studies?: string[] }
 
 async function sqlite(dbPath: string, sql: string, readonly = true): Promise<string> {
-  const cmd = new Deno.Command("sqlite3", { args: readonly ? ["-readonly", dbPath] : [dbPath], stdin: "piped", stdout: "piped", stderr: "piped" });
-  const p = cmd.spawn();
   // Waits up to five seconds for a busy file, as db-index.ts does: both write provenance.sqlite, and this one
   // gave up at once when a save indexed at the same moment (critic, 2026-09-24, review-bugfixes finding 3).
-  const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(".timeout 5000\n" + sql)); await w.close();
-  const out = await p.output();
-  if (!out.success) throw new Error(new TextDecoder().decode(out.stderr).trim() || "sqlite failed");
-  return new TextDecoder().decode(out.stdout);
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  return await sqliteScript(dbPath, ".timeout 5000\n" + sql, readonly);
 }
 const q = (s: unknown) => "'" + String(s ?? "").replace(/'/g, "''") + "'";
 /** The provenance store's own two tables, as db-index.ts makes them -- an import on a machine that never had a store creates them (critic, finding 3). */
-const PROVENANCE_SCHEMA = "CREATE TABLE IF NOT EXISTS ProvenanceEdges (id INTEGER PRIMARY KEY, child_series_uid TEXT NOT NULL, parent_series_uid TEXT, kind TEXT NOT NULL, label TEXT NOT NULL, detail TEXT, author TEXT, created_at TEXT NOT NULL);\n" +
+export const PROVENANCE_SCHEMA = "CREATE TABLE IF NOT EXISTS ProvenanceEdges (id INTEGER PRIMARY KEY, child_series_uid TEXT NOT NULL, parent_series_uid TEXT, kind TEXT NOT NULL, label TEXT NOT NULL, detail TEXT, author TEXT, created_at TEXT NOT NULL);\n" +
   "CREATE TABLE IF NOT EXISTS SeriesAttributes (SeriesInstanceUID TEXT NOT NULL, Key TEXT NOT NULL, Value TEXT NOT NULL, Source TEXT NOT NULL, Recorded TEXT NOT NULL, PRIMARY KEY (SeriesInstanceUID, Key));\n";
-const SCHEMA = "CREATE TABLE IF NOT EXISTS Scenes (uid TEXT PRIMARY KEY, study TEXT NOT NULL, name TEXT NOT NULL, producer TEXT NOT NULL, producedAt TEXT NOT NULL, v INTEGER NOT NULL, origin TEXT NOT NULL, bytes INTEGER NOT NULL, path TEXT NOT NULL);\n";
+export const SCENES_SCHEMA = "CREATE TABLE IF NOT EXISTS Scenes (uid TEXT PRIMARY KEY, study TEXT NOT NULL, name TEXT NOT NULL, producer TEXT NOT NULL, producedAt TEXT NOT NULL, v INTEGER NOT NULL, origin TEXT NOT NULL, bytes INTEGER NOT NULL, path TEXT NOT NULL);\n";
 
 export async function listScenes(dbDir: string): Promise<SceneRow[]> {
   const prov = provenancePathFor(dbDir);
@@ -96,7 +93,7 @@ export async function putScene(dbDir: string, uid: string, doc: Record<string, u
   // (it did: the file was renamed into place before the row failed).
   const src = (doc.source as Record<string, unknown> | undefined) ?? {};
   try {
-    await sqlite(provenancePathFor(dbDir), SCHEMA +
+    await sqlite(provenancePathFor(dbDir), SCENES_SCHEMA +
       `INSERT OR REPLACE INTO Scenes VALUES (${q(uid)}, ${q((doc.study as Record<string, unknown>)?.studyInstanceUID)}, ${q(doc.name)}, ${q(src.producer)}, ${q(src.producedAt)}, ${v}, ${q(src.origin)}, ${bytes}, ${q(`${SCENES_FOLDER}/${uid}.mrson.json`)});`, false);
   } catch (e) {
     await Deno.remove(tmp).catch(() => {});
@@ -126,7 +123,7 @@ export async function renameScene(dbDir: string, uid: string, name: string): Pro
   const text = JSON.stringify({ ...doc, name: n }, null, 1);
   const tmp = `${path}.tmp`;
   await Deno.writeTextFile(tmp, text); await Deno.rename(tmp, path);
-  await sqlite(provenancePathFor(dbDir), SCHEMA + `UPDATE Scenes SET name=${q(n)}, bytes=${new TextEncoder().encode(text).byteLength} WHERE uid=${q(uid)};`, false);
+  await sqlite(provenancePathFor(dbDir), SCENES_SCHEMA + `UPDATE Scenes SET name=${q(n)}, bytes=${new TextEncoder().encode(text).byteLength} WHERE uid=${q(uid)};`, false);
   return { ok: true, name: n };
 }
 
@@ -135,7 +132,7 @@ export async function deleteScene(dbDir: string, uid: string): Promise<boolean> 
   // Only a scene this database holds: the row of one beside it is not this database's to remove (finding 2).
   if (!(await Deno.remove(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`).then(() => true, () => false))) return false;
   const prov = provenancePathFor(dbDir);
-  try { await sqlite(prov, SCHEMA + `DELETE FROM Scenes WHERE uid=${q(uid)};`, false); } catch { return false; }
+  try { await sqlite(prov, SCENES_SCHEMA + `DELETE FROM Scenes WHERE uid=${q(uid)};`, false); } catch { return false; }
   return true;
 }
 
@@ -205,7 +202,7 @@ export async function packageScene(dbDir: string, uid: string, dest: string): Pr
     `dicom/             every DICOM file the scene needs, one folder per series: ${reached.length - missing.length} series, ${files} files, ${(bytes / 1e6).toFixed(0)} MB`,
     `provenance.json    what SlicerAlbula knows about those series beyond DICOM: which was made from which, collection and license`,
     ``,
-    `To open it on another machine: import the dicom/ folder into the DICOM database (3D Slicer's DICOM module, or any importer), then drop scene.mrson.json and provenance.json onto SlicerAlbula; the scene appears under its study in the DICOM browser and opens with one click.`,
+    `To open it on another machine: drop this whole folder onto SlicerAlbula, or choose it with Load / Save › Load from files › Packaged scene…. One window asks which database to keep it in; the scans, the records and the scene arrive together and the scene opens. (3D Slicer: add the dicom/ folder with its DICOM module.)`,
     missing.length ? `\nNot included (not in the database this was packaged from): ${missing.join(", ")}` : ``,
   ].join("\n"));
   return { path: dir, series: reached.length - missing.length, files, bytes, missing };
@@ -257,7 +254,8 @@ export async function mergeProvenance(prov: string, provenance: { edges?: Proven
     stmts.push(`INSERT OR IGNORE INTO SeriesAttributes VALUES (${q(a.uid)}, ${q(a.key)}, ${q(a.value)}, ${q(a.source)}, ${q(new Date().toISOString().slice(0, 19))});`);
     attributes++;
   }
-  if (stmts.length) await sqlite(prov, stmts.join("\n"), false);
+  // One transaction: a failure part-way leaves none of them, not some (critic, 2026-10-13, finding 6).
+  if (stmts.length) await sqlite(prov, "BEGIN IMMEDIATE;\n" + stmts.join("\n") + "\nCOMMIT;", false);
   return { edges, attributes };
 }
 
@@ -274,8 +272,8 @@ async function writeSceneAsIs(dbDir: string, uid: string, doc: Record<string, un
   const bytes = new TextEncoder().encode(text).byteLength;
   await Deno.writeTextFile(`${path}.tmp`, text); await Deno.rename(`${path}.tmp`, path);
   const src = (doc.source as Record<string, unknown> | undefined) ?? {};
-  await sqlite(provenancePathFor(dbDir), SCHEMA +
-    `INSERT OR REPLACE INTO Scenes VALUES (${q(uid)}, ${q((doc.study as Record<string, unknown>)?.studyInstanceUID)}, ${q(doc.name)}, ${q(src.producer)}, ${q(src.producedAt)}, ${v}, ${q(src.origin)}, ${bytes}, ${q(`${SCENES_FOLDER}/${uid}.mrson.json`)});`, false);
+  await sqlite(provenancePathFor(dbDir), "BEGIN IMMEDIATE;\n" + SCENES_SCHEMA +
+    `INSERT OR REPLACE INTO Scenes VALUES (${q(uid)}, ${q((doc.study as Record<string, unknown>)?.studyInstanceUID)}, ${q(doc.name)}, ${q(src.producer)}, ${q(src.producedAt)}, ${v}, ${q(src.origin)}, ${bytes}, ${q(`${SCENES_FOLDER}/${uid}.mrson.json`)});\nCOMMIT;`, false);
   return { uid, v, name: String(doc.name ?? ""), replaced: !!row };
 }
 

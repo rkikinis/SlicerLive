@@ -1,3 +1,4 @@
+import { basename } from "jsr:@std/path@1";
 // A FOLDER CHOSEN BY THE PERSON, in macOS's own dialog -- for a page that cannot ask for one.
 //
 // Load / Save's "DICOM folder…" did nothing in the application: it needs the browser's folder picker
@@ -32,7 +33,8 @@ export async function chooseFolder(prompt: string): Promise<ChosenFolder | undef
 /** A folder the person chose by other means (a test, the desktop shell). */
 export function remember(path: string): ChosenFolder {
   for (const c of chosen.values()) if (c.path === path) return c;
-  const c = { token: crypto.randomUUID(), path, name: path.slice(path.lastIndexOf("/") + 1) || path };
+  // The folder's own name, the system's way (the critic, 2026-10-13, A8: on Windows it was the whole path).
+  const c = { token: crypto.randomUUID(), path, name: basename(path) || path };
   chosen.set(c.token, c);
   return c;
 }

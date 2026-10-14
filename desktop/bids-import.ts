@@ -12,6 +12,7 @@
 import { buildBidsSubject, type BidsDataset } from "../logic/import/bids.ts";
 import { indexFilesIntoDatabase } from "./db-index.ts";
 
+import { sqliteScript } from "./sqlite.ts";
 export interface BidsImportOptions {
   session?: string;
   masks?: string[];
@@ -36,12 +37,13 @@ export interface BidsImportResult {
   ms: number;
 }
 
-function knownSeries(db: string, uids: string[]): Set<string> {
+async function knownSeries(db: string, uids: string[]): Promise<Set<string>> {
   if (!uids.length) return new Set();
-  try {
-    const q = new Deno.Command("/usr/bin/sqlite3", { args: ["-readonly", `${db}/ctkDICOM.sql`, `SELECT SeriesInstanceUID FROM Series WHERE SeriesInstanceUID IN (${uids.map((u) => `'${u.replace(/'/g, "")}'`).join(",")});`], stdout: "piped", stderr: "null" }).outputSync();
-    return new Set(new TextDecoder().decode(q.stdout).split("\n").map((l) => l.trim()).filter(Boolean));
-  } catch { return new Set(); }   // no index yet: everything is new
+  const index = `${db}/ctkDICOM.sql`;
+  try { await Deno.stat(index); } catch { return new Set(); }   // no index yet: everything is new
+  // A locked or unreadable index is an error, not "everything is new" (critic, 2026-10-13, finding 10).
+  const out = await sqliteScript(index, `.timeout 5000\nSELECT SeriesInstanceUID FROM Series WHERE SeriesInstanceUID IN (${uids.map((u) => `'${u.replace(/'/g, "")}'`).join(",")});`, true);
+  return new Set(out.split("\n").map((l) => l.trim()).filter(Boolean));
 }
 
 /** Build one subject's DICOM objects from `ds` and put them in the database at `db`. Throws only when nothing could be built. */
@@ -51,7 +53,7 @@ export async function importBidsSubject(db: string, ds: BidsDataset, subject: st
   const { objects, skipped } = await buildBidsSubject(ds, subject, o.session, {
     masks: o.masks ?? [], maskAlgorithm: o.maskAlgorithm, safetyStandardAgency: o.agency, safetyReason: o.agencyReason, onProgress: say,
   });
-  const present = knownSeries(db, objects.map((x) => x.seriesInstanceUID));
+  const present = await knownSeries(db, objects.map((x) => x.seriesInstanceUID));
   const sub = subject.startsWith("sub-") ? subject : `sub-${subject}`;
   const ses = o.session ? (o.session.startsWith("ses-") ? o.session : `ses-${o.session}`) : "";
   const rel = `OpenNeuro/${ds.id}/${sub}${ses ? `/${ses}` : ""}`;

@@ -4,8 +4,8 @@
 // desktop/db-index.ts: the copy's code stamp is a fingerprint of every module the converter runs
 // (desktop/make-copy-code.ts), and with db-index in it, a one-line change to the audit retired all
 // 107 copies (2026-09-23). db-index.ts re-exports both, so its callers are unchanged.
+import { sqliteScript } from "./sqlite.ts";
 
-const SQLITE = "/usr/bin/sqlite3";
 
 /** DICOM UIDs are digits and dots and nothing else; anything else never reaches the SQL. */
 const UID = /^[0-9][0-9.]{0,63}$/;
@@ -13,13 +13,8 @@ const UID = /^[0-9][0-9.]{0,63}$/;
 const q = (v: string): string => `'${v.replace(/'/g, "''")}'`;
 
 async function sqliteRead(dbPath: string, sql: string): Promise<string> {
-  const p = new Deno.Command(SQLITE, { args: ["-readonly", dbPath], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter();
-  await w.write(new TextEncoder().encode(sql));
-  await w.close();
-  const { code, stdout, stderr } = await p.output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr).trim() || `sqlite3 exited ${code}`);
-  return new TextDecoder().decode(stdout);
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  return await sqliteScript(dbPath, ".timeout 5000\n" + sql, true);
 }
 
 /**

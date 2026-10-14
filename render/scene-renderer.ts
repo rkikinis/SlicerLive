@@ -558,6 +558,7 @@ export class SceneRenderer {
     const t = this.meshTargets(w, h, capW, capH);
     this.lastMeshTargets = t;   // the probe reads this frame's depth, so it must be the size drawn
     const pass = enc.beginRenderPass({
+      ...this.stageWrites(0, undefined),
       colorAttachments: [
         { view: t.col.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
         { view: t.depth.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 1e30, g: 0, b: 0, a: 1 } },
@@ -1013,12 +1014,70 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
     this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, bgUniform(this.bgTop, this.bgBottom));   // gradient for the superres composite (u_bg) — else moving frames composite over black
+    this.stageArm();
     let enc = this.dev.createCommandEncoder();
     const mb = this.meshPass(enc, renderW, renderH, viewW, viewH);   // view-sized targets, this frame in their corner
     enc = this.traceInStrips(enc, mb, this.lowView!, renderW, renderH);   // the frame Ron's crash was in (25%, moving)
-    const sp = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const sp = enc.beginRenderPass({ ...this.stageWrites(3, 4), colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     sp.setPipeline(this.superresPipeline); sp.setBindGroup(0, this.superresBind!); sp.draw(3); sp.end();
+    this.stageResolveInto(enc);
     this.dev.queue.submit([enc.finish()]);
+    this.stageCollect();
+  }
+
+  // ── WHERE A FRAME'S TIME GOES ON THE GRAPHICS CARD (Ron, 2026-10-13, on the glasses drawing 3-10 pictures a second:
+  // "can you instrument the pipeline so we know where time is lost"). With onStageTimes set, a frame drawn by
+  // renderToView or renderUpscaled carries five timestamps from the card's own clock (timestamp-query): the start of the
+  // surfaces pass (the meshes and the drawing look's outline, when there are any), the start and end of the ray march
+  // (all its strips), the start and end of the final composite. One frame is measured at a time; frames drawn while its
+  // numbers are being read back are not measured. Without onStageTimes, or on a card without timestamps, nothing is added.
+  onStageTimes: ((t: { surfacesMs: number; marchMs: number; gapMs: number; compositeMs: number; totalMs: number }) => void) | null = null;
+  private stageQs: GPUQuerySet | null = null;
+  private stageResolveBuf: GPUBuffer | null = null;
+  private stageReadBuf: GPUBuffer | null = null;
+  private stageArmed = false;
+  private stageBusy = false;
+  private stageRejected = 0;
+  private stageLastRaw = "";
+  /** Why no stage times arrive, in words, for the log. */
+  stageClock(): string {
+    if (!this.canTime) return "this browser does not let pages read the graphics card's clock (timestamp-query)";
+    if (!this.onStageTimes) return "not asked for";
+    return this.stageRejected ? `${this.stageRejected} readings rejected as impossible, the last: ${this.stageLastRaw}` : "no reading yet";
+  }
+  private stageArm() {
+    this.stageArmed = !!this.onStageTimes && this.canTime && !this.stageBusy;
+    if (this.stageArmed && !this.stageQs) {
+      this.stageQs = this.dev.createQuerySet({ type: "timestamp", count: 5 });
+      this.stageResolveBuf = this.dev.createBuffer({ size: 40, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      this.stageReadBuf = this.dev.createBuffer({ size: 40, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    }
+  }
+  /** The timestampWrites for a pass (spread into its descriptor), or nothing when this frame is not measured. */
+  private stageWrites(begin: number | undefined, end: number | undefined): { timestampWrites?: GPURenderPassTimestampWrites } {
+    if (!this.stageArmed || (begin === undefined && end === undefined)) return {};
+    return { timestampWrites: { querySet: this.stageQs!, ...(begin !== undefined ? { beginningOfPassWriteIndex: begin } : {}), ...(end !== undefined ? { endOfPassWriteIndex: end } : {}) } };
+  }
+  private stageResolveInto(enc: GPUCommandEncoder) {
+    if (!this.stageArmed) return;
+    enc.resolveQuerySet(this.stageQs!, 0, 5, this.stageResolveBuf!, 0);
+    enc.copyBufferToBuffer(this.stageResolveBuf!, 0, this.stageReadBuf!, 0, 40);
+  }
+  private stageCollect() {
+    if (!this.stageArmed) return;
+    this.stageArmed = false; this.stageBusy = true;
+    const read = this.stageReadBuf!, sink = this.onStageTimes;
+    read.mapAsync(GPUMapMode.READ).then(() => {
+      const t = new BigUint64Array(read.getMappedRange().slice(0));
+      read.unmap();
+      const ms = (a: number, b: number) => Number(t[b] - t[a]) / 1e6;
+      // Apple's card begins a pass before the one it depends on has ended (the composite's start comes before the march's
+      // end, 2026-10-13: 0.1 ms after the march started), so each stage is measured to its END: the composite as the time
+      // from the march's end to its own end.
+      const r = { surfacesMs: ms(0, 1), marchMs: ms(1, 2), gapMs: Math.max(0, ms(2, 3)), compositeMs: Math.max(0, Number(t[4] - (t[3] > t[2] ? t[3] : t[2])) / 1e6), totalMs: ms(0, 4) };
+      if (sink && Object.values(r).every((v) => Number.isFinite(v) && v >= 0 && v < 10000)) sink(r);
+      else { this.stageRejected++; this.stageLastRaw = `${Array.from(t, (v) => String(v)).join(" ")} (the card's ticks: surfaces start, march start, march end, composite start, composite end)`; }
+    }).catch(() => { /* a lost device, or the buffer still mapped: this frame is not measured */ }).finally(() => { this.stageBusy = false; });
   }
 
   /** Encode trace (producer) + resolve (reconstructor), output to `outView`. The ray march may be SUBMITTED in strips on the way (traceInStrips), so the
@@ -1026,8 +1085,9 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   private encodeFrame(enc: GPUCommandEncoder, outView: GPUTextureView): GPUCommandEncoder {
     const mb = this.meshPass(enc, this.traceW, this.traceH);
     enc = this.traceInStrips(enc, mb, this.traceView!, this.traceW, this.traceH);
-    const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const rp = enc.beginRenderPass({ ...this.stageWrites(3, 4), colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     rp.setPipeline(this.resolvePipeline); rp.setBindGroup(0, this.resolveBind!); rp.draw(3); rp.end();
+    this.stageResolveInto(enc);
     return enc;
   }
 
@@ -1056,7 +1116,8 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     const t0 = performance.now();
     for (let b = 0; b * rows < H; b++) {
       const y = b * rows, h = Math.min(rows, H - y);
-      const tp = enc.beginRenderPass({ colorAttachments: [{ view: target, loadOp: b === 0 ? "clear" : "load", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+      const last = (b + 1) * rows >= H;
+      const tp = enc.beginRenderPass({ ...this.stageWrites(b === 0 ? 1 : undefined, last ? 2 : undefined), colorAttachments: [{ view: target, loadOp: b === 0 ? "clear" : "load", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
       tp.setViewport(0, 0, W, H, 0, 1);   // the target may be larger than the frame (ensureLow)
       tp.setPipeline(this.pipeline); tp.setBindGroup(0, this.bind); tp.setBindGroup(1, mb);
       if (n > 1) tp.setScissorRect(0, y, W, h);
@@ -2045,8 +2106,10 @@ ${pickDispatch}
     this.ensureTrace(width, height);
     this.flush();
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, bgUniform(this.bgTop, this.bgBottom, 1, height));   // gradient for the resolve composite
+    this.stageArm();
     const enc = this.encodeFrame(this.dev.createCommandEncoder(), view);
     this.dev.queue.submit([enc.finish()]);
+    this.stageCollect();
   }
 
   /** Exact GPU time of the ray-march pass (median ms over `iters`), via timestamp-query.

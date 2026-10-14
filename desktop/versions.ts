@@ -17,6 +17,22 @@ export function albulaVersion(): string {
   try { return Deno.readTextFileSync(join(repo, "..", "..", "..", "VERSION")).trim() || "unversioned"; } catch { return "unversioned"; }
 }
 
+/** Deno's version, pinned in DENO_VERSION: the application IS this Deno (its server compiled with it, its SQLite the one
+ *  inside it). Every builder and the test suite check it, not only the two Mac scripts (critic, 2026-10-13, finding 3). */
+export function denoWanted(): string {
+  return Deno.readTextFileSync(join(repo, "DENO_VERSION")).trim();
+}
+/** Stop a build or run under another Deno, saying how to get the right one or move the pin. */
+export function requirePinnedDeno(): void {
+  const want = denoWanted(), have = Deno.version.deno;
+  if (have === want) return;
+  console.error(`This needs Deno ${want} (Contents/src/SlicerLive/DENO_VERSION); this is Deno ${have}.\n` +
+    `To move to ${have}: change DENO_VERSION to ${have}, then run the Rebuild (it runs every test first).\n` +
+    `To install ${want} instead: Deno's own installer takes a version (deno.com/install); Homebrew keeps only its newest Deno ` +
+    `("brew pin deno" stops it moving).`);
+  Deno.exit(1);
+}
+
 /** The webview version deno.jsonc pins ("0.9.0"). */
 export function webviewVersion(): string {
   const text = Deno.readTextFileSync(join(repo, "deno.jsonc"));

@@ -17,7 +17,7 @@
 // disk churn -- and it never has to hold a 933 MB buffer to answer a question about 64 bytes.
 import { provenancePathFor, recordProvenanceEdge } from "./db-index.ts";
 
-const SQLITE = "/usr/bin/sqlite3";
+import { sqliteScript } from "./sqlite.ts";
 /** Explicit-VR value representations whose length is 4 bytes after 2 reserved, not 2. */
 const LONG_VR = new Set(["OB", "OW", "OF", "OD", "OL", "OV", "SQ", "UT", "UN", "OB "]);
 const TAG_REF_SERIES = 0x00081115;
@@ -184,18 +184,8 @@ export async function referencedSeriesOfFile(path: string): Promise<string | nul
 }
 
 async function sqlite(dbPath: string, sql: string): Promise<string> {
-  const p = new Deno.Command(SQLITE, {
-    args: ["-readonly", dbPath],
-    stdin: "piped",
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
-  const w = p.stdin.getWriter();
-  await w.write(new TextEncoder().encode(sql));
-  await w.close();
-  const { code, stdout, stderr } = await p.output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr).trim() || `sqlite3 exited ${code}`);
-  return new TextDecoder().decode(stdout);
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  return await sqliteScript(dbPath, ".timeout 5000\n" + sql, true);
 }
 
 export interface BackfillResult {

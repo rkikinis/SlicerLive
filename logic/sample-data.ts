@@ -7,11 +7,12 @@ export interface SampleDataset { name: string; title: string; fileName: string; 
 export const TESTING_DATA_URL = "https://github.com/Slicer/SlicerTestingData/releases/download/";
 
 export const SAMPLE_DATA: SampleDataset[] = [
-  { name: "MRHead", title: "MRHead", fileName: "MR-head.nrrd", sha256: "cc211f0dfd9a05ca3841ce1141b292898b2dd2d3f08286affadf823a7e58df93", kind: "volume", modality: "MR", mb: 8 },
-  { name: "CTChest", title: "CTChest", fileName: "CT-chest.nrrd", sha256: "4507b664690840abb6cb9af2d919377ffc4ef75b167cb6fd0f747befdb12e38e", kind: "volume", modality: "CT", mb: 33 },
-  { name: "CTACardio", title: "CTACardio", fileName: "CTA-cardio.nrrd", sha256: "3b0d4eb1a7d8ebb0c5a89cc0504640f76a030b4e869e33ff34c564c3d3b88ad2", kind: "volume", modality: "CT", mb: 25 },
-  { name: "CTAAbdomenPanoramix", title: "CTA abdomen (Panoramix)", fileName: "Panoramix-cropped.nrrd", sha256: "146af87511520c500a3706b7b2bfb545f40d5d04dd180be3a7a2c6940e447433", kind: "volume", modality: "CT", mb: 48 },
-  { name: "DTIBrain", title: "DTIBrain", fileName: "DTI-Brain.nrrd", sha256: "5c78d00c86ae8d968caa7a49b870ef8e1c04525b1abc53845751d8bce1f0b91a", kind: "volume", modality: "DTI", mb: 20 },
+  { name: "MRHead", title: "MR head", fileName: "MR-head.nrrd", sha256: "cc211f0dfd9a05ca3841ce1141b292898b2dd2d3f08286affadf823a7e58df93", kind: "volume", modality: "MR", mb: 8 },
+  { name: "CTChest", title: "CT chest", fileName: "CT-chest.nrrd", sha256: "4507b664690840abb6cb9af2d919377ffc4ef75b167cb6fd0f747befdb12e38e", kind: "volume", modality: "CT", mb: 33 },
+  { name: "CTACardio", title: "CT angiogram of the heart", fileName: "CTA-cardio.nrrd", sha256: "3b0d4eb1a7d8ebb0c5a89cc0504640f76a030b4e869e33ff34c564c3d3b88ad2", kind: "volume", modality: "CT", mb: 25 },
+  { name: "CTAAbdomenPanoramix", title: "CT angiogram of the abdomen", fileName: "Panoramix-cropped.nrrd", sha256: "146af87511520c500a3706b7b2bfb545f40d5d04dd180be3a7a2c6940e447433", kind: "volume", modality: "CT", mb: 48 },
+  // DTIBrain (Slicer's DTI-Brain.nrrd) is left out: it is a tensor volume (4-D, nine values a voxel), which Albula's
+  // reader refuses, so the button could only fail (critic 2026-10-13, texts and docs, finding 4).
 ];
 
 /** GitHub release assets carry no CORS headers, so a browser page cannot fetch them; the same files (same

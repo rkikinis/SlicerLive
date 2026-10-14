@@ -27,7 +27,7 @@ export const LOOKS: { name: LookName; tip: string }[] = [
   // surface models where Generate Surface Models made them (critic, 2026-09-24, finding 10).
   { name: "Surfaces", tip: "Every visible segmentation opaque, no volume rendering: drawn solid from its labels, or as surface models where you generated them. The default; puts back what another look changed." },
   { name: "Glass over bone", tip: "Every visible segmentation at half opacity over a volume rendering of its volume (CT-Bone on a CT; the data window otherwise): the colored anatomy shows through the glass." },
-  { name: "Vessels in context", tip: "For every vessel network in the view: the organ it runs through goes see-through, the vessels stay opaque, and the rib cage in front is hidden. Ron's preferred first view of a whole-body case with lung and liver vessels." },
+  { name: "Vessels in context", tip: "For every vessel network in the view: the organ it runs through goes see-through, the vessels stay opaque, and the rib cage is hidden. A good first view of a whole-body case with lung and liver vessels." },
 ];
 
 type Obj = Record<string, unknown>;

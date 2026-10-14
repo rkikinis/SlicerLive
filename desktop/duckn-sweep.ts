@@ -27,6 +27,8 @@ import { computeCopyCode } from "./make-copy-code.ts";
 import { copyStatus } from "./duckn-copy-check.ts";
 import { writeDucknCopy } from "./duckn-copy.ts";
 
+import { sqliteScript } from "./sqlite.ts";
+import { join } from "jsr:@std/path@1";
 /** Not images: never read for a copy. Anything else is tried, and a refusal is recorded. */
 const NOT_IMAGES = new Set(["SEG", "SR", "PR", "KO", "RTSTRUCT", "RTPLAN", "RTDOSE", "RTRECORD", "REG", "DOC", "PLAN", "AU", "ECG"]);
 
@@ -62,10 +64,8 @@ export function outcomeOf(msg: string): "refused" | "unreadable" | "failed" {
 }
 
 async function listSeries(dbPath: string): Promise<{ uid: string; modality: string }[]> {
-  const p = new Deno.Command("/usr/bin/sqlite3", { args: ["-readonly", "-json", `${dbPath}/ctkDICOM.sql`, "SELECT SeriesInstanceUID AS uid, COALESCE(Modality,'') AS modality FROM Series ORDER BY SeriesInstanceUID;"], stdout: "piped", stderr: "piped" });
-  const out = await p.output();
-  if (!out.success) throw new Error(new TextDecoder().decode(out.stderr));
-  const text = new TextDecoder().decode(out.stdout).trim();
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  const text = (await sqliteScript(join(dbPath, "ctkDICOM.sql"), ".timeout 5000\n.mode json\nSELECT SeriesInstanceUID AS uid, COALESCE(Modality,'') AS modality FROM Series ORDER BY SeriesInstanceUID;", true)).trim();
   return text ? JSON.parse(text) : [];
 }
 

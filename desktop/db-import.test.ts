@@ -1,6 +1,8 @@
 // A new database, its description, and adding DICOM files from disk to it (desktop/db-create.ts, db-import.ts).
 //
 //   deno test -A --no-check desktop/db-import.test.ts
+import { DatabaseSync } from "node:sqlite";
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import dcmjs from "../logic/dcmjs.ts";
 import { setDcmjs } from "../logic/readers/dicom-series.ts";
@@ -16,10 +18,9 @@ const made: string[] = [];
 globalThis.addEventListener("unload", () => { for (const d of made) try { Deno.removeSync(d, { recursive: true }); } catch { /* gone */ } });
 const tmp = async (prefix: string) => { const d = await Deno.makeTempDir({ prefix }); made.push(d); return d; };
 
+// Albula's own SQLite, not the sqlite3 program: the suite runs on Windows too (critic, 2026-10-13, finding 9).
 async function sql(db: string, text: string): Promise<string> {
-  const { stdout, code, stderr } = await new Deno.Command("/usr/bin/sqlite3", { args: ["-readonly", db, text] }).output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-  return new TextDecoder().decode(stdout).trim();
+  return runScript(db, text, { readonly: true }).trim();
 }
 
 Deno.test("md5 agrees with macOS's md5 on DICOM identifiers and edge lengths", async () => {
@@ -124,7 +125,7 @@ async function seriesFolder(extra: Record<string, unknown>, n = 3) {
 }
 async function freshDb() { const dir = `${await tmp("albula-db-")}/db`; await createDatabase(dir, { name: "Test" }); return dir; }
 
-Deno.test("finding 1: a series that fails to index takes back only the copies THIS import made", async () => {
+Deno.test("finding 1: a busy index refuses the import before anything is copied; another import's file stays", async () => {
   const dir = await freshDb();
   const { sr, files } = await seriesFolder({});
   // Another import's copy, already at its place (as two imports of the same disc leave it).
@@ -132,14 +133,42 @@ Deno.test("finding 1: a series that fails to index takes back only the copies TH
   const theirs = `${dir}/${ctkInstancePath(sr.studyInstanceUID, sr.seriesInstanceUID, sop0)}`;
   await Deno.mkdir(theirs.slice(0, theirs.lastIndexOf("/")), { recursive: true });
   await Deno.writeFile(theirs, new Uint8Array(sr.instances[0]));
-  await Deno.writeTextFile(`${dir}/ctkDICOM.sql-journal`, "");   // another program mid-write: the index refuses
-  const r = await importFiles(dir, files);
-  await Deno.remove(`${dir}/ctkDICOM.sql-journal`);
-  assertEquals(r.series.length, 0);
-  assertEquals(r.failed.length, 1);
+  // Another program in the middle of a write: it holds the write lock and its journal lies beside the index. Since
+  // 2026-10-13 a busy index is refused BEFORE anything is copied, so nothing of this import is there to take back; the
+  // take-back after a later failure has its own test below.
+  const writer = new DatabaseSync(`${dir}/ctkDICOM.sql`);
+  writer.exec("BEGIN IMMEDIATE; CREATE TABLE another_programs_work (x);");
+  let refused = "";
+  try { await importFiles(dir, files); } catch (e) { refused = (e as Error).message; }
+  writer.exec("ROLLBACK"); writer.close();
+  assert(/open by another program/.test(refused), refused);
   assert(await Deno.stat(theirs).then(() => true, () => false), "the other import's file is still there");
   const left = (await filesUnder(`${dir}/dicom`)).files;
-  assertEquals(left, [theirs], "this import's own copies were taken back");
+  assertEquals(left, [theirs], "nothing of this import was left behind");
+});
+
+// THE TAKE-BACK (db-import.ts, step 4): when the index refuses AFTER the files were copied -- here another program
+// starts a write between the check and the indexing -- this import's copies are removed and another import's file is
+// not (critic, 2026-10-13, finding 7: the path deletes files and had lost its test).
+Deno.test("finding 1, later: the index refuses after the copy; this import's copies are taken back, another's stay", async () => {
+  const dir = await freshDb();
+  const { sr, files } = await seriesFolder({});
+  const sop0 = (await import("../logic/readers/dicom-head.ts")).readDicomHead(new Uint8Array(sr.instances[0]).buffer).get("00080018")!;
+  const theirs = `${dir}/${ctkInstancePath(sr.studyInstanceUID, sr.seriesInstanceUID, sop0)}`;
+  await Deno.mkdir(theirs.slice(0, theirs.lastIndexOf("/")), { recursive: true });
+  await Deno.writeFile(theirs, new Uint8Array(sr.instances[0]));
+  let writer: DatabaseSync | undefined;
+  const r = await importFiles(dir, files, {
+    onProgress: (p) => {
+      if (p.phase === "adding" && !writer) { writer = new DatabaseSync(`${dir}/ctkDICOM.sql`); writer.exec("BEGIN IMMEDIATE; CREATE TABLE another_programs_work (x);"); }
+    },
+  });
+  writer?.exec("ROLLBACK"); writer?.close();
+  assert(writer, "the other program started its write");
+  assertEquals(r.series.length, 0, "nothing indexed");
+  assertEquals(r.failed.length, 1, "the series is reported as failed");
+  assert(/open by another program/.test(r.failed[0].error), r.failed[0].error);
+  assertEquals((await filesUnder(`${dir}/dicom`)).files, [theirs], "this import's copies are gone; the other import's file stays");
 });
 
 Deno.test("finding 2: the same patient ID with different names is two patients, as in Slicer", async () => {
@@ -246,4 +275,22 @@ Deno.test("a deflated file (the form Albula saves label-map segmentations in) is
   const sop0 = (await import("../logic/readers/dicom-head.ts")).readDicomHead(new Uint8Array(sr.instances[0]).buffer).get("00080018")!;
   const stored = await Deno.readFile(`${db}/${ctkInstancePath(sr.studyInstanceUID, sr.seriesInstanceUID, sop0)}`).catch(() => undefined);
   assert(stored && new TextDecoder("latin1").decode(stored.subarray(0, 600)).includes(DEFLATED_EXPLICIT_VR_LE), "copied as it is, still deflated");
+});
+
+// A WRITER THE BUSY CHECK CANNOT SEE (it holds the write lock but has written nothing yet; WAL and EXCLUSIVE mode are
+// the same to the check): the indexing meets the lock, waits once, and stops there -- not five seconds for every series
+// (critic 2026-10-13, SQLite round 4, finding 2).
+Deno.test("round 4, 2: an index another program holds unseen stops the batch at the first series, with the plain reason", async () => {
+  const dir = await freshDb();
+  const db = `${dir}/ctkDICOM.sql`;
+  const code = `import { DatabaseSync } from "node:sqlite"; const d = new DatabaseSync(${JSON.stringify(db)}); d.exec("BEGIN IMMEDIATE"); console.log("ready"); const t = Date.now() + 6500; while (Date.now() < t) {} d.exec("ROLLBACK");`;
+  const child = new Deno.Command(Deno.execPath(), { args: ["eval", code], stdout: "piped" }).spawn();
+  const reader = child.stdout.getReader(); await reader.read(); reader.releaseLock();
+  const one = (n: number) => ({ seriesUID: `1.2.3.${n}`, studyUID: "1.2.3", files: [{ file: `dicom/x/${n}.dcm`, sop: `1.2.3.${n}.1` }], patient: { name: "A^B", id: "P" }, study: {}, series: { modality: "CT" } });
+  const t0 = performance.now();
+  const r = await (await import("./db-index.ts")).indexImportedSeries(dir, [one(1), one(2), one(3)]);
+  const took = performance.now() - t0;
+  await child.status; await child.stdout.cancel().catch(() => {});
+  assertEquals(r.results.filter((x) => /open by another program/.test(x.error ?? "")).length, 3);
+  assert(took < 8000, `took ${took.toFixed(0)} ms`);
 });

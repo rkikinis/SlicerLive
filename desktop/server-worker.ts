@@ -6,6 +6,7 @@ import { serveDir } from "jsr:@std/http@1/file-server";
 import { handleSettingsRequest } from "./settings-file.ts";
 import { handleHaversackRequest, handleOpenRequest } from "./haversack-proxy.ts";
 import { handleDbRequest } from "./db-serve.ts";
+import { handleHeadsetRequest } from "./headset.ts";
 import { handleLogRequest, startSessionLog } from "./session-log.ts";
 import { handleWindowRequest } from "./window-frame.ts";
 import { handlePictureRequest } from "./pictures.ts";
@@ -94,6 +95,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
         //   /_picture/*   a PNG of the 3D view the page rendered, saved where Ron's downloads go
         //   /_window      where the native window is and how big, so a Dock start puts it back
         //   /_models/*    trained models the page runs itself (nnLive), fetched once and kept (model-store.ts)
+        //   /_headset/*   VR / AR glasses: their head tracking and 3D mode (headset.ts)
         async (req) =>
           refuseForeign(req, listening) ??
             (await handleSettingsRequest(req, root)) ??
@@ -105,6 +107,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             (await handleWindowRequest(req, windowFile)) ??
             (await handlePictureRequest(req, root)) ??
             (await handleModelRequest(req)) ??
+            (await handleHeadsetRequest(req)) ??
             await serveCode(req, root),
       );
       return;

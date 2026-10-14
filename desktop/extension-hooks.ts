@@ -5,9 +5,15 @@
 // ALBULA_EXTENSIONS=<path to a list> points elsewhere; ALBULA_EXTENSIONS=none loads nothing.
 // The page loads the same hooks through its generated entry (the rebuild).
 // No jsr imports: the copy writer imports this file, and its fingerprint covers only local files (make-copy-code.ts).
-const dirname = (p: string) => p.slice(0, p.lastIndexOf("/"));
+const dirname = (p: string) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
 const join = (...p: string[]) => p.join("/").replace(/\/+/g, "/");
-export const DEFAULT_LIST = new URL("../../../extensions/extensions.json", import.meta.url).pathname;
+/** A file URL as a path: percent-decoded (a folder named "My Albula" is not "My%20Albula" -- critic 2026-10-13
+ *  cross-platform, B4: no extension hooks, silently), and "C:\…" on Windows rather than "/C:/…". */
+export function fileUrlToPath(u: URL): string {
+  const p = decodeURIComponent(u.pathname);
+  return /^\/[A-Za-z]:/.test(p) ? p.slice(1).replace(/\//g, "\\") : p;
+}
+export const DEFAULT_LIST = fileUrlToPath(new URL("../../../extensions/extensions.json", import.meta.url));
 
 export interface LoadedHooks { list: string; loaded: string[] }
 

@@ -15,7 +15,7 @@ export interface ImportResult {
 }
 interface Progress { phase: string; files: number; read: number; dicom: number; series: number; seriesDone: number }
 
-async function follow(job: string, onStatus: (s: string) => void, what: string): Promise<ImportResult> {
+export async function followImport(job: string, onStatus: (s: string) => void, what: string): Promise<ImportResult> {
   for (;;) {
     await new Promise((r) => setTimeout(r, 400));
     const j = await fetch(`/_db/_import/${job}`, { cache: "no-store" }).then((r) => r.json()) as { progress: Progress; result?: ImportResult; error?: string };
@@ -32,7 +32,7 @@ export async function addFolderToDatabase(dbId: string, token: string, what: str
   const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }) });
   const j = await r.json() as { job?: string; error?: string };
   if (!j.job) throw new Error(j.error ?? "the server did not start the import");
-  return follow(j.job, onStatus, what);
+  return followImport(j.job, onStatus, what);
 }
 
 /** Files the page holds: uploaded (four at a time), then added; the server leaves out what is not DICOM. */
@@ -52,7 +52,7 @@ export async function addFilesToDatabase(dbId: string, files: File[], what: stri
   const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ upload: job }) });
   const j = await r.json() as { job?: string; error?: string };
   if (!j.job) throw new Error(j.error ?? "the server did not start the import");
-  return follow(j.job, onStatus, what);
+  return followImport(j.job, onStatus, what);
 }
 
 /** The files of a chosen folder, for viewing without adding (the server serves them read only). */

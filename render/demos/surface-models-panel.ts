@@ -74,7 +74,7 @@ export function registerSurfaceModelsPanel(shell: AppShell, opts: { live: LiveSc
       const triangles = sts.reduce((n, st) => n + (st?.triangles ?? 0), 0);
       const mb = sts.reduce((n, st) => n + (st?.mb ?? 0), 0);
       const name = esc(u.name) + (u.phases ? ` <span class="sl-hint">(${u.phases} phases)</span>` : "");
-      const gen = (label: string) => `<button class="sl-sm-gen" data-key="${esc(u.key)}" title="Make triangle surface models of every structure${u.phases ? ", on every phase" : ""}: loaded from the DICOM database if they were saved before, else built — about 15 to 20 s on the processor for a whole-body case, about 2 s with Settings › Surfaces › Build surfaces on the graphics card. They are then offered in Scene › In 3D › Surfaces, and Save to DICOM writes them with the segmentation.">${label}</button>`;
+      const gen = (label: string) => `<button class="sl-sm-gen" data-key="${esc(u.key)}" title="Make triangle surface models of every structure${u.phases ? ", on every phase" : ""}, for a 3D print, Slicer, a headset or a robot. They are then offered in Scene › In 3D › Surfaces, and Save to DICOM writes them with the segmentation.">${label}</button>`;
       const rm = `<button class="sl-sm-rm" data-key="${esc(u.key)}" title="Drop these surface models: no longer drawn or held; the segmentation is drawn solid again">Remove</button>`;
       let state: string, buttons: string;
       if (!on) {
@@ -111,9 +111,6 @@ export function registerSurfaceModelsPanel(shell: AppShell, opts: { live: LiveSc
     }).join("");
     root.innerHTML = `
       <h2>Generate Surface Models</h2>
-      <p class="sl-hint">Albula draws segmentations without surface models: Scene › In 3D › Solid shows each
-        structure solid, straight from its labels. Make surface models here only when you need triangles — a
-        3D print, Slicer, the DICOM surfaces series, a headset or a robot.</p>
       ${list.length ? rows : `<p class="sl-hint">No segmentation in the scene.</p>`}
       ${list.some((u) => u.ids.some((id) => g().__surfaceState?.(id)?.on)) ? `<p class="sl-hint">To see them: Scene › In 3D › Surfaces, under the volume.</p>` : ""}`;
     const unitOf = (b: HTMLButtonElement) => list.find((u) => u.key === b.dataset.key);
@@ -143,7 +140,8 @@ export function registerSurfaceModelsPanel(shell: AppShell, opts: { live: LiveSc
     help: `<p>Segmentations are drawn in 3D from their labels (Scene › In 3D › Solid); no surface models are
       made, loaded or kept unless you ask for them here. Generate loads a segmentation's stored surface
       models from the DICOM database when there are any, and builds them otherwise. Once made, Scene › In 3D
-      offers Surfaces for the volume, and Save to DICOM writes them beside the segmentation. Remove drops them.</p>`,
+      offers Surfaces for the volume, and Save to DICOM writes them beside the segmentation. Remove drops them.</p>
+      <p>Make them only when you need triangles: a 3D print, Slicer, the DICOM surfaces series, a headset or a robot.</p>`,
     mount(el) { root = el; render(); },
     onShow() { render(); },
   });

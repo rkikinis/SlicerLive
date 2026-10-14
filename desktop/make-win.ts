@@ -9,10 +9,11 @@
 // Needs the Evergreen WebView2 runtime on the target (present on Windows 10/11).
 // NOTE: built but not runnable here — see README for what is unverified.
 import { dirname, join, fromFileUrl, resolve } from "jsr:@std/path@1";
-import { albulaVersion, webviewNativeFile } from "./versions.ts";
+import { albulaVersion, requirePinnedDeno, webviewNativeFile } from "./versions.ts";
 import { makeSquareLogo, resizeSet, writeIco } from "./icon.ts";
 
 // Both from where they are decided (desktop/versions.ts): the workspace's /VERSION, and deno.jsonc's webview pin.
+requirePinnedDeno();   // the compiled server is this Deno
 const VERSION = albulaVersion();
 
 const here = dirname(fromFileUrl(import.meta.url));
@@ -71,6 +72,8 @@ await run(Deno.execPath(), [
   "--no-terminal", // GUI subsystem: no console window beside the app
   ...(withIcon ? ["--icon", ico] : []),
   "--include", join(here, "server-worker.ts"),
+  "--include", join(here, "sqlite-worker.ts"),   // the SQLite threads (sqlite.ts)
+  "--include", join(here, "headset-pose-worker.ts"),   // the glasses' pose callback (headset-viture.ts)
   "-o", join(folder, "SlicerLive.exe"),
   join(here, "main.ts"),
 ]);
@@ -82,6 +85,8 @@ await run(Deno.execPath(), [
   "compile", "-A", "--unstable-ffi",
   "--target", "x86_64-pc-windows-msvc",
   "--include", join(here, "server-worker.ts"),
+  "--include", join(here, "sqlite-worker.ts"),   // the SQLite threads (sqlite.ts)
+  "--include", join(here, "headset-pose-worker.ts"),   // the glasses' pose callback (headset-viture.ts)
   "-o", join(folder, "SlicerLive-console.exe"),
   join(here, "main.ts"),
 ]);

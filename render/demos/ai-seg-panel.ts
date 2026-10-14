@@ -373,29 +373,18 @@ export function registerAiSegPanel(
     h.textContent = "AI Segmentations";
     h.title = serverNote;
     root.append(h);
-    if (startCommand) {
-      // ONE CLICK, NOT A COMMAND TO COPY. Ron, 2026-09-15, after a reboot: "haversack seems to be
-      // down." The application starts it here (desktop/haversack-proxy.ts _start) and waits for
-      // the first health answer -- a minute the first time, while uvx builds the environment; a few
-      // seconds after that. The command stays visible for anyone who would rather run it themselves.
-      const p1 = document.createElement("p");
-      p1.className = "sl-hint";
-      p1.textContent = starting ? startingNote : "The application can start one for you; it runs while the application does.";
-      const acts = shell.actions(root);
-      acts.innerHTML = `<button class="sl-primary sl-ai-start"${starting ? " disabled" : ""}>${starting ? "Starting…" : "Start the segmentation server"}</button>`;
-      const pre = document.createElement("pre");
-      pre.className = "sl-ai-cmd";
-      pre.title = "Or start it yourself, in a terminal, with this";
-      pre.textContent = startCommand;
-      root.append(p1, acts, pre);
-      acts.querySelector<HTMLButtonElement>(".sl-ai-start")?.addEventListener("click", () => void startServer());
-    }
+    // ONE CLICK, NOT A COMMAND TO COPY (Ron, 2026-09-15, after a reboot: "haversack seems to be down"). The application
+    // starts the server (desktop/haversack-proxy.ts _start) and waits for its first answer -- a minute the first time,
+    // while uvx builds the environment; a few seconds after that. The button stands where Segment stands, in the Segment
+    // box, until the server runs: one yellow, not two (Ron, 2026-10-14, the module review's proposal 3: "yes"). The command,
+    // for anyone who would rather run it themselves, is the button's tooltip.
 
     // ---- Segment: everything needed to start a run ----
     const seg = shell.section(root, "Segment", {
       open: true,
       band: "yellow",
-      note: catalog.length ? `${catalog.filter((t) => t.installed === true).length} of ${catalog.length} ready` : "",
+      note: startCommand ? (starting ? "starting the segmentation server…" : "the segmentation server is not running")
+        : catalog.length ? `${catalog.filter((t) => t.installed === true).length} of ${catalog.length} ready` : "",
     });
     const inputCell = shell.row(seg, "Input", { value: vols.length ? String(vols.length) : "0" });
     inputCell.innerHTML = `<select class="sl-ai-input" title="The volume the network runs on">${
@@ -417,7 +406,7 @@ export function registerAiSegPanel(
         const p = document.createElement("p");
         p.className = "sl-hint";
         p.textContent = `Not in the DICOM database: the result can be made, not saved there.`;
-        p.title = `"${chosen.name}" is in the scene only, so a result computed on it cannot be saved to the DICOM database — it would have nothing to point at. Put the volume there first: Crop volume → Put it in the DICOM database. The run itself works either way.`;
+        p.title = `"${chosen.name}" is in the scene only, so a result computed on it cannot be saved to the DICOM database — it would have nothing to point at. Put the volume there first: Crop Volume › Result › Save to DICOM. The run itself works either way.`;
         seg.appendChild(p);
       }
     }
@@ -588,7 +577,10 @@ export function registerAiSegPanel(
     // THE MODEL FILES FIRST, in the same row: with them missing, Segment is off and the download is
     // the one thing to press (critic 2026-09-22, 2.6: the run failed after an upload, with a
     // terminal command under the button).
-    acts.innerHTML = (needsFiles ? `<button class="sl-ai-fetch"${fetching ? " disabled" : ""} title="Get this network's model files from the project's release. If it fails, the server says why in the status line.">${fetching ? "Downloading…" : "Download the model files"}</button>` : "") +
+    if (startCommand) {
+      acts.innerHTML = `<button class="sl-primary sl-ai-start"${starting ? " disabled" : ""} title="${escapeHtml(`Starts the segmentation server; it runs while the application does. ${starting ? startingNote : ""} Or start it yourself, in a terminal: ${startCommand}`)}">${starting ? "Starting…" : "Start the segmentation server"}</button>`;
+      acts.querySelector<HTMLButtonElement>(".sl-ai-start")?.addEventListener("click", () => void startServer());
+    } else acts.innerHTML = (needsFiles ? `<button class="sl-ai-fetch"${fetching ? " disabled" : ""} title="Get this network's model files from the project's release. If it fails, the server says why in the status line.">${fetching ? "Downloading…" : "Download the model files"}</button>` : "") +
       `<button class="sl-primary sl-ai-run"${!vols.length || !chosenTask || mine || needsFiles ? " disabled" : ""} title="${needsFiles ? "Download the model files first" : mine ? "This network is running on this volume" : "Run the chosen network on the chosen volume. The result lands in the scene and is offered for saving."}">${
       mine ? (mine.state === "running" ? "Running…" : "Queued…") : isBusy() ? "Add to the queue" : "Segment"}</button>`;
     if (progress) {
@@ -804,7 +796,12 @@ export function registerAiSegPanel(
         enqueue(cp.task, input, cp);
       });
       row.querySelector<HTMLButtonElement>(".sl-ai-cp-discard")?.addEventListener("click", async (e) => {
-        void runAction(e.currentTarget as HTMLButtonElement, async () => {
+        const btn = e.currentTarget as HTMLButtonElement;
+        // A FINAL DELETE ASKS FIRST (PALETTE.md; Ron, 2026-10-14): if the result was never saved, this copy is the last one.
+        const ok = await shell.confirm({ title: "Delete this temporary copy?", ok: "Delete", cancel: "Keep", destructive: true,
+          body: "<p>If you saved the result to the DICOM database, it stays there. If you did not, this copy is the last one, and deleting it cannot be undone.</p><p>Is this what you meant to do, or was it a click by accident?</p>" });
+        if (!ok) return;
+        void runAction(btn, async () => {
           await discardCheckpoint(cp);
           await refreshCheckpoints();
         });
@@ -1605,8 +1602,8 @@ function lastComputedMs(task: string): number | undefined {
       <p>Names and colors come from the segmenter's own terminology where it is recognized, so a
       structure arrives as <i>Liver</i> rather than as <i>liver</i>, in the color that project
       publishes. Where no color is published, a color for the anatomical system is used instead.</p>
-      <p>The result currently lands in the scene. Writing it back into the DICOM database with its
-      provenance is the next step, and creation is the only moment that provenance is free.</p>`,
+      <p>The result lands in the scene, and Save to DICOM writes it into the database, recorded as made
+      from the scan it was computed on and by which network.</p>`,
     acknowledgements: [
       `<b>haversack</b> — Michael Halle, <a href="https://github.com/mhalle/haversack">github.com/mhalle/haversack</a>.
        One command and one REST API in front of TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net,

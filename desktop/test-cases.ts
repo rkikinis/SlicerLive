@@ -16,6 +16,7 @@ import { setDicomLibrary } from "../logic/dicom-io.ts";
 import { readBidsDataset } from "../logic/import/bids.ts";
 import { importBidsSubject } from "./bids-import.ts";
 import { loadExtensionHooks } from "./extension-hooks.ts";
+import { seriesFileNames } from "./db-listing.ts";
 
 export const TEST_CASES = {
   dataset: "ds001226",
@@ -133,4 +134,81 @@ export async function getTestCases(db: string, onProgress: (p: TestCaseProgress)
   if (!p.failed.length) await Deno.writeTextFile(`${root}/${COMPLETE_MARKER}`, new Date().toISOString());
   p.phase = "done"; p.subject = ""; tick();
   return p;
+}
+
+// ---- THE DIFFUSION SAMPLE: one healthy volunteer of the same dataset ----------------------------------------------------
+//
+// Ron, 2026-10-14: "I would like to have a data set with T1 and color by orientation as a sample"; "let's go with the con03
+// case"; "DB of its own"; the button "Brain with DTI" (mockup `sample-diffusion-2026-10-14.html` in the workspace). The same
+// download and conversion as the test cases, for CON03 alone, into a database of its own, so samples never mix with a
+// patient database. Measured: the conversion 1.4 s, 133 MB in the database; the download about 51 MB.
+export const DTI_SAMPLE = {
+  subject: "CON03",
+  name: "Sample data",
+  holds: "Sample scans to try Albula on: public and anonymous",
+  source: "OpenNeuro ds001226 (Brain Tumor Connectomics; Aerts and Marinazzo), CC0: CON03, a healthy volunteer -- a T1 and a diffusion MRI with its reversed-phase pair",
+  approxBytes: 54.3e6,             // 54,225,430 bytes measured (critic 2026-10-14, 11)
+};
+
+/** A failure said in one plain sentence for the person; the detail goes to the session log (critic 2026-10-14, 12). */
+export class SampleError extends Error {
+  constructor(readonly plain: string, readonly detail: string) { super(`${plain} (${detail})`); }
+}
+
+export interface DtiSampleProgress { phase: "starting" | "downloading" | "converting" | "done"; bytes: number }
+/** What the sample put in the database: its series by role (T1w, dwi-AP, dwi-PA), for the page to open. */
+export interface DtiSampleResult { series: { role: string; seriesInstanceUID: string }[] }
+
+export async function getDtiSample(db: string, onProgress: (p: DtiSampleProgress) => void): Promise<DtiSampleResult> {
+  setDicomLibrary(dcmjs);
+  await loadExtensionHooks();          // the diffusion extension reads dwi/ (logic/import/bids-kinds.ts)
+  const root = `${db}/${DOWNLOAD_FOLDER}/${TEST_CASES.dataset}`;
+  const s = DTI_SAMPLE.subject;
+  const p: DtiSampleProgress = { phase: "starting", bytes: 0 };
+  const tick = () => onProgress({ ...p });
+  // PRESSED AGAIN: no download when the series it put in the database are still there (the mockup: "Pressed again
+  // later: no download; it opens from the database"). The record is what the conversion reported last time.
+  const record = `${root}/.sample-${s}.json`;
+  try {
+    const was = JSON.parse(await Deno.readTextFile(record)) as DtiSampleResult;
+    // Its files there, not only its index rows (critic 2026-10-14, 14): the first file of each series is looked at.
+    const there = await Promise.all(was.series.map((x) => seriesFileNames(db, x.seriesInstanceUID)
+      .then(async (f) => f.length > 0 && await Deno.stat(f[0].startsWith("/") ? f[0] : `${db}/${f[0]}`).then(() => true, () => false), () => false)));
+    if (was.series.length >= 3 && there.every(Boolean)) { p.phase = "done"; tick(); return was; }
+  } catch { /* no record, or not readable: fetch it */ }
+  for (const f of ["dataset_description.json", "participants.tsv", "README"]) {
+    if (!(await fetchFile(f, `${root}/${f}`, (n) => { p.bytes += n; }))) throw new Error(`OpenNeuro does not have ${f} for ${TEST_CASES.dataset}`);
+  }
+  p.phase = "downloading"; tick();
+  try {
+    for (const rel of filesOf(s)) {
+      if (!(await fetchFile(rel, `${root}/${rel}`, (n) => { p.bytes += n; if (p.bytes % (4 << 20) < n) tick(); }))) {
+        throw new SampleError("OpenNeuro does not have all of the sample's files right now; try again later", `${rel} is missing`);
+      }
+    }
+  } catch (e) {
+    // Whatever stopped the download, its files go (critic 2026-10-14, 9: no NIfTI left in the database folder).
+    await Deno.remove(`${root}/sub-${s}`, { recursive: true }).catch(() => {});
+    if (e instanceof SampleError) throw e;
+    throw new SampleError("the download from OpenNeuro stopped (is this computer online?); press again to continue", (e as Error).message);
+  }
+  p.phase = "converting"; tick();
+  try {
+    const ds = await readBidsDataset(root);
+    const r = await importBidsSubject(db, ds, s, { session: TEST_CASES.session, masks: [], maskAlgorithm: TEST_CASES.maskAlgorithm, agency: TEST_CASES.agency, agencyReason: TEST_CASES.agencyReason });
+    if (r.failed) throw new SampleError("the sample could not be converted to DICOM", r.objects.filter((o) => o.result === "refused").map((o) => `${o.role} (${o.why})`).join("; "));
+    const result: DtiSampleResult = { series: r.objects.filter((o) => o.result === "added" || o.result === "already").map((o) => ({ role: o.role, seriesInstanceUID: o.seriesInstanceUID })) };
+    // ALL THREE OR NOTHING (critic 2026-10-14, 8): without the diffusion extension only the T1 converts; that is a failure,
+    // said so, and no record is written (else every press would download again and "succeed" with the T1 alone).
+    const roles = new Set(result.series.map((x) => x.role));
+    if (!["T1w", "dwi-AP", "dwi-PA"].every((x) => roles.has(x))) {
+      throw new SampleError("the diffusion part of the sample could not be read (the diffusion extension is not loaded here)", `converted: ${[...roles].join(", ") || "nothing"}`);
+    }
+    await Deno.writeTextFile(record, JSON.stringify(result));
+    p.phase = "done"; tick();
+    return result;
+  } finally {
+    // The DICOM copy is the record: the downloaded files go either way (no orphans in the database folder).
+    await Deno.remove(`${root}/sub-${s}`, { recursive: true }).catch(() => {});
+  }
 }

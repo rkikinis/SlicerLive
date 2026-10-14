@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert";
+import { runScript } from "./sqlite.ts";
 import { deleteScene, importScene, listScenes, packageScene, putScene, readScene } from "./scenes.ts";
 import { PROFILE_ID } from "../logic/scene/profile.ts";
 
@@ -38,8 +39,8 @@ Deno.test("the transport folder: package on one side, import on the other", asyn
   const root = await Deno.makeTempDir();
   const dbDir = `${root}/db`; await Deno.mkdir(`${dbDir}/dicom/s1`, { recursive: true }); await Deno.mkdir(`${dbDir}/dicom/s2`, { recursive: true });
   await Deno.writeTextFile(`${dbDir}/dicom/s1/a.dcm`, "AAAA"); await Deno.writeTextFile(`${dbDir}/dicom/s1/b.dcm`, "BBBBBB"); await Deno.writeTextFile(`${dbDir}/dicom/s2/c.dcm`, "CC");
-  const sql = (db: string, text: string) => new Deno.Command("sqlite3", { args: [db], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-  const run = async (db: string, text: string) => { const p = sql(db, text); const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(text)); await w.close(); const o = await p.output(); assert(o.success, new TextDecoder().decode(o.stderr)); return new TextDecoder().decode(o.stdout); };
+  // Albula's own SQLite, not the sqlite3 program: the suite runs on Windows too (critic, 2026-10-13, finding 9).
+  const run = async (db: string, text: string) => runScript(db, text);
   await run(`${dbDir}/ctkDICOM.sql`, `CREATE TABLE Series (SeriesInstanceUID TEXT PRIMARY KEY); CREATE TABLE Images (SOPInstanceUID TEXT, Filename TEXT, SeriesInstanceUID TEXT);
     INSERT INTO Series VALUES ('1.2.3.4'); INSERT INTO Series VALUES ('1.2.3.5');
     INSERT INTO Images VALUES ('i1','dicom/s1/a.dcm','1.2.3.4'); INSERT INTO Images VALUES ('i2','dicom/s1/b.dcm','1.2.3.4'); INSERT INTO Images VALUES ('i3','dicom/s2/c.dcm','1.2.3.5');`);

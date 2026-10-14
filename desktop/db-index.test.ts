@@ -3,6 +3,8 @@
 // see a real one.
 //
 //   deno test -A --no-check desktop/db-index.test.ts
+import { DatabaseSync } from "node:sqlite";
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import {
   auditDatabase,
@@ -14,13 +16,8 @@ import {
   recordProvenanceEdge,
 } from "./db-index.ts";
 
-const SQLITE = "/usr/bin/sqlite3";
-const run = async (db: string, sql: string) => {
-  const p = new Deno.Command(SQLITE, { args: [db], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(sql)); await w.close();
-  const { code, stderr } = await p.output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-};
+// Albula's own SQLite, not the sqlite3 program: the suite runs on Windows too (critic, 2026-10-13, finding 9).
+const run = async (db: string, sql: string) => { runScript(db, sql); };
 
 /** A database with the four ctkDICOMDatabase tables and one study already in it. */
 async function makeDb(): Promise<string> {
@@ -115,12 +112,15 @@ Deno.test("a non-UID is refused before any SQL is built", async () => {
 Deno.test("refuses to write while another program holds the index", async () => {
   const dir = await makeDb();
   await writeDicom(`${dir}/SlicerAlbula-SEG/seg.dcm`);
-  await Deno.writeTextFile(`${dir}/ctkDICOM.sql-wal`, "");     // what an open transaction leaves behind
-  await assertRejects(
-    () => indexFileIntoDatabase(dir, "SlicerAlbula-SEG/seg.dcm", meta),
-    Error,
-    "open by another program",
-  );
+  const writer = new DatabaseSync(`${dir}/ctkDICOM.sql`);          // another program, in the middle of a write
+  writer.exec("BEGIN IMMEDIATE; CREATE TABLE another_programs_work (x);");
+  try {
+    await assertRejects(
+      () => indexFileIntoDatabase(dir, "SlicerAlbula-SEG/seg.dcm", meta),
+      Error,
+      "open by another program",
+    );
+  } finally { writer.exec("ROLLBACK"); writer.close(); }
 });
 
 // ---- provenance: what the browser indents by ----------------------------------------------------
@@ -264,8 +264,10 @@ Deno.test("it refuses while another program holds the index", async () => {
   const dir = await makeDb();
   await writeDicom(`${dir}/SlicerAlbula-SEG/seg.dcm`);
   await indexFileIntoDatabase(dir, "SlicerAlbula-SEG/seg.dcm", meta);
-  await Deno.writeTextFile(`${dir}/ctkDICOM.sql-wal`, "");
-  await assertRejects(() => deleteSeriesFromDatabase(dir, meta.seriesInstanceUID), Error, "open by another program");
+  const writer = new DatabaseSync(`${dir}/ctkDICOM.sql`);          // another program, in the middle of a write
+  writer.exec("BEGIN IMMEDIATE; CREATE TABLE another_programs_work (x);");
+  try { await assertRejects(() => deleteSeriesFromDatabase(dir, meta.seriesInstanceUID), Error, "open by another program"); }
+  finally { writer.exec("ROLLBACK"); writer.close(); }
 });
 
 // ── A WHOLE DERIVED SERIES, in one operation ────────────────────────────────────────────────────
@@ -312,10 +314,7 @@ Deno.test("a batch naming two series is refused rather than half-indexed", async
 
 /** One value out of the index, for the assertions above. */
 async function query(dir: string, sql: string): Promise<string> {
-  const p = new Deno.Command(SQLITE, { args: ["-readonly", `${dir}/ctkDICOM.sql`], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(sql)); await w.close();
-  const { stdout } = await p.output();
-  return new TextDecoder().decode(stdout).trim();
+  return runScript(`${dir}/ctkDICOM.sql`, sql, { readonly: true }).trim();
 }
 
 // TWO SAVES INDEXING AT ONCE queue behind each other and both land (critic, 2026-09-18 evening,
@@ -329,8 +328,7 @@ Deno.test("two series indexed at the same moment both land, every time", async (
     const [ra, rb] = await Promise.all([indexFilesIntoDatabase(dir, [one(a)]), indexFilesIntoDatabase(dir, [one(b)])]);
     assert(ra.indexed && rb.indexed, `round ${round}: both indexed`);
     assert(rb.audit.ok, `round ${round}: the second's audit is clean: ${JSON.stringify(rb.audit)}`);
-    const q = new Deno.Command(SQLITE, { args: ["-readonly", `${dir}/ctkDICOM.sql`, `SELECT COUNT(*) FROM Series WHERE SeriesInstanceUID IN ('1.2.3.4.${a}','1.2.3.4.${b}');`], stdout: "piped" });
-    assertEquals(new TextDecoder().decode((await q.output()).stdout).trim(), "2", `round ${round}: both rows present`);
+    assertEquals(await query(dir, `SELECT COUNT(*) FROM Series WHERE SeriesInstanceUID IN ('1.2.3.4.${a}','1.2.3.4.${b}');`), "2", `round ${round}: both rows present`);
   }
   const backups = [...Deno.readDirSync(dir)].filter((e) => e.name.startsWith("ctkDICOM.sql.backup-"));
   assertEquals(backups.length, 0, "no backup kept: every audit was clean");
@@ -342,7 +340,7 @@ Deno.test("a volume from a file gets its own patient and study when the record s
   const newStudy = { patientName: "MRHead", patientID: "MRHead", patientComments: "Loaded from MRHead.nrrd", studyDescription: "Loaded from MRHead.nrrd", studyDate: "20260920", studyTime: "193000" };
   const r = await indexFileIntoDatabase(dir, "SlicerAlbula-Volumes/a.dcm", { ...meta, sopInstanceUID: "5.5.5.1", seriesInstanceUID: "5.5.5", studyInstanceUID: "5.5", modality: "MR", newStudy });
   assert(r.indexed, r.error);
-  const q = async (sql: string) => (await new Deno.Command("sqlite3", { args: ["-readonly", `${dir}/ctkDICOM.sql`, sql], stdout: "piped" }).output()).stdout;
+  const q = async (sql: string) => new TextEncoder().encode(runScript(`${dir}/ctkDICOM.sql`, sql, { readonly: true }));
   const dec = (b: Uint8Array) => new TextDecoder().decode(b).trim();
   assertEquals(dec(await q("SELECT PatientsName, PatientID, PatientsComments, DisplayedNumberOfStudies FROM Patients WHERE PatientID='MRHead';")), "MRHead|MRHead|Loaded from MRHead.nrrd|1");
   assertEquals(dec(await q("SELECT StudyDate, StudyDescription, ModalitiesInStudy, PatientsUID = (SELECT UID FROM Patients WHERE PatientID='MRHead') FROM Studies WHERE StudyInstanceUID='5.5';")), "20260920|Loaded from MRHead.nrrd|MR|1");

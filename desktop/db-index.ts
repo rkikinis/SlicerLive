@@ -18,10 +18,11 @@
 //
 // Step 5 is Ron's own retention rule from 2026-09-03: a pre-operation backup lives until the
 // operation is verified, and verification is the trigger, not a calendar.
+import { dirname, join, resolve } from "jsr:@std/path@1";
 import { COPY_FOLDER } from "./duckn-copy-code.ts";
+import { sqliteScript, writeUnderWay } from "./sqlite.ts";
 export { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
 
-const SQLITE = "/usr/bin/sqlite3";
 
 /** Where a page's uploads wait inside a database folder until desktop/db-import.ts adds them; the audit does not count them. */
 export const IMPORT_FOLDER = "SlicerAlbula-Import";
@@ -95,23 +96,11 @@ export interface AuditResult {
 }
 
 async function sqlite(dbPath: string, sql: string, readonly = true): Promise<string> {
-  const cmd = new Deno.Command(SQLITE, {
-    args: readonly ? ["-readonly", dbPath] : [dbPath],
-    stdin: "piped",
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const p = cmd.spawn();
-  const w = p.stdin.getWriter();
-  // WAIT WHEN THE FILE IS BUSY, up to five seconds. The sqlite3 program otherwise answers "database is
-  // locked" at once, and provenance.sqlite has no writer lock of ours (the index has withIndexLock): a
-  // segmentation saved while a scene was being saved lost its parent link silently (code review, A8).
-  await w.write(new TextEncoder().encode(".timeout 5000\n" + sql));
-  await w.close();
-  const { code, stdout, stderr } = await p.output();
-  const out = new TextDecoder().decode(stdout);
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr).trim() || `sqlite3 exited ${code}`);
-  return out;
+  // WAIT WHEN THE FILE IS BUSY, up to five seconds: it otherwise answers "database is locked" at once, and
+  // provenance.sqlite has no writer lock of ours (the index has withIndexLock): a segmentation saved while a scene was
+  // being saved lost its parent link silently (code review, A8).
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  return await sqliteScript(dbPath, ".timeout 5000\n" + sql, readonly);
 }
 
 /**
@@ -132,12 +121,14 @@ export async function withIndexLock<T>(dbDir: string, fn: () => Promise<T>): Pro
   try { return await run; } finally { if (writers.get(key) === run) writers.delete(key); }
 }
 
-/** Another writer mid-transaction leaves one of these beside the index; we do not race it. */
-async function busy(dbPath: string): Promise<boolean> {
-  for (const suffix of ["-wal", "-journal"]) {
-    try { await Deno.stat(dbPath + suffix); return true; } catch { /* absent is what we want */ }
-  }
-  return false;
+/**
+ * Another program is writing the index right now: a journal in use lies beside it (`writeUnderWay`, desktop/sqlite.ts).
+ * A writer that DIED leaves one too, and SQLite puts its state back first; a journal kept between writes (PERSIST,
+ * TRUNCATE) is not "in use" (critic 2026-10-13: round 1 finding 8, round 2 finding 5). The check takes no lock (round 3,
+ * finding 4). Asked inside withIndexLock, so Albula's own write is never taken for another program's.
+ */
+export async function busy(dbPath: string): Promise<boolean> {
+  return writeUnderWay(dbPath);
 }
 
 /**
@@ -275,13 +266,18 @@ const dashedDate = (d: string | undefined) => d && /^\d{8}$/.test(d) ? `${d.slic
 export function indexImportedSeries(dbDir: string, list: ImportSeries[], onSeries?: () => void): Promise<{ results: { seriesUID: string; error?: string }[]; audit: AuditResult; backup?: string }> {
   return withIndexLock(dbDir, async () => {
     const dbPath = `${dbDir}/ctkDICOM.sql`;
-    if (await busy(dbPath)) throw new Error("the DICOM index is open by another program (a -wal/-journal file is present); close it and try again");
+    if (await busy(dbPath)) throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = `${dbPath}.backup-${stamp}`;
     await Deno.copyFile(dbPath, backup);
     const s = (v: string | undefined) => `'${String(v ?? "").replace(/'/g, "''")}'`;   // always a string, '' for none (for matching)
     const results: { seriesUID: string; error?: string }[] = [];
+    // ANOTHER PROGRAM'S LOCK STOPS THE BATCH at the first series that meets it: each series would otherwise wait the
+    // full five seconds and fail the same way -- 200 s for a 40-series disc (critic 2026-10-13, SQLite round 4, finding 2:
+    // a writer the busy check cannot see, in WAL or EXCLUSIVE mode). The rest are reported with the same reason.
+    let locked = "";
     for (const it of list) {
+      if (locked) { results.push({ seriesUID: it.seriesUID, error: locked }); onSeries?.(); continue; }
       try {
         for (const u of [it.seriesUID, it.studyUID, ...it.files.map((f) => f.sop)]) if (!UID.test(u)) throw new Error(`not a DICOM UID: ${u}`);
         for (const f of it.files) if (!insideDatabase(f.file)) throw new Error(`not a path inside the database: ${f.file}`);
@@ -289,8 +285,8 @@ export function indexImportedSeries(dbDir: string, list: ImportSeries[], onSerie
         const p = it.patient, st = it.study, se = it.series;
         const patientMatch = `PatientID=${s(p.id)} AND COALESCE(PatientsName,'')=${s(p.name)}`;
         const studyThere = (await sqlite(dbPath, `SELECT COUNT(*) FROM Studies WHERE StudyInstanceUID=${q(it.studyUID)};`)).trim() !== "0";
-        // .bail on: the sqlite3 program otherwise carries on past a failed statement to the COMMIT, and half a series
-        // would be in; stopped there, the open transaction is rolled back when it exits.
+        // One transaction: Albula's SQLite stops at the first failed statement and rolls the transaction back, so half a
+        // series is never in (".bail on" was needed by the sqlite3 program, which otherwise carried on to the COMMIT).
         const sql = `.bail on
 BEGIN IMMEDIATE;
 ${studyThere ? "" : `INSERT INTO Patients (PatientsName, PatientID, PatientsBirthDate, PatientsBirthTime, PatientsSex, PatientsAge, PatientsComments, InsertTimestamp, DisplayedPatientsName, DisplayedNumberOfStudies, DisplayedLastStudyDate, DisplayedFieldsUpdatedTimestamp)
@@ -309,7 +305,9 @@ COMMIT;
         await sqlite(dbPath, sql, false);
         results.push({ seriesUID: it.seriesUID });
       } catch (e) {
-        results.push({ seriesUID: it.seriesUID, error: `not indexed: ${(e as Error).message}` });
+        const msg = (e as Error).message;
+        if (/database is locked|database table is locked/i.test(msg)) locked = "not indexed: the DICOM index is open by another program that is writing to it; try again when it has finished";
+        results.push({ seriesUID: it.seriesUID, error: locked || `not indexed: ${msg}` });
       }
       onSeries?.();
     }
@@ -380,7 +378,7 @@ async function indexFilesLocked(
   }
   const dbPath = `${dbDir}/ctkDICOM.sql`;
   if (await busy(dbPath)) {
-    throw new Error("the DICOM index is open by another program (a -wal/-journal file is present); close it and try again");
+    throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
   }
 
   const study = (await sqlite(dbPath, `SELECT COUNT(*) FROM Studies WHERE StudyInstanceUID=${q(m.studyInstanceUID)};`)).trim();
@@ -404,8 +402,8 @@ async function indexFilesLocked(
   await Deno.copyFile(dbPath, backup);
 
   const now = new Date().toISOString().slice(0, 23);
-  // .bail on: without it the sqlite3 program carries on past a failed statement to the COMMIT (found 2026-10-01 with
-  // the import's critic round), so "one transaction, a failure leaves nothing behind" held only with it.
+  // One transaction: a failed statement stops the script and rolls it back (desktop/sqlite.ts). ".bail on" stays from
+  // the sqlite3 program, which without it carried on to the COMMIT (found 2026-10-01 with the import's critic round).
   const sql = `.bail on
 BEGIN IMMEDIATE;
 ${makeStudy}INSERT OR REPLACE INTO Series (SeriesInstanceUID, StudyInstanceUID, SeriesNumber, SeriesDate, SeriesTime,
@@ -460,7 +458,9 @@ COMMIT;
 
 /** provenance.sqlite is the database directory's SIBLING (see the _provenance route in db-serve.ts). */
 export const provenancePathFor = (dbDir: string): string =>
-  `${dbDir.replace(/\/+$/, "").replace(/\/[^/]+$/, "")}/provenance.sqlite`;
+  // With the path library, not a "/" pattern (the critic, 2026-10-13, A7: on Windows the store landed INSIDE a database
+  // written with "\" and beside it when written with "/").
+  join(dirname(resolve(dbDir)), "provenance.sqlite");
 
 /**
  * Record "this series was made from that one", creating the store if this database has never had one.
@@ -608,17 +608,17 @@ export async function setCohortMembers(path: string, name: string, add: { level:
   const n = name.trim();
   if (!n) throw new Error("a cohort needs a name");
   const ok = (m: { level: CohortLevel; uid: string }) => (m.level === "patient" || m.level === "study") && !!m.uid;
-  const sql = COHORT_SCHEMA +
+  const sql = "BEGIN IMMEDIATE;\n" + COHORT_SCHEMA +
     `INSERT OR IGNORE INTO Cohorts VALUES (${qs(n)}, ${qs(now())});\n` +
     add.filter(ok).map((m) => `INSERT OR IGNORE INTO CohortMembers VALUES (${qs(n)}, ${qs(m.level)}, ${qs(m.uid)}, ${qs(now())});`).join("\n") + "\n" +
-    remove.filter(ok).map((m) => `DELETE FROM CohortMembers WHERE Cohort=${qs(n)} AND Level=${qs(m.level)} AND Uid=${qs(m.uid)};`).join("\n");
+    remove.filter(ok).map((m) => `DELETE FROM CohortMembers WHERE Cohort=${qs(n)} AND Level=${qs(m.level)} AND Uid=${qs(m.uid)};`).join("\n") + "\nCOMMIT;";
   await sqlite(path, sql, false);
 }
 
 /** The name and its membership go; nothing else. */
 export async function deleteCohort(path: string, name: string): Promise<void> {
   const n = name.trim();
-  await sqlite(path, COHORT_SCHEMA + `DELETE FROM CohortMembers WHERE Cohort=${qs(n)}; DELETE FROM Cohorts WHERE Name=${qs(n)};`, false);
+  await sqlite(path, "BEGIN IMMEDIATE;\n" + COHORT_SCHEMA + `DELETE FROM CohortMembers WHERE Cohort=${qs(n)}; DELETE FROM Cohorts WHERE Name=${qs(n)};\nCOMMIT;`, false);
 }
 
 /**
@@ -746,7 +746,7 @@ export async function deleteSeriesBatchLocked(dbDir: string, seriesUIDs: string[
 async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<DeleteResult> {
   const dbPath = `${dbDir}/ctkDICOM.sql`;
   if (await busy(dbPath)) {
-    throw new Error("the DICOM index is open by another program (a -wal/-journal file is present); close it and try again");
+    throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
   }
 
   // JSON, not tabs: sqlite3 3.54 (macOS's) QUOTES a value with a space in `.mode tabs`, so a file named
@@ -861,16 +861,16 @@ export async function heldBySibling(dbDir: string, seriesUID: string): Promise<b
 
 /**
  * Which of these series another database beside this one holds: one query per sibling. A sibling whose index cannot be
- * read holds nothing -- sqlite3 reading from stdin exits 0 with no output when it cannot open a file, and the empty
- * answer counted as "held" (critic, 2026-10-02, finding 16).
+ * read holds nothing -- an index that cannot be read must not count as holding a series (critic, 2026-10-02, finding
+ * 16, when the sqlite3 program answered such a read with nothing and exit 0).
  */
 export async function heldBySiblings(dbDir: string, uids: string[]): Promise<Set<string>> {
   const out = new Set<string>();
-  const self = dbDir.replace(/\/+$/, ""), parent = self.replace(/\/[^/]+$/, "");
+  const self = resolve(dbDir), parent = dirname(self);
   const selfReal = await Deno.realPath(self).catch(() => self);
   try {
     for await (const e of Deno.readDir(parent)) {
-      const other = `${parent}/${e.name}`;
+      const other = join(parent, e.name);
       if (other === self || !e.isDirectory) continue;
       if ((await Deno.realPath(other).catch(() => other)) === selfReal) continue;
       const idx = `${other}/ctkDICOM.sql`;

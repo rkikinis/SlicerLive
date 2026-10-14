@@ -34,7 +34,7 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
     const m = tf?.matrix ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     root.innerHTML = `
       <h2>Transforms</h2>
-      <div class="sl-row"><label>Node</label><select class="sl-tf-target">${vols.map((v) => `<option value="${v.imageId}"${v.imageId === target ? " selected" : ""}>${escapeHtml(v.name)}</option>`).join("")}</select></div>
+      <div class="sl-row"><label>Volume</label><select class="sl-tf-target">${vols.map((v) => `<option value="${v.imageId}"${v.imageId === target ? " selected" : ""}>${escapeHtml(v.name)}</option>`).join("")}</select></div>
       <div class="sl-row"><button class="sl-primary sl-tf-apply">${tid ? "Transform applied" : "Apply a transform"}</button></div>
       ${tid ? `
       <h3>Translation (mm)</h3>
@@ -57,6 +57,8 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
     $(".sl-tf-harden")?.addEventListener("click", () => { g().__hardenTransform(target); status("transform hardened"); render(); });
   }
 
-  shell.registerPanel({ id: "transforms", title: "Transforms", groups: ["Geometry"], tip: "Move, rotate or scale a volume or segmentation in space", mount(el) { root = el; render(); } });
+  shell.registerPanel({ id: "transforms", title: "Transforms", groups: ["Geometry"], tip: "Move a volume in space",
+    help: `<p>Moves a volume in space: right, anterior and superior, in millimeters. Choose the volume, press <b>Apply a transform</b>, then drag the sliders. <b>Identity</b> puts it back where it was; <b>Harden</b> makes the move permanent for that volume.</p>`,
+    mount(el) { root = el; render(); } });
   live.subscribe((c) => { if (!dragging && (c.type === "transform" || c.type === "image")) render(); });
 }

@@ -13,7 +13,7 @@
 // hundreds of MB of immutable JS2 blob data cached across launches.
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 import { dirname, join, fromFileUrl, toFileUrl } from "jsr:@std/path@1";
-import { attachedDisplays, installMacMenu, keepPageVisibleOffScreen, placeWindowTopLeft, showAlert, windowFrameNow } from "./macmenu.ts";
+import { attachedDisplays, glassesBack, glassesBesideWindow, installMacMenu, windowAcrossGlasses, windowMovable, pageFootprintMB, glassesLeftover, keepPageVisibleOffScreen, placeWindowTopLeft, placeBack, restoreMirroring, screensNow, screenToTheRight, showAlert, stopMirroring, windowFrameNow, windowIsFullScreen, windowLeaveFullScreen, windowRestore, windowToScreen } from "./macmenu.ts";
 import { chooseFrame, readWindowFrames, recordFrame, windowFilePath } from "./window-frame.ts";
 import { HELP_INIT_JS } from "./help-content.ts";
 
@@ -63,7 +63,7 @@ function fatal(message: string): never {
 }
 
 const args = parseArgs(Deno.args, {
-  string: ["gallery", "port", "url"],
+  string: ["gallery", "port", "url", "glasses-window"],
   boolean: ["help"],
 });
 
@@ -84,6 +84,25 @@ const { Webview, SizeHint } = await import("jsr:@webview/webview").catch((e) =>
   fatal(`The native window library failed to load.\n\n${e}`)
 );
 log("webview module loaded");
+
+// THE GLASSES WINDOW (desktop/headset.ts; Ron, 2026-10-12: "I like 1 as it minimizes changes and decisions" -- the full
+// Albula stays on the desk's screen, a second window shows the 3D view alone in the glasses). A second copy of this app,
+// started by the first with --glasses-window <page URL>: no server of its own (it uses the first one's), one window, the
+// page in its glasses mode (?glasses), which puts the window full screen on the glasses and closes it on Esc.
+if (args["glasses-window"]) {
+  const gw = new Webview(false, { width: 1280, height: 720, hint: SizeHint.NONE });
+  gw.title = "SlicerAlbula — glasses";
+  if (mac) {
+    keepPageVisibleOffScreen(gw.unsafeWindowHandle);
+    gw.bind("albulaHeadsetScreens", () => JSON.stringify(screensNow()));
+    gw.bind("albulaHeadsetWindowTo", (name: string) => windowToScreen(gw.unsafeWindowHandle, name));
+    gw.bind("albulaGlassesClose", () => Deno.exit(0));
+    installMacMenu("SlicerAlbula", () => {}, () => gw.eval("location.reload()"));
+  }
+  gw.navigate(args["glasses-window"]);
+  gw.run();
+  Deno.exit(0);
+}
 
 function isGalleryRoot(dir: string): boolean {
   try {
@@ -205,6 +224,47 @@ if (mac) {
     try { const f = windowFrameNow(webview.unsafeWindowHandle); if (f) recordFrame(windowFile, f); return f ? "saved" : "not on screen"; }
     catch (e) { return `not saved: ${(e as Error).message}`; }
   });
+  // HEADSETS (desktop/headset.ts; the 3D view's VR/AR button): the page asks the shell for the screens, to stop the Mac
+  // mirroring onto the glasses (put back at the end), and to put this window full screen on the glasses and back.
+  let unmirrored: { display: number; master: number }[] = [];
+  webview.bind("albulaHeadsetScreens", () => JSON.stringify(screensNow()));
+  webview.bind("albulaHeadsetSeparate", () => { const p = stopMirroring(); unmirrored = [...unmirrored, ...p]; return p.length; });
+  webview.bind("albulaHeadsetRestore", () => { const n = unmirrored.length; restoreMirroring(unmirrored); unmirrored = []; return n; });
+  webview.bind("albulaHeadsetWindowTo", (name: string) => windowToScreen(webview.unsafeWindowHandle, name));
+  webview.bind("albulaHeadsetLeaveFullScreen", () => windowLeaveFullScreen(webview.unsafeWindowHandle));
+  webview.bind("albulaHeadsetIsFullScreen", () => windowIsFullScreen(webview.unsafeWindowHandle));
+  webview.bind("albulaHeadsetWindowRestore", () => windowRestore(webview.unsafeWindowHandle));
+  // The glasses beside the main screen's right edge while in use, so the Dock (on the left) stays on the main screen.
+  let movedScreen: { display: number; x: number; y: number } | null = null;
+  webview.bind("albulaHeadsetToTheRight", (name: string) => { movedScreen = screenToTheRight(name) ?? movedScreen; return !!movedScreen; });
+  // One window across the desk's screen and the glasses (macOS "Displays have separate Spaces" off).
+  webview.bind("albulaGlassesBesideWindow", (name: string) => glassesBesideWindow(webview.unsafeWindowHandle, name));
+  webview.bind("albulaWindowAcrossGlasses", (name: string) => windowAcrossGlasses(webview.unsafeWindowHandle, name));
+  webview.bind("albulaGlassesBack", () => { glassesBack(); return "back"; });
+  webview.bind("albulaWindowMovable", (on: boolean) => windowMovable(webview.unsafeWindowHandle, on));
+  webview.bind("albulaPageMemory", () => pageFootprintMB(webview.unsafeWindowHandle));
+  // A new page undoes a glasses session its predecessor left behind (a reload, a page crash): window, glasses, mirroring.
+  webview.bind("albulaGlassesLeftover", () => {
+    const done = glassesLeftover(webview.unsafeWindowHandle);
+    if (unmirrored.length) { restoreMirroring(unmirrored); unmirrored = []; }
+    if (movedScreen) { placeBack(movedScreen); movedScreen = null; }
+    return done;
+  });
+  webview.bind("albulaHeadsetPlaceBack", () => { placeBack(movedScreen); const was = !!movedScreen; movedScreen = null; return was; });
+  // The glasses window: a second copy of this app (above), on the glasses' screen; closed with the glasses.
+  let glasses: Deno.ChildProcess | null = null;
+  webview.bind("albulaGlassesOpen", (screen: string) => {
+    if (glasses) return "open already";
+    const page = `${origin}/webgpu/slicer-app.html?glasses=1&screen=${encodeURIComponent(screen)}`;
+    // The compiled app runs itself again; from the sources, Deno runs this file again.
+    const exe = Deno.execPath(), compiled = !/\/deno$/.test(exe);
+    const cmd = compiled ? [exe, "--glasses-window", page] : [exe, "run", "-A", "--unstable-ffi", fromFileUrl(import.meta.url), "--glasses-window", page];
+    glasses = new Deno.Command(cmd[0], { args: cmd.slice(1), stdout: "null", stderr: "null" }).spawn();
+    // (No wait on its end here: webview.run() holds this process's event loop. The glasses window says it is ending
+    // through the server -- POST /_headset/end -- and the page closes it with albulaGlassesClose.)
+    return "opened";
+  });
+  webview.bind("albulaGlassesClose", () => { try { glasses?.kill("SIGTERM"); } catch { /* gone */ } glasses = null; return "closed"; });
 }
 
 // External http(s) links open in the system browser.

@@ -98,7 +98,7 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
     // preset, window and level, and Auto; threshold, colors, interpolation and the volume's
     // numbers are under Advanced.
     root.innerHTML = `<h2>Window / Level</h2>`;
-    const sec = shell.section(root, "Window / Level", { open: true, band: "yellow", note: vols.length > 1 ? `${vols.length} volumes` : "" });
+    const sec = shell.section(root, "Window / Level", { open: true, band: "none", note: vols.length > 1 ? `${vols.length} volumes` : "" });
     // The shell's row grammar (label / control / value), so nothing reaches past the column: the
     // 178 px number fields ran off a 400 px column and the threshold's Hi was off screen (critic
     // 2026-09-22, 2.2). The number sits in the value column; the slider is the control.
@@ -117,7 +117,7 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
     r(sec, "Level", `<input class="sl-l" type="range" step="any" min="${dataMin}" max="${dataMax}" value="${st.level}">`, "", "The value shown as mid-gray");
     r(sec, "", `<input class="sl-ln sl-num" type="number" step="any" value="${st.level.toFixed(1)}" title="The level, as a number">`);
     const acts = shell.actions(sec);
-    acts.innerHTML = `<button class="sl-primary sl-auto" title="A window and level from the values in this volume">Auto</button>`;
+    acts.innerHTML = `<button class="sl-auto" title="A window and level from the values in this volume">Auto</button>`;
     const adv = shell.section(root, "Advanced", { open: false, band: "none" });
     r(adv, "Colors", `<select class="sl-colors">${tables}</select>`, "", "The color table the gray values are shown through");
     r(adv, "Threshold", `<label title="Values outside the range are not drawn"><input type="checkbox" class="sl-th-on"${st.applyThreshold ? " checked" : ""}> only values between</label>`);
@@ -170,7 +170,7 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
       ${row("Voxel size", `${fmtMm(v.spacing[0])} × ${fmtMm(v.spacing[1])} × ${fmtMm(v.spacing[2])} mm`, "the size of one voxel along i, j, k")}
       ${row("Voxels", fmtCount(v.voxels), "dimensions multiplied")}
       ${row("Extent", `${fmtMm(v.extentMm[0], 1)} × ${fmtMm(v.extentMm[1], 1)} × ${fmtMm(v.extentMm[2], 1)} mm`, "the grid's size along i, j, k")}
-      ${row("Voxel volume", `${fmtMm(v.voxelMm3, 4)} mm³ · ${fmtMm(v.totalMl, 1)} mL in all`, v.axisAligned ? "" : "an oblique grid: the voxel's volume is the parallelepiped its three steps span")}
+      ${row("Voxel volume", `${fmtMm(v.voxelMm3, 4)} mm³ · ${v.totalMl.toLocaleString("en-US", { maximumFractionDigits: 1 })} mL in all`, v.axisAligned ? "" : "an oblique grid: the voxel's volume is the parallelepiped its three steps span")}
       ${row("Origin", `R ${fmtMm(v.origin[0], 1)} · A ${fmtMm(v.origin[1], 1)} · S ${fmtMm(v.origin[2], 1)} mm`, "RAS position of voxel (0, 0, 0)")}
       ${v.axisAligned ? "" : row("Grid", "oblique — not aligned with the patient axes")}
       ${o.dtype ? row("Stored as", dtypeInWords(String(o.dtype)), `the data type of the stored values (${o.dtype})`) : ""}
@@ -179,7 +179,9 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
 
   // "Window / Level", not Slicer's "Volumes": the name of what you do here, in the words a
   // clinician uses. Ron, 2026-09-11: "Agreed to both." The id stays "volumes".
-  shell.registerPanel({ id: "volumes", title: "Window / Level", groups: ["Display"], order: 1, tip: "How a volume is shown in the slices: window and level, threshold, color table", mount(el) { root = el; render(); } });
+  shell.registerPanel({ id: "volumes", title: "Window / Level", groups: ["Display"], order: 1, tip: "How a volume is shown in the slices: window and level, threshold, color table",
+    help: `<p>How a volume looks in the slice views. Choose the volume, then a <b>Preset</b>, or set <b>Window</b> and <b>Level</b>; <b>Auto</b> takes them from the volume's own values. Advanced holds the color table, a threshold, smoothing between voxels and the volume's facts (size, voxel size, origin).</p>`,
+    mount(el) { root = el; render(); } });
   // re-render when volumes are added/removed or a display node changes elsewhere
   live.subscribe((c) => { if (!dragging && (c.type === "image" || c.type === "scalarVolumeDisplay" || c.kind === "remove")) render(); });
 }

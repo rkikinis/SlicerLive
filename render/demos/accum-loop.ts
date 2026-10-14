@@ -143,6 +143,12 @@ export function mountAdaptive3d(opts: {
   movingScaleCap?: number | (() => number);       // max resolution scale WHILE MOVING (default 1; <1 for heavy scenes); a function reads it per frame
   budgeted?: () => boolean;                       // let the budget lower the moving resolution (default: only when the cap is below 1)
   onFps?: (fps: number, scale: number) => void;   // frames per second and resolution while moving, a few times a second
+  /** ONE RESOLUTION, CHOSEN BY THE PERSON (Ron, 2026-10-14: "I like the desk view to follow the same rule" as the glasses:
+   *  a picture whose resolution changes while you look reads as flicker). When this returns a number, every frame --
+   *  moving and still -- is drawn at that fraction of the view's pixels: no budget, no soft-while-moving, sharp-when-still.
+   *  A slow card gives fewer frames, never a different picture. At 1 the still view still gathers its samples (the same
+   *  resolution, less noise); below 1 the still view is one frame at that fraction, the same as the moving ones. */
+  fixedScale?: () => number | null;
   /** True while the content changes by itself on a schedule -- a sequence playing. Its changes are then never "moving":
    *  each frame is drawn at full quality (Ron, 2026-09-25, the beating heart: "3d view resolutions changes constantly"). */
   steady?: () => boolean;
@@ -166,6 +172,8 @@ export function mountAdaptive3d(opts: {
     const now = performance.now();
     if (now - dbgLast > 500) { console.log(`[perf] mov=${dbgMoving.toFixed(0)}ms/${dbgN}f settled=${dbgSettled.toFixed(0)}ms lastScale=${s.toFixed(2)} samples=${k} last=${ms.toFixed(1)}ms`); dbgLast = now; dbgMoving = dbgSettled = dbgN = 0; }
   };
+  const fixed = () => { const f = opts.fixedScale?.(); return f == null ? null : Math.min(1, Math.max(0.25, f)); };
+  let lowSettled = false;                         // a still frame drawn at a fixed scale below 1: nothing more to gather
   const movingCap = () => typeof opts.movingScaleCap === "function" ? opts.movingScaleCap() : (opts.movingScaleCap ?? 1);
   // ONE LINE PER INTERACTION into the session log (not only with ?perf): how many moving frames the
   // burst drew, their mean and worst GPU time and the resolution scale the budget settled on, then
@@ -209,7 +217,9 @@ export function mountAdaptive3d(opts: {
     // the frame-time target needs, and not at all when full resolution already makes it.
     const useBudget = opts.budgeted?.() ?? cap < 1;
     // In steps, so a drag reuses one set of render targets (budget-controller.ts, stepMovingScale).
-    const s = !useBudget ? 1 : (movingScale = stepMovingScale(movingScale, Math.min(cap, budget.scale(vw, vh)))), t0 = performance.now();
+    const f = fixed();
+    lowSettled = false;
+    const s = f != null ? f : !useBudget ? 1 : (movingScale = stepMovingScale(movingScale, Math.min(cap, budget.scale(vw, vh)))), t0 = performance.now();
     // Spend LEFTOVER budget on anti-aliasing, but only once resolution is already native: a slow GPU
     // must still buy pixels before samples. k = how many whole samples fit in the frame target.
     // (Steve's, origin/main: off unless a caller asks, maxMovingSamples > 1.)
@@ -243,6 +253,18 @@ export function mountAdaptive3d(opts: {
     const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
     const t0 = performance.now();
     if (reset) { burstEnd(); settleT0 = t0; settleOpen = true; }
+    const f = fixed();
+    if (f != null && f < 0.98) {
+      // The person's lower resolution holds for the still view too: one frame, as the moving ones are drawn.
+      if (!reset && lowSettled) return;
+      const rw = Math.max(16, Math.round(vw * f)), rh = Math.max(16, Math.round(vh * f));
+      opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh);
+      lowSettled = true;
+      if (settleOpen) { settleOpen = false; opts.gpu.device.queue.onSubmittedWorkDone().then(() => logLine(`3D settled: one picture at ${Math.round(f * 100)}% (the chosen quality) in ${((performance.now() - settleT0) / 1000).toFixed(2)} s`)); }
+      opts.onFrame?.();
+      return;
+    }
+    lowSettled = false;
     opts.setCamera(sc, vw, vh); sc.renderAccum(opts.view(), vw, vh, reset);
     if (DBG) opts.gpu.device.queue.onSubmittedWorkDone().then(() => dbgTick("set", performance.now() - t0, 1));
     if (settleOpen && sc.accumCount() >= (opts.target ?? 24)) {
@@ -253,7 +275,7 @@ export function mountAdaptive3d(opts: {
   };
   const loop = mountAdaptiveLoop({
     renderMoving, renderSettled,
-    count: () => opts.scene()?.accumCount() ?? 1e9,
+    count: () => lowSettled ? 1e9 : opts.scene()?.accumCount() ?? 1e9,
     target: opts.target ?? 24,
     idleGapMs: opts.idleGapMs,
     sync: () => opts.gpu.device.queue.onSubmittedWorkDone(),   // GPU-paced: no backlog, input preempts

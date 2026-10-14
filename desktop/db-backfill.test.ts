@@ -5,6 +5,7 @@
 // exists to survive -- and it keeps this in the hermetic tier, with no npm fetch.
 //
 //   deno test -A --no-check desktop/db-backfill.test.ts
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals } from "jsr:@std/assert";
 import { backfillProvenance, referencedSeriesUidOf } from "./db-backfill.ts";
 import { provenanceEdges, provenancePathFor, recordProvenanceEdge } from "./db-index.ts";
@@ -89,15 +90,8 @@ Deno.test("a file that is not DICOM is not a crash", () => {
 
 // ---- the sweep ----------------------------------------------------------------------------------
 
-const SQLITE = "/usr/bin/sqlite3";
-const run = async (db: string, sql: string) => {
-  const p = new Deno.Command(SQLITE, { args: [db], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter();
-  await w.write(new TextEncoder().encode(sql));
-  await w.close();
-  const { code, stderr } = await p.output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-};
+// Albula's own SQLite, not the sqlite3 program: the suite runs on Windows too (critic, 2026-10-13, finding 9).
+const run = async (db: string, sql: string) => { runScript(db, sql); };
 
 /** A database holding one CT series and one SEG whose file names that CT as its parent. */
 async function makeDb(): Promise<string> {

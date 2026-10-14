@@ -60,6 +60,7 @@ import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
 import type { SegmentCodes } from "../../logic/readers/dicom-seg.ts";
 import { openSettingsDialog, pictureDefaults, SETTING_DEFAULTS } from "./settings-dialog.ts";
 import { writeScene } from "../../logic/scene/write.ts";
+import { applySceneState } from "./scene-restore.ts";
 import { BUILD_ID } from "../build-id.ts";
 import { noteMs, span, spanSync } from "./load-profile.ts";
 import { hasSharedTexture, COLOR_MAP_REFUSAL, isColorMap } from "../fields.ts";
@@ -325,7 +326,7 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
   if (!seriesUID) {
     throw new Error(
       `"${src.name}" is not in the DICOM database, so there is no series for a segmentation to ` +
-      `reference — put the volume in the database first (Crop volume → Put it in the DICOM database)`,
+      `reference — put the volume in the database first (Crop Volume › Result › Save to DICOM)`,
     );
   }
 
@@ -904,6 +905,8 @@ async function main() {
   // extraction can see it (render/livescene.ts). The dialog sets the same global when it changes.
   (globalThis as unknown as { __gpuSurfaces?: boolean }).__gpuSurfaces =
     appSettingsNow?.getBool("Surfaces", "onGpu", SETTING_DEFAULTS.Surfaces.onGpu) ?? false;
+  // Settings › For developers: the step-by-step controls (theme.css, .sl-dev-step).
+  document.documentElement.classList.toggle("sl-dev", appSettingsNow?.getBool("Developer", "steps", SETTING_DEFAULTS.Developer.steps) ?? false);
   // Settings › General › Colors: the color scheme version new colors come from (logic/anatomy/palettes.ts).
   setPaletteVersion(appSettingsNow?.getNumber("Colors", "scheme", SETTING_DEFAULTS.Colors.scheme) ?? SETTING_DEFAULTS.Colors.scheme);
   setShadingVersion(appSettingsNow?.getNumber("View3D", "shading", SETTING_DEFAULTS.View3D.shading) ?? SETTING_DEFAULTS.View3D.shading);
@@ -1299,6 +1302,7 @@ async function main() {
       title: "Welcome",
       order: 0,
       tip: "What this application is and how to start",
+      help: `<p>What Albula is, what you can do with it, and where to start.</p>`,
       // No acknowledgments here: this belongs to the APPLICATION, not to the Welcome module, and
       // app-shell already prints it under every module's Help & Acknowledgment. Putting it here too
       // printed it twice on this panel.
@@ -1337,22 +1341,32 @@ async function main() {
           <button data-act="welcome-keys" title="The keyboard shortcuts, as in 3D Slicer, in a small window">Keyboard shortcuts…</button></p>
         <h2>SlicerAlbula</h2>
         <p>A viewer for medical images and their segmentations. It reads studies from a DICOM
-        database, runs automatic segmentation on them, and shows the result as slices and as 3D
-        surfaces &mdash; on this machine, on its own graphics card, with nothing sent anywhere.</p>
+        database, runs automatic segmentation on them, and shows the result as slices and in
+        3D &mdash; on this machine, on its own graphics card, with nothing sent anywhere.</p>
 
-        <h3>What you can do here</h3>
+        <h3>What you can do in Albula</h3>
         <ul>
-          <li><b>Load a study</b> from the DICOM database, or from NRRD and NIfTI files.</li>
-          <li><b>Segment it automatically</b> &mdash; TotalSegmentator for the body, FastSurfer for
-              the brain, MOOSE and others &mdash; and watch it run.</li>
+          <li><b>Open a case</b> from a DICOM database (Load / Save). Scans from a disc, a USB stick or
+              an export go into a database in one step, and so does a scene packaged on another computer
+              (a folder ending in <i>.albula</i>). NRRD and NIfTI files open too.</li>
+          <li><b>Segment it automatically</b> &mdash; TotalSegmentator, MOOSE and others (AI
+              Segmentations) &mdash; or <b>by hand</b>: paint, erase, threshold, grow from seeds, or
+              click on a structure to outline it (Segment Editor).</li>
           <li><b>Read the result</b>: every structure named and grouped by anatomy, following
               <i>Terminologia Anatomica</i>, so a 111-structure body scan is a tree you can open
               rather than a list you have to search.</li>
+          <li><b>See it in 3D</b>: the anatomy solid, as an illustration or realistic, straight from
+              its segmentation; the scan itself as a volume rendering; vessels inside their organs.
+              With VITURE glasses plugged in, the VR/AR button in the 3D view shows it in the glasses, following your head.</li>
           <li><b>Point at anything</b> and the probe names it, in the slices and in 3D, with the
-              image value at that point.</li>
-          <li><b>Keep it</b>: save to the DICOM database &mdash; segmentations and 3D surfaces
-              both, recorded as derived from what they came from &mdash; or as files; and save
-              the scene, so a study comes back as it was on screen.</li>
+              image value at that point. <b>Mark and measure</b> with points, lines, angles,
+              curves, closed curves, boxes and name cards (Markups).</li>
+          <li><b>Play a time series</b>: a gated cardiac CT as a beating heart (Sequences).</li>
+          <li><b>Diffusion MRI</b> of a brain tumor patient: the nerve fiber tracts near the tumor,
+              named (Diffusion).</li>
+          <li><b>Keep it</b>: save to the DICOM database &mdash; segmentations recorded as made from
+              the scan they came from &mdash; or as files; save the scene, so a case comes back as it
+              was on screen; package a scene to take it to another computer.</li>
         </ul>
 
         <h3>Views and navigation</h3>
@@ -1370,12 +1384,12 @@ async function main() {
         logo leads to that pass.</p>
 
         <details class="sl-welcome-dev"><summary>For developers</summary>
-          <p>The native application shell. Modules appear in the selector above as they are ported
-          (data loading, layouts &amp; view controllers, volumes, markups, segment editor, transforms
-          &amp; models, save/export). Rendering is WebGPU throughout.</p>
-          <p>A headless Slicer ModuleServer, when running, appears as a peer: its scene streams into
-          these views. The streamed stock-Slicer chrome is available at
-          <a href="?legacy">?legacy</a>.</p>
+          <p>Albula is built on Steve Pieper's SlicerLive: the scene and its views come from there, and
+          everything is drawn with WebGPU on this computer's graphics card. Its server is written for
+          Deno. The source is on GitHub: <a href="https://github.com/rkikinis/SlicerAlbula">rkikinis/SlicerAlbula</a>
+          (the workspace), the <i>albula</i> branch of <a href="https://github.com/rkikinis/SlicerLive/tree/albula">rkikinis/SlicerLive</a>
+          (the application), and <a href="https://github.com/rkikinis/albula-diffusion">rkikinis/albula-diffusion</a>
+          (the diffusion extension). The published copies are updated from time to time, so they can be a little behind this application.</p>
         </details>`;
       // THE FIRST THING ANYONE WANTS, on the first panel they see. Ron: "I would like to minimize the
       // clicks and travel distance with the mouse. Put a button Load data to scene on the welcome
@@ -1958,6 +1972,50 @@ Object.assign(globalThis, {
       shell?.setStatus(`Scene closed — ${n} thing${n === 1 ? "" : "s"} unloaded; the database is unchanged`);
       return true;
     };
+    // THE GLASSES WINDOW'S SCENE (desktop/headset.ts; render/moduleserver/live-views.ts, VR/AR): this window's scene as
+    // the document a saved scene is, without saving it anywhere -- null when nothing from the database is loaded.
+    (globalThis as unknown as { __sceneForGlasses?: () => Promise<Record<string, unknown> | null> }).__sceneForGlasses = async () => {
+      const w = await writeScene(views.live.nodes.values(), { producer: `SlicerAlbula ${BUILD_ID}`, origin: views.live.origin, name: "glasses", previousV: 0,
+        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 } });
+      return w.empty ? null : w.doc as unknown as Record<string, unknown>;
+    };
+    // THIS IS THE GLASSES WINDOW (?glasses; desktop/main.ts --glasses-window): open the main window's scene, then the
+    // 3D view alone, full screen in the glasses, following the head. Each new scene from the main window is applied as
+    // it comes -- display changes in place; when the data itself changed (a series added or removed), loaded again.
+    if (p.has("glasses")) void (async () => {
+      type G = { __loadSceneDoc?: (d: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>; __closeSceneData?: () => number;
+        __glassesStart?: (screen: string) => Promise<void>; __glassesScene?: (d: Record<string, unknown>) => void };
+      const g = globalThis as unknown as G;
+      const seriesOf = (d: Record<string, unknown>) => new Set(Object.values((d.nodes as Record<string, Record<string, unknown>>) ?? {})
+        .filter((n) => n.type === "image" || n.type === "segmentation")
+        .map((n) => (n.dicom as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID).filter((u): u is string => !!u));
+      const same = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+      const r = await fetch("/_headset/scene", { cache: "no-store" }).then((x) => x.json()).catch(() => null) as { scene?: Record<string, unknown> | null } | null;
+      if (!r?.scene) { shell?.notify({ title: "Nothing to show in the glasses", body: "The main window has no case loaded." }); return; }
+      // The loader exists once the Load / Save panel has mounted, and in the app that mount reads the database first --
+      // seconds, not the 50 ms a browser tab needed (Ron, 2026-10-13: the glasses stayed black; nothing had been loaded).
+      if (!g.__loadSceneDoc && shell) await shell.showPanel("add-data");
+      for (let i = 0; i < 300 && !g.__loadSceneDoc; i++) await new Promise((res) => setTimeout(res, 100));
+      if (!g.__loadSceneDoc) { shell?.setStatus("glasses window: the Load / Save panel did not come up, so the scene could not be opened"); return; }
+      // And the database: the panel finds the one the server serves a moment after it mounts (Ron, 2026-10-13: "the scene
+      // did not open (no DICOM database is open or served here)"). Asked again until it is there, up to 20 s.
+      let loadedNow = await g.__loadSceneDoc(r.scene);
+      for (let i = 0; i < 40 && !loadedNow.ok && /no DICOM database/i.test(loadedNow.error ?? ""); i++) {
+        await new Promise((res) => setTimeout(res, 500));
+        loadedNow = await g.__loadSceneDoc(r.scene);
+      }
+      shell?.setStatus(loadedNow.ok ? "glasses window: the scene is open" : `glasses window: the scene did not open (${loadedNow.error ?? "no reason given"})`);
+      if (!loadedNow.ok) return;
+      let loaded = seriesOf(r.scene), busy = Promise.resolve();
+      g.__glassesScene = (d) => {
+        busy = busy.then(async () => {
+          const want = seriesOf(d);
+          if (same(want, loaded)) applySceneState(views.live, d);
+          else { g.__closeSceneData?.(); await g.__loadSceneDoc?.(d); loaded = want; }
+        }).catch(() => {});
+      };
+      await g.__glassesStart?.(p.get("screen") ?? "");
+    })();
     Object.assign(globalThis, { __saveScene: saveScene, __currentScene: () => currentScene_, __openScene: loadScene, __closeScene: closeScene, __proposedSceneName: proposedSceneName,
       // "All scenes…": the Scenes window lives in the Load / Save panel, which mounts when first shown.
       __showScenesWindow: async () => {
@@ -1977,7 +2035,9 @@ Object.assign(globalThis, {
     if (typeof remember === "function") {
       // The app reads its own window from macOS (desktop/main.ts); the page only says when (2026-10-01: the report
       // below never arrived from the app's window, and nothing had been saved since 2026-09-23).
-      setInterval(() => { if (document.visibilityState === "visible") void remember().catch(() => {}); }, 2000);
+      // Not while the window is widened across the glasses (the critic, 2026-10-13, finding 3: it was saved as the
+      // window's own size, and the next start came up that way).
+      setInterval(() => { if (document.visibilityState === "visible" && !(globalThis as unknown as { __glassesSpan?: boolean }).__glassesSpan) void remember().catch(() => {}); }, 2000);
     } else if (typeof (globalThis as unknown as { slicerliveOpenExternal?: unknown }).slicerliveOpenExternal === "function") {
       let lastFrame = "";
       setInterval(() => {

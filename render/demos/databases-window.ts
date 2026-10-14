@@ -8,6 +8,7 @@
 // Each database's description lives in its own folder (desktop/db-create.ts, albula-database.json): name, what it holds,
 // whether it holds patient data and under which approval, whom to ask, where it came from. A database without one shows
 // its settings name and an "Add a description" link.
+import { openPackageWindow } from "./package-window.ts";
 import { openFloatingWindow } from "./floating-window.ts";
 import { escapeHtml as esc } from "./html.ts";
 
@@ -58,6 +59,8 @@ export interface DatabasesWindowOptions {
   onChanged?: (id?: string) => void;
   /** Open straight at the "New database" form. */
   startWithNew?: boolean;
+  /** Where a notice goes (the shell's). */
+  notify?: (o: { title: string; body?: string; ttl?: number }) => void;
 }
 
 /** The window. Returns when it is open; `onChanged` says what happened. */
@@ -96,9 +99,9 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     const row = document.createElement("div");
     row.className = "sl-dbw-acts";
     if (canCreate) {
-      const nb = button("New database…", "Make an empty database, named and described, ready to add scans to. It goes in “Albula Databases” in your home folder unless you choose another folder.");
+      const nb = button("New database…", "Make an empty database, named and described, ready to add scans to. It goes in “SlicerAlbulaDatabases” in your home folder unless you choose another folder.");
       nb.addEventListener("click", () => newForm(row));
-      const ab = button("Add an existing database folder…", "A folder that already holds a DICOM database (made by Slicer or Albula, or copied from someone): it is added to this list as it is.");
+      const ab = button("Add an existing database folder…", "A folder that already holds a DICOM database (made by Slicer or Albula, or copied from someone): it is moved into “SlicerAlbulaDatabases” (or copied there, if you choose) and added to this list.");
       ab.addEventListener("click", () => addExisting(row));
       row.append(nb, ab);
     } else {
@@ -151,7 +154,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     box.innerHTML = `<div class="sl-dbw-name">Brain tumor test cases${resuming ? " — not finished" : ""}</div>
       <p class="sl-dbw-holds">${esc(t.holds)}</p>
       <div class="sl-dbw-meta">From: ${esc(t.source)}</div>
-      <p class="sl-dbw-holds"><b>About ${gb} GB to download${t.diskBytes ? `, and ${(t.diskBytes / 1e9).toFixed(1)} GB of disk` : ""}.</b> It becomes the database “${esc(t.name)}” in Albula Databases${t.minutes ? `, in about ${t.minutes} minutes on a fast connection (longer on a slow one)` : ""}. You can keep working; if it stops, starting again continues where it was.</p>
+      <p class="sl-dbw-holds"><b>About ${gb} GB to download${t.diskBytes ? `, and ${(t.diskBytes / 1e9).toFixed(1)} GB of disk` : ""}.</b> It becomes the database “${esc(t.name)}” in SlicerAlbulaDatabases${t.minutes ? `, in about ${t.minutes} minutes on a fast connection (longer on a slow one)` : ""}. You can keep working; if it stops, starting again continues where it was.</p>
       <div class="sl-dbw-acts"></div>`;
     const go = button(resuming ? "Continue the download" : `Download (${gb} GB)`, `Downloads about ${gb} GB of public MRI from OpenNeuro and makes the database “${t.name}”.`, true);
     go.addEventListener("click", async () => {
@@ -230,7 +233,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     let folder: { token: string; path: string } | undefined;
     const where = document.createElement("div");
     where.className = "sl-dbw-meta";
-    const showWhere = () => { where.textContent = folder ? `In: ${folder.path}` : "In: Albula Databases, in your home folder"; };
+    const showWhere = () => { where.textContent = folder ? `In: ${folder.path}` : "In: SlicerAlbulaDatabases, in your home folder"; };
     showWhere();
     const make = button("Make the database", "Makes the empty database and adds it to this list.", true);
     const other = button("Another folder…", "Choose where the database goes. Not Desktop or Documents if they are kept in iCloud: scans that are not public would be copied to Apple's servers.");
@@ -262,6 +265,13 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       const c = await chooseFolder("Choose a folder that holds a DICOM database (its index is ctkDICOM.sql)");
       if (!c) return;
       if (!c.hasDatabase) { note.textContent = `“${c.name}” holds no DICOM database. To add scans from it, use Load / Save › From disk › DICOM folder… instead.`; after.after(note); return; }
+      // MOVED (the default) OR COPIED INTO "SlicerAlbulaDatabases" first (Ron, 2026-10-13: "move or copy into the albula
+      // databases folder. User decides, move is the default"); one already there is listed where it is.
+      const { features } = await listDatabases();
+      if (features.includes("package")) {
+        await openPackageWindow({ token: c.token, name: c.name }, { notify: o.notify ?? (() => {}), onChanged: (id) => { o.onChanged?.(id); void render(); } });
+        return;
+      }
       const { ok, j } = await post("/_db/_register", { token: c.token });
       if (!ok) { note.textContent = String(j.error ?? "not added"); after.after(note); return; }
       o.onChanged?.(String(j.id));

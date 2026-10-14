@@ -13,8 +13,8 @@
 // THE DESCRIPTION (Ron: "sounds good option to edit might be nice") is a small JSON file in the database folder --
 // what it is called, what it holds, whether it holds patient data and under which approval, whom to ask -- so the
 // databases overview can say which one is which, and the file travels with the folder.
+import { runScript } from "./sqlite.ts";
 
-const SQLITE = "/usr/bin/sqlite3";
 
 export const CTK_SCHEMA_VERSION = "0.8.1";
 
@@ -95,14 +95,16 @@ export async function writeDescription(dir: string, d: DbDescription): Promise<v
 }
 
 /**
- * Where a new database goes unless the person chooses: "Albula Databases" in the home folder (Ron, 2026-10-01: yes).
+ * Where a new database goes unless the person chooses: "SlicerAlbulaDatabases" in the home folder (Ron, 2026-10-01: yes).
  * NOT Desktop or Documents: with iCloud's "Desktop & Documents" on, patient data there is uploaded (this workspace
  * left the Desktop on 2026-09-16 for the same reason).
  */
 export function defaultDatabasesFolder(): string {
   const home = Deno.env.get("HOME");
   if (!home) throw new Error("the home folder is not known, so there is no default place for a database; choose a folder");   // never /tmp: emptied at restart
-  return `${home}/Albula Databases`;
+  // "SlicerAlbulaDatabases" since 2026-10-13 (Ron: "it will live adjacent to SlicerAlbula" in the home folder); it was
+  // "Albula Databases" before. The databases inside it each have a folder of their own ("Test Data", "SlicerAlbulaMain").
+  return `${home}/SlicerAlbulaDatabases`;
 }
 
 /**
@@ -138,14 +140,11 @@ export async function createDatabase(dir: string, description: DbDescription): P
   const index = `${dir}/ctkDICOM.sql`;
   if (await Deno.stat(index).then(() => true, () => false)) throw new Error("that folder already holds a DICOM database; add it as an existing one instead");
   await Deno.mkdir(dir, { recursive: true });
-  const p = new Deno.Command(SQLITE, { args: [index], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter();
-  await w.write(new TextEncoder().encode(`BEGIN;\n${CTK_SCHEMA}\nCOMMIT;\n`));
-  await w.close();
-  const { code, stderr } = await p.output();
-  if (code !== 0) {
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  try { runScript(index, `BEGIN;\n${CTK_SCHEMA}\nCOMMIT;\n`); }
+  catch (e) {
     await Deno.remove(index).catch(() => {});
-    throw new Error(`the database could not be made: ${new TextDecoder().decode(stderr).trim()}`);
+    throw new Error(`the database could not be made: ${(e as Error).message}`);
   }
   await writeDescription(dir, d);
 }

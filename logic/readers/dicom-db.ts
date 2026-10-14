@@ -13,14 +13,11 @@
 // whose files are external is listed but marked unavailable rather than silently missing.
 import { type FrameTiming, groupSeries, lastSkipReasons, parseInstances, reconstructSeries, volumesOfSeries } from "./dicom-series.ts";
 import type { Volume } from "./nifti.ts";
-import { workerUrl } from "../../render/build-id.ts";
 
-/** The vendored sql.js (render/vendor/sqljs/, copied by the rebuild to webgpu/vendor/sqljs/ beside the bundle). Until
- *  2026-09-28 it came from jsdelivr, then unpkg, at run time (critic, 2026-09-28, finding 1). The version is stated
- *  here and in that folder's README. */
-export const SQLJS_VERSION = "1.13.0";
-/** A vendored sql.js file, carrying the build id like every runtime code load (render/build-id.test.ts). */
-const sqlJsFile = (f: string): string => workerUrl(`./vendor/sqljs/${f}`, import.meta.url).href;
+// THE SERVER READS THE INDEX, the page asks it (2026-10-14; Ron: fewer dependencies). Until then the page downloaded the
+// whole ctkDICOM.sql (15 MB for the main database) on every open and read it with sql.js; the server has SQLite inside it
+// now (desktop/sqlite.ts) and answers the same three questions: the series list, the counts, one series' files
+// (desktop/db-listing.ts, the same SQL). sql.js is gone.
 
 export interface DbSeriesEntry {
   seriesInstanceUID: string;
@@ -48,9 +45,21 @@ export interface DbSeriesEntry {
 
 export interface DbProgress { note: string; done?: number; total?: number }
 
+/** What to do when the window is newer than the server it talks to. */
+const OLDER_SERVER = "Albula's server is older than this window (it was rebuilt while Albula was running): quit Albula and start it again.";
+
+/** A row of the server's series list (desktop/db-listing.ts; its own type there -- keep the two alike). */
+export interface ListedSeries {
+  uid: string; num: number | string | null; modality: string | null; description: string | null;
+  seriesDate: string | null; seriesTime: string | null;
+  studyUID: string | null; studyDescription: string | null; studyDate: string | null;
+  patientName: string | null; patientID: string | null;
+  n: number; nExternal: number;
+}
+
 /**
- * Where a database is read from. Only two operations depend on that -- the index itself, and one
- * instance by path relative to the database directory -- so this is the whole seam.
+ * Where a database is read from: what it holds (its series, one series' files -- asked of the server) and one
+ * file by path relative to the database directory (and its head). This is the whole seam.
  *
  * There are two implementations because the File System Access API is not universal:
  * `showDirectoryPicker` exists in Chromium but NOT in the WKWebView that the native SlicerLive app
@@ -60,7 +69,10 @@ export interface DbProgress { note: string; done?: number; total?: number }
 export interface DbSource {
   /** Shown to the user: a folder name, or the served path. */
   readonly label: string;
-  readSql(): Promise<ArrayBuffer>;
+  /** Every series with its study and patient, and the counts (the server's GET /_db/<id>/_series). */
+  listSeries(): Promise<{ series: ListedSeries[]; patients: number; studies: number }>;
+  /** One series' files as the index records them: relative to the database folder, or absolute. */
+  seriesFiles(seriesUID: string): Promise<string[]>;
   /** One file, by path relative to the database directory. */
   readFile(relPath: string): Promise<ArrayBuffer>;
   /**
@@ -103,13 +115,11 @@ export function directorySource(dir: FileSystemDirectoryHandle): DbSource {
   return {
     label: dir.name,
     directory: dir,
-    async readSql() {
-      try {
-        return await (await (await dir.getFileHandle("ctkDICOM.sql")).getFile()).arrayBuffer();
-      } catch {
-        throw new Error("No ctkDICOM.sql in that folder — pick a Slicer DICOM database directory.");
-      }
-    },
+    // The index is read by Albula's server (it has SQLite; the page no longer carries a copy). A folder picked in a
+    // plain browser, with no server behind it, can therefore not be listed -- the app never had this path (WKWebView
+    // has no folder picker); Steve's static pages did.
+    listSeries: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server: open it with Load / Save › Load from the DICOM database › Databases… instead.")),
+    seriesFiles: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server.")),
     readFile: async (rel) => (await fileAt(dir, rel)).arrayBuffer(),
     readHead: async (rel, maxBytes) => {
       const f = await fileAt(dir, rel);
@@ -133,29 +143,26 @@ export function httpSource(baseUrl: string): DbSource {
     if (!r.ok) throw new Error(`${rel}: HTTP ${r.status}`);
     return await r.arrayBuffer();
   };
-  /** Like `get`, with request options. The image files WANT the cache; the index must not use it. */
-  const getWith = async (rel: string, init: RequestInit): Promise<ArrayBuffer> => {
-    const r = await fetch(urlFor(rel), init);
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText} for ${rel}`);
-    return await r.arrayBuffer();
-  };
 
   return {
     label: base,
-    async readSql() {
-      try {
-        // `cache: "reload"` — the INDEX must never come from a cache, and a server header cannot
-        // guarantee that on its own. Ron opened the database after it had been de-identified and it
-        // still showed the old patient name: the response had been stored earlier, before the
-        // server sent any cache directive, and WKWebView is free to keep serving a stored entry
-        // under heuristic freshness. Adding `no-cache` server-side fixes future responses and does
-        // nothing about the one already held. This asks the client directly, revalidating and
-        // replacing what it has, and it is the reader's business rather than the server's because
-        // the reader is what knows this file is an index and not a picture.
-        return await getWith("ctkDICOM.sql", { cache: "reload" });
-      } catch {
-        throw new Error(`No ctkDICOM.sql served at ${base} — is a database exposed there?`);
-      }
+    // `no-store`: a list must never come from a cache. Ron once opened a de-identified database and saw the old
+    // patient name, from an index the webview had stored (2026-09); the server sends no-store too.
+    async listSeries() {
+      const r = await fetch(base + "_series", { cache: "no-store" });
+      const body = await r.json().catch(() => ({}));
+      // A server older than this window has no such route: the Rebuild installs a new page beside a running server
+      // (critic 2026-10-14, page asks the server, finding 1). Said as what to do, not as "HTTP 404".
+      if (r.status === 404 && !body.error) throw new Error(OLDER_SERVER);
+      if (!r.ok) throw new Error(body.error ?? `the database could not be listed (HTTP ${r.status})`);
+      return body as { series: ListedSeries[]; patients: number; studies: number };
+    },
+    async seriesFiles(uid) {
+      const r = await fetch(`${base}_files?series=${encodeURIComponent(uid)}`, { cache: "no-store" });
+      const body = await r.json().catch(() => ({}));
+      if (r.status === 404 && !body.error) throw new Error(OLDER_SERVER);
+      if (!r.ok) throw new Error(body.error ?? `the files of a series could not be listed (HTTP ${r.status})`);
+      return (body.files ?? []) as string[];
     },
     readFile: get,
     async readHead(rel, maxBytes) {
@@ -169,25 +176,6 @@ export function httpSource(baseUrl: string): DbSource {
       return { head, totalBytes: Number.isFinite(total) && total > 0 ? total : head.byteLength };
     },
   };
-}
-
-/**
- * Is a database served at `baseUrl`? Used to offer the served database before falling back to the
- * folder picker.
- *
- * A ranged GET rather than HEAD: the native app's static server answers HEAD with 404. The range
- * keeps this to a byte even though the index is tens of megabytes, and the body is never read --
- * a server that ignores Range still only has its headers consumed here.
- */
-export async function probeHttpDatabase(baseUrl: string): Promise<boolean> {
-  const base = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
-  try {
-    const r = await fetch(base + "ctkDICOM.sql", { headers: { Range: "bytes=0-0" } });
-    void r.body?.cancel();
-    return r.ok;
-  } catch {
-    return false;
-  }
 }
 
 /** The head of a file and the size of the whole thing. */
@@ -228,43 +216,6 @@ export interface DicomDatabase {
    */
   readSeriesFileHead(entry: DbSeriesEntry, maxBytes: number): Promise<FileHead | null>;
   close(): void;
-}
-
-// sql.js hands back raw column/value arrays; the values are genuinely heterogeneous.
-type SqlValue = string | number | Uint8Array | null;
-type SqlJsDb = { exec(sql: string): Array<{ columns: string[]; values: SqlValue[][] }>; close(): void };
-type SqlJs = { Database: new (data: Uint8Array) => SqlJsDb };
-
-let sqlJsPromise: Promise<SqlJs> | null = null;
-
-/** Lazy-load the vendored sql.js, as dicom-series.ts loads dcmjs; no network. */
-function loadSqlJs(): Promise<SqlJs> {
-  const w = globalThis as unknown as {
-    initSqlJs?: (cfg: { locateFile: (f: string) => string }) => Promise<SqlJs>;
-    document?: Document;
-  };
-  if (!w.document) return Promise.reject(new Error("sql.js needs a browser (no document)"));
-  if (sqlJsPromise) return sqlJsPromise;
-  sqlJsPromise = new Promise<SqlJs>((resolve, reject) => {
-    const fail = (why: string) => { sqlJsPromise = null; reject(new Error(`sql.js could not be loaded from ${sqlJsFile("sql-wasm.js")}: ${why}`)); };
-    const s = w.document!.createElement("script");
-    s.src = sqlJsFile("sql-wasm.js");
-    s.onload = () => {
-      if (!w.initSqlJs) { s.remove(); fail("the script defined no initSqlJs"); return; }
-      // sql.js fetches its .wasm beside the js.
-      w.initSqlJs({ locateFile: (f: string) => sqlJsFile(f) }).then(resolve, (e) => fail(String(e)));
-    };
-    s.onerror = () => { s.remove(); fail("the script did not load"); };
-    w.document!.head.appendChild(s);
-  });
-  return sqlJsPromise;
-}
-
-function rows(db: SqlJsDb, sql: string): Record<string, unknown>[] {
-  const res = db.exec(sql);
-  if (!res.length) return [];
-  const { columns, values } = res[0];
-  return values.map((v) => Object.fromEntries(columns.map((c, i) => [c, v[i]])));
 }
 
 /** Resolve a path recorded relative to the database directory into a File. */
@@ -341,41 +292,19 @@ export async function recallDatabaseDir(opts?: { prompt?: boolean }): Promise<Fi
 }
 
 /**
- * Open a Slicer DICOM database from a granted directory handle (the folder holding ctkDICOM.sql).
- * Lists every series from the SQL index without touching a single image file.
+ * Open a Slicer DICOM database served by Albula's server: the series list comes from the server, which reads the
+ * index; no image file is touched. (A picked folder with no server behind it can no longer be listed.)
  */
 export async function openDicomDatabase(
   from: DbSource | FileSystemDirectoryHandle,
   onProgress?: (p: DbProgress) => void,
 ): Promise<DicomDatabase> {
   // A bare directory handle is still accepted, so existing callers do not change.
-  const source: DbSource = "readSql" in from ? from : directorySource(from as FileSystemDirectoryHandle);
-
-  onProgress?.({ note: "reading ctkDICOM.sql…" });
-  const sqlBytes = await source.readSql();
-
-  onProgress?.({ note: "loading SQLite…" });
-  const SQL = await loadSqlJs();
-  const db = new SQL.Database(new Uint8Array(sqlBytes));
+  const source: DbSource = "listSeries" in from ? from : directorySource(from as FileSystemDirectoryHandle);
 
   onProgress?.({ note: "listing series…" });
-  const seriesRows = rows(
-    db,
-    `SELECT se.SeriesInstanceUID AS uid, se.SeriesNumber AS num, se.Modality AS modality,
-            se.SeriesDescription AS description,
-            se.SeriesDate AS seriesDate, se.SeriesTime AS seriesTime,
-            st.StudyInstanceUID AS studyUID, st.StudyDescription AS studyDescription,
-            st.StudyDate AS studyDate,
-            p.DisplayedPatientsName AS patientName, p.PatientID AS patientID,
-            COUNT(i.SOPInstanceUID) AS n,
-            SUM(CASE WHEN i.Filename LIKE '/%' THEN 1 ELSE 0 END) AS nExternal
-       FROM Series se
-       JOIN Studies st ON st.StudyInstanceUID = se.StudyInstanceUID
-       JOIN Patients p ON p.UID = st.PatientsUID
-       LEFT JOIN Images i ON i.SeriesInstanceUID = se.SeriesInstanceUID
-      GROUP BY se.SeriesInstanceUID
-      ORDER BY p.DisplayedPatientsName, st.StudyDate, se.SeriesNumber`,
-  );
+  const listed = await source.listSeries();
+  const seriesRows = listed.series as unknown as Record<string, unknown>[];
 
   const series: DbSeriesEntry[] = seriesRows.map((r) => {
     const count = Number(r.n ?? 0);
@@ -398,21 +327,18 @@ export async function openDicomDatabase(
     };
   });
 
-  const counts = rows(db, "SELECT (SELECT COUNT(*) FROM Patients) AS p, (SELECT COUNT(*) FROM Studies) AS s")[0] ?? {};
-
   return {
     label: source.label,
     directory: source.directory,
     series,
-    patients: Number(counts.p ?? 0),
-    studies: Number(counts.s ?? 0),
-    close: () => db.close(),
+    patients: Number(listed.patients ?? 0),
+    studies: Number(listed.studies ?? 0),
+    close: () => {},
 
     async readSeriesFileHead(entry, maxBytes) {
       if (!source.readHead) return null;
-      const escaped = entry.seriesInstanceUID.replace(/'/g, "''");
-      const fileRows = rows(db, `SELECT Filename AS fn FROM Images WHERE SeriesInstanceUID = '${escaped}'`);
-      const first = fileRows.map((r) => String(r.fn ?? "")).filter((n) => n && !n.startsWith("/"))[0];
+      let first: string | undefined;
+      try { first = (await source.seriesFiles(entry.seriesInstanceUID)).filter((n) => !n.startsWith("/"))[0]; } catch { return null; }
       if (!first) return null;
       try {
         return await source.readHead(first, maxBytes);
@@ -422,13 +348,8 @@ export async function openDicomDatabase(
     },
 
     async readSeriesFiles(entry, progress) {
-      const escaped = entry.seriesInstanceUID.replace(/'/g, "''");
-      const fileRows = rows(
-        db,
-        `SELECT Filename AS fn FROM Images WHERE SeriesInstanceUID = '${escaped}'`,
-      );
-      const names = fileRows.map((r) => String(r.fn ?? "")).filter(Boolean);
-      if (!names.length) throw new Error("that series has no files recorded in the database");
+      const names = await source.seriesFiles(entry.seriesInstanceUID);
+      if (!names.length) throw new Error("that series has no files in the database any more (removed since the list was read?) — reopen the list");
 
       const external = names.filter((n) => n.startsWith("/"));
       const local = names.filter((n) => !n.startsWith("/"));

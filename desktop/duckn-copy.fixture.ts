@@ -4,15 +4,12 @@ import dcmjs from "../logic/dcmjs.ts";
 import { setDcmjs } from "../logic/readers/dicom-series.ts";
 import { makeCtSeries, type SyntheticSeries } from "../logic/test-dicom.ts";
 
+import { runScript } from "./sqlite.ts";
 setDcmjs(dcmjs);
 
 async function sql(dbFile: string, text: string): Promise<void> {
-  const p = new Deno.Command("/usr/bin/sqlite3", { args: [dbFile], stdin: "piped", stdout: "null", stderr: "piped" }).spawn();
-  const w = p.stdin.getWriter();
-  await w.write(new TextEncoder().encode(text));
-  await w.close();
-  const { code, stderr } = await p.output();
-  if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
+  // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
+  runScript(dbFile, text);
 }
 
 // EVERY THROWAWAY DATABASE GOES WHEN THE TEST PROCESS ENDS (critic, 2026-09-23, finding 11: 140 of

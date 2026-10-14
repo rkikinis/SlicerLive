@@ -21,7 +21,7 @@
 // linking (Ron: the patient stays after the stick is gone; IRB data in one known place).
 import { readDicomHead } from "../logic/readers/dicom-head.ts";
 import { DEFLATED_EXPLICIT_VR_LE, datasetOffset } from "../logic/dicom-deflate.ts";
-import { IMPORT_FOLDER, indexImportedSeries, knownInstances, type AuditResult, type ImportSeries } from "./db-index.ts";
+import { busy, IMPORT_FOLDER, indexImportedSeries, knownInstances, withIndexLock, type AuditResult, type ImportSeries } from "./db-index.ts";
 import { ctkInstancePath } from "./md5.ts";
 
 export { IMPORT_FOLDER };
@@ -177,6 +177,12 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
   }
 
   // 2. WHAT THE DATABASE ALREADY HOLDS, and repeats within the batch (the same image twice on a disc).
+  // Not while another program writes the index: asked first, in the same words as the indexer. busy() first lets
+  // SQLite put back a write that died part-way (whose journal would make reads fail), so only a write still under way
+  // stops the import; one the check cannot see is met by the indexing, which stops at the first series it fails.
+  // Asked inside Albula's own one-writer-at-a-time lock, so Albula's own index write is never taken for another
+  // program's (critic 2026-10-13, round 3, finding 2).
+  if (await withIndexLock(dbDir, () => busy(`${dbDir}/ctkDICOM.sql`))) throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
   const known = await knownInstances(dbDir, found.map((f) => f.sop));
   const seen = new Set<string>();
   let already = 0;
@@ -195,25 +201,30 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
   prog.phase = "adding"; prog.series = bySeries.size;
   opts.onProgress?.({ ...prog });
   const created = new Map<string, string[]>();     // series -> files THIS import put in place
+  // A MOVE IS A COPY, AND THE ORIGINALS GO ONLY AFTER THE DATABASE HAS TAKEN THE SERIES (the critic, 2026-10-13,
+  // qa/2026-10-13-cross-platform.md A1 and A2): a rename followed by the take-back below deleted the only copies when the
+  // index refused a series (0 of 3 files left anywhere), and a rename cannot cross disks (a package on a USB stick: every
+  // series failed). Copying first costs time on the same disk and keeps the originals until the end.
+  const sources = new Map<string, string[]>();     // series -> the originals of THIS import's copies (removed for a move)
   const batch: ImportSeries[] = [];
   const failed: ImportResult["failed"] = [];
   const description = (list: Found[]) => list[0].h.get("0008103E") ?? "";
   for (const [uid, list] of bySeries) {
     const first = list[0];
     if (list.some((f) => f.study !== first.study)) notes.push(`The images of “${description(list) || "a scan"}” named ${new Set(list.map((f) => f.study)).size} different studies; all were filed under the first.`);
-    const mine: string[] = [], placed: { file: string; sop: string }[] = [];
+    const mine: string[] = [], from: string[] = [], placed: { file: string; sop: string }[] = [];
     try {
       for (const f of list) {
         const rel = ctkInstancePath(first.study, f.series, f.sop);
         const dest = `${dbDir}/${rel}`;
         if (!(await exists(dest))) {
           await Deno.mkdir(dest.slice(0, dest.lastIndexOf("/")), { recursive: true });
-          if (opts.move) await Deno.rename(f.path, dest); else await Deno.copyFile(f.path, dest);
-          mine.push(rel);
+          await Deno.copyFile(f.path, dest);
+          mine.push(rel); from.push(f.path);
         }
         placed.push({ file: rel, sop: f.sop });
       }
-      created.set(uid, mine);
+      created.set(uid, mine); sources.set(uid, from);
       batch.push(rowsFor(first, placed));
     } catch (e) {
       for (const rel of mine) await Deno.remove(`${dbDir}/${rel}`).catch(() => {});
@@ -240,6 +251,8 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
         failed.push({ uid: res.seriesUID, description: description(list), error: res.error });
         continue;
       }
+      // Taken: for a move, now the originals go.
+      if (opts.move) for (const src of sources.get(res.seriesUID) ?? []) await Deno.remove(src).catch(() => {});
       series.push({ uid: res.seriesUID, studyUID: first.study, patientID: first.h.get("00100020") ?? "", patientName: first.h.get("00100010") ?? "",
         modality: first.h.get("00080060") ?? "OT", description: description(list), instances: list.length });
     }

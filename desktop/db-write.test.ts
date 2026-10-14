@@ -7,6 +7,7 @@
 // the kind of thing that is fine until it is not.
 //
 //   deno test -A --no-check desktop/db-write.test.ts
+import { runScript } from "./sqlite.ts";
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 
 const userDir = await Deno.makeTempDir({ prefix: "slicerlive-user-" });
@@ -122,17 +123,7 @@ Deno.test("/_db says what this server can do", async () => {
 // exercises the ROUTES and not the functions is the one that would have caught either.
 Deno.test("a series can be written, indexed and then deleted through the routes", async () => {
   const dir = await Deno.makeTempDir({ prefix: "slicerlive-real-db-" });
-  const sql = (text: string) => {
-    const p = new Deno.Command("/usr/bin/sqlite3", { args: [`${dir}/ctkDICOM.sql`], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-    return (async () => {
-      const w = p.stdin.getWriter();
-      await w.write(new TextEncoder().encode(text));
-      await w.close();
-      const { code, stdout, stderr } = await p.output();
-      if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-      return new TextDecoder().decode(stdout).trim();
-    })();
-  };
+  const sql = async (text: string) => runScript(`${dir}/ctkDICOM.sql`, text).trim();
   await sql(`
     CREATE TABLE Patients (UID INTEGER PRIMARY KEY, PatientsName TEXT, PatientID TEXT);
     CREATE TABLE Studies (StudyInstanceUID TEXT PRIMARY KEY, PatientsUID INTEGER, StudyDate TEXT, StudyDescription TEXT);
@@ -186,12 +177,7 @@ Deno.test("a series can be written, indexed and then deleted through the routes"
 // 291 MB surfaces object, leaving the file on disk as an orphan. With the record in the header the
 // server finishes both; a record the index refuses takes the file back out.
 Deno.test("a write with an x-albula-index header is indexed in the same request, or taken back", async () => {
-  const sqlite = async (db: string, sql: string) => {
-    const p = new Deno.Command("sqlite3", { args: [db], stdin: "piped", stdout: "piped", stderr: "piped" }).spawn();
-    const w = p.stdin.getWriter(); await w.write(new TextEncoder().encode(sql)); await w.close();
-    const { code, stderr } = await p.output();
-    if (code !== 0) throw new Error(new TextDecoder().decode(stderr));
-  };
+  const sqlite = async (db: string, sql: string) => { runScript(db, sql); };
   const root = await Deno.makeTempDir({ prefix: "albula-wi-" });
   const dir = `${root}/SlicerDICOMDatabase`; await Deno.mkdir(dir);
   await sqlite(`${dir}/ctkDICOM.sql`, `

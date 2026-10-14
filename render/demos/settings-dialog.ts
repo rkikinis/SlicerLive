@@ -44,6 +44,7 @@ export const SETTING_DEFAULTS = {
   Pictures: { folder: "downloads", only3d: false, panel: false, scale: 1 },
   View3D: { drawing: true, lighting: LIGHT_PRESETS[DEFAULT_LIGHT].name, shading: LATEST_SHADING },
   Colors: { scheme: LATEST_PALETTE },
+  Developer: { steps: false },
 } as const;
 
 export function pictureDefaults(s: SettingsStore): { only3d: boolean; panel: boolean; scale: number } {
@@ -116,11 +117,11 @@ export function openSettingsDialog(deps: SettingsDeps): void {
       const dbSel = document.createElement("select"); dbSel.title = "Make another registered database the current one";
       const dbRow = row("DICOM database", "Everything loaded, computed or saved goes through it.", dbVal, dbSel);
       into.appendChild(dbRow);
-      const dbHint = hint("Where the studies are. To add a database that is not listed: one line in settings.ini under [Database], a name = its folder (the one holding ctkDICOM.sql).");
+      const dbHint = hint("Where the studies are. To make or add a database: Load / Save › Load from the DICOM database › Databases….");
       into.appendChild(dbHint);
       deps.databases().then((list) => {
         dbSel.replaceChildren();
-        for (const d of list) { const o = document.createElement("option"); o.value = d.id; o.textContent = d.id + (d.exists === false ? " (missing)" : ""); dbSel.appendChild(o); }
+        for (const d of list) { const o = document.createElement("option"); o.value = d.id; o.textContent = ((d as { description?: { name?: string } }).description?.name ?? d.id) + (d.exists === false ? " (missing)" : ""); dbSel.appendChild(o); }
         const cur = list.find((d) => d.current) ?? list[0];
         if (cur) { dbSel.value = cur.id; dbVal.textContent = shortHome(cur.dir ?? cur.path ?? cur.id); dbVal.title = cur.dir ?? cur.path ?? ""; }
         dbSel.style.display = list.length > 1 ? "" : "none";
@@ -146,7 +147,7 @@ export function openSettingsDialog(deps: SettingsDeps): void {
       // are identical -- same triangles, same vertices, surface areas within 0.0002%. Off until he
       // has run it on real studies in his own window; the old path is one switch away.
       into.appendChild(h2("Surfaces"));
-      into.appendChild(row("Build surfaces on the graphics card", "Faster, and the same surfaces — measured at 0.9 seconds against 10 on a whole-body segmentation. New; the older way runs if this fails.",
+      into.appendChild(row("Build surfaces on the graphics card", "Builds surface models on the graphics card: faster, and the same surfaces. If it fails, they are built on the processor instead.",
         toggle(() => st.getBool("Surfaces", "onGpu", SETTING_DEFAULTS.Surfaces.onGpu), (v) => {
           st.set("Surfaces", "onGpu", v);
           (globalThis as unknown as { __gpuSurfaces?: boolean }).__gpuSurfaces = v;
@@ -156,6 +157,15 @@ export function openSettingsDialog(deps: SettingsDeps): void {
       // THE DUCKN WORKING COPY (the workspace brief, Contents/docs/DUCKN-WORKING-COPY.md). ON by
       // default since 2026-09-23 (Ron, after his own load from it and the sweep: "yes to both"); a
       // series without a valid copy is read from DICOM either way, and the status line says which.
+      // FOR DEVELOPERS (Ron, 2026-10-14: the glasses' step-by-step rows "developer setting"): the controls that do one
+      // step of what a single button does, kept for development. Off by default.
+      into.appendChild(h2("For developers"));
+      into.appendChild(row("Show the step-by-step controls", "The separate steps behind one-button actions, such as the glasses' stereo and head tracking in the 3D view's gear (the VR/AR button does them all).",
+        toggle(() => st.getBool("Developer", "steps", SETTING_DEFAULTS.Developer.steps), (v) => {
+          st.set("Developer", "steps", v);
+          document.documentElement.classList.toggle("sl-dev", v);
+        })));
+
       into.appendChild(h2("Loading"));
       into.appendChild(row("Load images from their fast copy", "A compressed copy of each series kept beside the DICOM files: one description and a few hundred pieces instead of hundreds of files. The same images, checked piece by piece. A series without a copy loads from DICOM as before.",
         toggle(() => st.getBool("Loading", "fromCopy", SETTING_DEFAULTS.Loading.fromCopy), (v) => {

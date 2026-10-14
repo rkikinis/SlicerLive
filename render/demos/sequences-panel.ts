@@ -166,6 +166,7 @@ export function registerSequencesPanel(shell: AppShell, opts: SequencesPanelOpti
   shell.registerPanel({
     id: "sequences", title: "Sequences", groups: ["Data"], order: 4,
     tip: "Volumes in time — cardiac phases, a bolus, a cine: step through the frames or play them",
+    help: `<p>Volumes in time: the phases of a gated heart scan, a contrast bolus, a cine. Step through the frames or play them; a segmentation made on one frame follows every frame. The same controls sit in the top bar in every module while a sequence is loaded.</p>`,
     mount(el) { root = el; render(); },
   });
   live.subscribe((c) => {

@@ -21,3 +21,14 @@ Deno.test("a cohort is a name and its patients and studies; deleting it leaves t
   assertEquals((await seriesAttributes(path)).map((a) => a.value), ["nlst"]);
   await Deno.remove(dir, { recursive: true });
 });
+
+// ALBULA'S OWN WRITES AT ONCE (critic 2026-10-13, SQLite round 3, finding 1): fifty cohort edits in flight together, in
+// the SQLite threads. A transaction that began as a read and then wrote was refused at once when another held the lock
+// (83 of 200 lost); every write script now says it will write at its start (BEGIN IMMEDIATE) and waits its turn.
+Deno.test("fifty cohort edits at once all land", async () => {
+  const path = `${await Deno.makeTempDir()}/provenance.sqlite`;
+  await Promise.all(Array.from({ length: 50 }, (_, k) => setCohortMembers(path, `Group ${k % 5}`, [{ level: "patient", uid: `P${k}` }], [])));
+  const all = await cohorts(path);
+  assertEquals(all.length, 5);
+  assertEquals(all.reduce((n, c) => n + c.patients.length, 0), 50);
+});

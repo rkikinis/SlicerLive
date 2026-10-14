@@ -11,9 +11,10 @@
 // docs/slicerlive-logo.png, which is Steve's mark for his project, not this app's.
 import { dirname, join, fromFileUrl, resolve } from "jsr:@std/path@1";
 import { makeSquareLogo } from "./icon.ts";
-import { albulaVersion, webviewNativeFile } from "./versions.ts";
+import { albulaVersion, requirePinnedDeno, webviewNativeFile } from "./versions.ts";
 
 // Both from where they are decided (desktop/versions.ts): the workspace's /VERSION, and deno.jsonc's webview pin.
+requirePinnedDeno();   // the compiled server is this Deno
 const VERSION = albulaVersion();
 
 const here = dirname(fromFileUrl(import.meta.url));
@@ -51,6 +52,8 @@ const bin = join(buildDir, "slicerlive-gallery");
 await run(Deno.execPath(), [
   "compile", "-A", "--unstable-ffi",
   "--include", join(here, "server-worker.ts"),
+  "--include", join(here, "sqlite-worker.ts"),   // the SQLite threads (sqlite.ts)
+  "--include", join(here, "headset-pose-worker.ts"),   // the glasses' pose callback (headset-viture.ts)
   "-o", bin,
   join(here, "main.ts"),
 ]);

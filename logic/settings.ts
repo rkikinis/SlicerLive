@@ -99,7 +99,11 @@ export async function openSettings(): Promise<SettingsStore> {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inFlight: Promise<void> = Promise.resolve();
 
+  // THE GLASSES WINDOW WRITES NO SETTINGS (desktop/headset.ts): it is a second copy of the app, full screen on the
+  // glasses, and its sizes and choices are not the person's -- the main window's settings stay as they are.
+  const readOnly = typeof location !== "undefined" && new URLSearchParams(location.search).has("glasses");
   const write = async () => {
+    if (readOnly) return;
     const text = formatIni(ini);
     if (served) {
       try {
