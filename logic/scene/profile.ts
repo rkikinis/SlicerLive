@@ -163,6 +163,7 @@ export const ENVELOPE: Record<string, FieldSpec> = {
   study: { kind: "object", required: true, from: "profile", note: "{ studyInstanceUID } — the first study named; the browser lists the scene under every study in `studies`" },
   studies: { kind: "strings", from: "profile", note: "every StudyInstanceUID the scene names, one patient (a ReMIND case: pre-op MRI, intra-op MRI, intra-op US are three studies)" },
   nodes: { kind: "object", required: true, from: "core" },
+  extensions: { kind: "object", from: "core", note: "glTF's pattern: one block per extension, { v, state }, named <name>/<v> in extensionsUsed (logic/scene/extensions.ts)" },
 };
 
 /** Steve's structure-file form of the same content, for the sync when his validator composes profiles. */

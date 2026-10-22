@@ -10,10 +10,12 @@
 //             its segmentations not drawn in 3D
 //   solid     its segmentations drawn solid (render/solid-merge.ts, colorize-field.ts setSolid); the
 //             volume itself not rendered. A sequence (the beating heart) keeps the colored volume, solid.
-//   surfaces  its segmentations drawn as surface models; the volume not rendered. ONLY FOR SEGMENTATIONS
-//             GIVEN SURFACE MODELS in the Generate Surface Models module (Ron, 2026-09-24: surface models
-//             behind a firewall); the Scene module offers it only for a volume that has some, and a
-//             segmentation without them is drawn solid under it.
+//
+// There was a fourth, "surfaces" (surface models drawn as triangles), offered once Generate Surface Models
+// had made some. GONE 2026-10-21 (Ron, option B): the solid look draws the anatomy from the labels, and
+// surface models are made only as an export, on demand, from Save › Files (render/surface-export.ts). A
+// look stored as "surfaces" by an older scene is read as "solid", which is what was drawn under it anyway
+// for every segmentation without surface models.
 //
 // The choice is stored on the image node as `look3D`. What the Scene module SHOWS is read back from what
 // is actually on (the volume rendering may be switched on elsewhere: the Volume Rendering module, a crop,
@@ -23,8 +25,8 @@
 import type { LiveScene } from "./livescene.ts";
 import type { MrsonNode } from "./mrson.ts";
 
-export type Look3D = "off" | "volume" | "solid" | "surfaces";
-export const LOOKS_3D: readonly Look3D[] = ["off", "volume", "solid", "surfaces"];
+export type Look3D = "off" | "volume" | "solid";
+export const LOOKS_3D: readonly Look3D[] = ["off", "volume", "solid"];
 
 const refs = (n: MrsonNode | undefined, k: string): string[] => ((n?.refs as Record<string, string[]> | undefined)?.[k] ?? []);
 
@@ -53,8 +55,9 @@ export function segmentationsOf(live: LiveScene, imageId: string): MrsonNode[] {
  *  (a volume alone is switched on by its load, as before). */
 export function storedLook3D(live: LiveScene, imageId: string): Look3D {
   // "colored" was the stored name until 2026-09-25; the database's scenes were rewritten, a file from elsewhere is read.
+  // "surfaces" until 2026-10-21 (the look is gone): solid.
   const raw = live.nodes.get(imageId)?.look3D as string | undefined;
-  const s = (raw === "colored" ? "solid" : raw) as Look3D | undefined;
+  const s = (raw === "colored" || raw === "surfaces" ? "solid" : raw) as Look3D | undefined;
   if (s && LOOKS_3D.includes(s)) return s;
   return segmentationsOf(live, imageId).length ? "solid" : "off";
 }
@@ -69,15 +72,13 @@ export function look3DOf(live: LiveScene, imageId: string): Look3D {
     return "volume";
   }
   const s = storedLook3D(live, imageId);
-  if ((s === "solid" || s === "surfaces") && !segmentationsOf(live, imageId).length) return "off";
-  // "Surfaces" without any surface models is what is drawn: solid.
-  if (s === "surfaces" && !hasSurfaceModels(live, imageId)) return "solid";
+  if (s === "solid" && !segmentationsOf(live, imageId).length) return "off";
   return s === "volume" ? "off" : s;
 }
 
 /**
  * EVERYTHING OF THIS VOLUME THAT IS ON in 3D, for the Scene module to light up: the volume rendering
- * ("volume") and the look its segmentations are drawn in ("solid" / "surfaces"), which can both be on
+ * ("volume") and the look its segmentations are drawn in ("solid"), which can both be on
  * when the volume rendering was switched on elsewhere (Volume Rendering, a crop, an older scene). One
  * lit button there claimed one of the two while the other was on screen too (critic, 2026-09-24,
  * finding 13). "off" when neither.
@@ -87,11 +88,11 @@ export function looksOn(live: LiveScene, imageId: string): Look3D[] {
   const img = live.nodes.get(imageId);
   const segs = segmentationsOf(live, imageId);
   // A TIME SERIES is drawn in 3D by its rendering alone (its members are not in the solid look): colorizing
-  // is Colored, not colorizing is Volume, off is the stored Surfaces if it has models, else nothing. It lit
-  // Volume and Colored for a gray rendering (critic, 2026-09-24, round 2, finding 5).
+  // is Colored, not colorizing is Volume, off is nothing. It lit Volume and Colored for a gray rendering (critic,
+  // 2026-09-24, round 2, finding 5).
   if (img?.sequence) {
     if (vr?.visible) return [vr.colorize !== false && segs.length ? "solid" : "volume"];
-    return storedLook3D(live, imageId) === "surfaces" && hasSurfaceModels(live, imageId) ? ["surfaces"] : ["off"];
+    return ["off"];
   }
   // A SINGLE VOLUME rendered with its segmentations colorized into it (the AI panel's see-through colored
   // volume) draws them: Colored, not Volume ("its segmentations are not drawn").
@@ -99,23 +100,16 @@ export function looksOn(live: LiveScene, imageId: string): Look3D[] {
   const out: Look3D[] = [];
   if (vr?.visible) out.push("volume");
   const s = storedLook3D(live, imageId);
-  if (segs.length && (s === "solid" || s === "surfaces")) out.push(s === "surfaces" && hasSurfaceModels(live, imageId) ? "surfaces" : "solid");
+  if (segs.length && s === "solid") out.push("solid");
   return out.length ? out : ["off"];
 }
 
-/** How a segmentation is drawn in 3D under its volume's look: solid, surface models, or not at all.
+/** How a segmentation is drawn in 3D under its volume's look: solid, or not at all.
  *  A segmentation whose volume is not in the scene (a label map loaded alone) is solid, the default. */
-export function segLookOf(live: LiveScene, seg: MrsonNode): "solid" | "surfaces" | "hidden" {
+export function segLookOf(live: LiveScene, seg: MrsonNode): "solid" | "hidden" {
   const src = refs(seg, "source")[0];
   const img = src ? live.nodes.get(src) : undefined;
-  if (!img || img.type !== "image") return seg.surfaceModels === true ? "surfaces" : "solid";
+  if (!img || img.type !== "image") return "solid";
   const s = storedLook3D(live, img.id as string);
-  if (s === "off" || s === "volume") return "hidden";
-  return s === "surfaces" && seg.surfaceModels === true ? "surfaces" : "solid";
-}
-
-/** Has any segmentation of this volume been given surface models (Generate Surface Models)? The Scene
- *  module shows its "Surfaces" choice only then. */
-export function hasSurfaceModels(live: LiveScene, imageId: string): boolean {
-  return segmentationsOf(live, imageId).some((n) => n.surfaceModels === true);
+  return s === "off" || s === "volume" ? "hidden" : "solid";
 }

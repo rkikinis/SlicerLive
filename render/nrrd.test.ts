@@ -74,8 +74,8 @@ Deno.test("space: an unrecognised space throws rather than defaulting", async ()
   );
 });
 
-// `space units` is per axis and routinely not millimeters. Carried rather than applied: rescaling
-// here would hide the unit from the caller, which is the mistake being fixed.
+// `space units` is per axis and routinely not millimeters. Carried AND applied (2026-10-20): the unit stays on the record
+// and the geometry is in the scene's mm, so a microscope's stack sits beside a CT at its true size.
 Deno.test("space units: carried per axis, verbatim", async () => {
   const n = await parseNrrd(
     nrrd([...BASE, "space: 3D-right-handed", 'space units: "um" "um" "um"'], EIGHT),
@@ -83,6 +83,19 @@ Deno.test("space units: carried per axis, verbatim", async () => {
   assertEquals(n.spaceUnits, ["um", "um", "um"]);
   const plain = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed"], EIGHT));
   assertEquals(plain.spaceUnits, []);
+});
+
+Deno.test("space units: micrometers and meters become the scene's mm; an unknown unit is left as it is", async () => {
+  const um = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed", 'space units: "um" "um" "um"'], EIGHT));
+  const mm = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed"], EIGHT));
+  for (let i = 0; i < 12; i++) assertEquals(um.ijkToRAS[i], mm.ijkToRAS[i] * 1e-3);
+  const m = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed", 'space units: "m" "m" "m"'], EIGHT));
+  for (let i = 0; i < 12; i++) assertEquals(m.ijkToRAS[i], mm.ijkToRAS[i] * 1000);
+  const pc = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed", 'space units: "pc" "pc" "pc"'], EIGHT));
+  assertEquals(pc.ijkToRAS[0], 3.0856775814913673e19);
+  const odd = await parseNrrd(nrrd([...BASE, "space: 3D-right-handed", 'space units: "furlong" "furlong" "furlong"'], EIGHT));
+  assertEquals(odd.ijkToRAS, mm.ijkToRAS);
+  assertEquals(odd.spaceUnits, ["furlong", "furlong", "furlong"]);
 });
 
 Deno.test("scalar path: a 4-D file is refused, and says where to go", async () => {

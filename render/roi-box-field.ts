@@ -13,11 +13,20 @@
 
 import type { Field } from "./fields.ts";
 import type { Vec3 } from "./mat4.ts";
+import { tuned, voxelFromExtent } from "./scene-scale.ts";
+
+/**
+ * A length tuned by eye in mm on clinical scans, kept exactly on grids of 0.25 to 5 mm and the same number of voxels as
+ * at that range's edge outside it (scene-scale.ts; Ron, 2026-10-20: "from astrophysics to electron microscope").
+ */
+const clinicalMm = (mm: number, voxel: number | undefined) => tuned(mm, voxel, mm / 5, mm / 0.25);
 
 export interface RoiBoxOpts {
   color?: [number, number, number];
   opacity?: number;
-  barHalfMm?: number;    // half-thickness of the wireframe bars (mm); default 1.5
+  barHalfMm?: number;    // half-thickness of the wireframe bars (scene units); default 1.5 mm on a clinical grid
+  /** The finest voxel of the data the box is drawn over (scene units). Without it, a 256th of the box (voxelFromExtent). */
+  voxel?: number;
   /**
    * The box's own axes in world space: row-major 3x3, COLUMNS are the axes. Omitted means
    * world-aligned, and the field then behaves exactly as it always did.
@@ -50,6 +59,8 @@ export class RoiBoxField implements Field {
   private color: [number, number, number];
   private opacity: number;
   private bar: number;
+  /** The voxel the frame's own lengths are sized by (see RoiBoxOpts.voxel); fixed at construction. */
+  private dataVoxel: number | undefined;
   /** Columns are the box axes in world; identity when the caller gave none. */
   private axes: number[];
 
@@ -58,8 +69,19 @@ export class RoiBoxField implements Field {
     this.half = [...half] as Vec3;
     this.color = opts.color ?? [1, 0.85, 0.25];
     this.opacity = opts.opacity ?? 1;
-    this.bar = opts.barHalfMm ?? 1.5;
+    this.dataVoxel = opts.voxel !== undefined && opts.voxel > 0 ? opts.voxel : voxelFromExtent(2 * Math.max(half[0], half[1], half[2]));
+    this.bar = opts.barHalfMm ?? clinicalMm(1.5, this.dataVoxel);
     this.axes = opts.axes && opts.axes.length === 9 ? [...opts.axes] : [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  }
+
+  /**
+   * THE SCENE BOX'S BARS, a hair thinner than the crop box's (roi-widget: diagonal x 0.012 x 0.12), so the two read as
+   * reference and control when both are up: a thousandth of the diagonal, at least 0.4 mm on a clinical grid -- that
+   * many voxels at any other scale. `voxel` is the finest voxel shown; without one, a 256th of the box.
+   */
+  static frameBarHalf(lo: Vec3, hi: Vec3, voxel?: number): number {
+    const v = voxel !== undefined && Number.isFinite(voxel) && voxel > 0 ? voxel : voxelFromExtent(Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+    return Math.max(clinicalMm(0.4, v), Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.001);
   }
 
   /** Column `k` of the axes matrix: the box's k-th axis, in world. */
@@ -76,14 +98,16 @@ export class RoiBoxField implements Field {
   get boxHalf(): Vec3 { return [...this.half] as Vec3; }
 
   uniformFloats() { return 28; }     // center(4) + half(4) + color(4) + params(4) + 3 axis rows(12)
-  sampleStep(): number { return Math.max(0.5 * this.bar, 0.25); }
+  /** Half a bar, but never finer than 0.25 mm on a clinical grid: the scene marches at the finest step of any field, and
+   *  a thin frame must not slow the volume down. The floor is that many voxels at any other scale. */
+  sampleStep(): number { return Math.max(0.5 * this.bar, clinicalMm(0.25, this.dataVoxel)); }
   /**
    * The world box that bounds the frame. For an oriented box that is the extent of its eight
    * corners, not center-plus-half -- and it has to be right or the empty-space skip would cut the
    * ray short of bars it should have hit.
    */
   aabb(): [Vec3, Vec3] {
-    const m = this.bar + 0.5;
+    const m = this.bar + clinicalMm(0.5, this.dataVoxel);
     const [u, v, w] = [this.axis(0), this.axis(1), this.axis(2)];
     const lo: Vec3 = [Infinity, Infinity, Infinity];
     const hi: Vec3 = [-Infinity, -Infinity, -Infinity];
@@ -145,12 +169,12 @@ fn sample_field_roi${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
   let sd = sd_roi${s}(wp);
   // crisp opaque bar: ~1 inside, AA-ramp to 0 across ~half a sample step at the surface
-  let op = clamp(0.5 - sd / max(u_material.scene.x, 1e-3), 0.0, 1.0) * op0;
+  let op = clamp(0.5 - sd / scene_step(), 0.0, 1.0) * op0;
   if (op <= 0.0) { return vec4<f32>(0.0); }
   // Shaded, not flat. Unlit bars read as pasted-on strokes next to the ray-marched, lit content
   // around them. The frame SDF is cheap and already evaluated, so a central-difference normal and
   // a headlight give the bars form for a handful of extra SDF taps on the few samples that hit one.
-  let e = max(u_material.scene.x, 1e-3) * 0.5;
+  let e = scene_step() * 0.5;
   let n = normalize(vec3<f32>(
     sd_roi${s}(wp + vec3<f32>(e, 0.0, 0.0)) - sd_roi${s}(wp - vec3<f32>(e, 0.0, 0.0)),
     sd_roi${s}(wp + vec3<f32>(0.0, e, 0.0)) - sd_roi${s}(wp - vec3<f32>(0.0, e, 0.0)),

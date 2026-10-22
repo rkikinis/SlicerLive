@@ -312,7 +312,19 @@ export class ColorizeField implements Field {
     this.brick2Tex.destroy();
   }
 
+  // WHAT WAS LAST SENT TO THE CARD, so an unchanged lookup or palette is not sent again (critic 2026-10-16, general audit,
+  // finding 6: a step of the beating heart rewrote 40 of these textures, none of them changed).
+  private sentLut?: Uint8Array;
+  private sentPalette?: Uint8Array;
+  private sentMaterial?: Uint8Array;
+  private static same(a: Uint8Array | undefined, b: Uint8Array): boolean {
+    if (!a || a.length !== b.length) return false;
+    for (let i = 0; i < b.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
   setCtLUT(lut: Uint8Array) {
+    if (ColorizeField.same(this.sentLut, lut)) return;
+    this.sentLut = lut.slice();
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
   }
 
@@ -340,8 +352,14 @@ export class ColorizeField implements Field {
   }
   /** Upload the palette row and the finish rows. 3 KB — cheap enough to call on every slider tick. */
   flushPalette() {
-    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, this.palette, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 2] }, this.material, { bytesPerRow: 256 * 4 }, [256, 2]);
+    if (!ColorizeField.same(this.sentPalette, this.palette)) {
+      this.sentPalette = this.palette.slice();
+      this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, this.palette, { bytesPerRow: 256 * 4 }, [256, 1]);
+    }
+    if (!ColorizeField.same(this.sentMaterial, this.material)) {
+      this.sentMaterial = this.material.slice();
+      this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 2] }, this.material, { bytesPerRow: 256 * 4 }, [256, 2]);
+    }
     // Only WHICH structures are visible changes the smoothed copy; a color or an opacity is this 1 KB
     // write. Rebuilding on every change cost ~0.44 s and 1.25 GB of scratch at 768x768x709 (critic,
     // finding 7).
@@ -383,6 +401,7 @@ fn skip_clz${s}(wp : vec3<f32>) -> f32 {
   uniformFloats() { return 32; }          // mat4(16) + clim(4) + shade(4) + params(4) + dims(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  voxel(): number { return this.stepMm; }
 
   structMembers(s: number): string {
     return [
@@ -468,26 +487,27 @@ fn visocc_clz${s}(wp : vec3<f32>) -> vec2<f32> {
   let p = t0 * d - vec3<f32>(0.5);
   let b = floor(p);
   let f = p - b;
-  var labs : array<i32, 8>;
-  var ws : array<f32, 8>;
-  var n = 0;
+  // THE EIGHT NEIGHBORS IN PLAIN VARIABLES, NO ARRAYS (C3N-01524, 2026-10-16; Ron: "I would have hoped for faster"): with
+  // the candidates kept in arrays indexed in a loop, this one function was more than half of the solid look's time in
+  // Safari (39 ms -> 17 ms with it switched off, 1500x1050). Written out, the solid pass went from 36-41 ms to 25 ms
+  // there, and the picture is the same to the byte (__picture3dExact, two sizes). Same answer: the label holding the most
+  // weight, the first to appear winning a tie -- bit for bit (render/test/visocc.gpu.test.ts). (The single-label occupancy above, written out the same way, gained
+  // nothing and stays a loop.)
+${[0,1,2,3,4,5,6,7].map((i) => { const cx = i & 1, cy = (i >> 1) & 1, cz = (i >> 2) & 1;
+    return `  let w${i} = ${cx ? "f.x" : "(1.0 - f.x)"} * ${cy ? "f.y" : "(1.0 - f.y)"} * ${cz ? "f.z" : "(1.0 - f.z)"};
+  var l${i} = i32(textureLoad(t_lab_clz${s}, vec3<i32>(clamp(b + vec3<f32>(${cx}.0, ${cy}.0, ${cz}.0), vec3<f32>(0.0), d - vec3<f32>(1.0))), 0).r);
+  if (l${i} > 0 && u_material.clz${s}_params.w < 1.5 && textureLoad(t_lut_clz${s}, vec2<i32>(l${i}, 1), 0).a <= 0.001) { l${i} = 0; }`; }).join("\n")}
+  // The sums formed exactly as the loop formed them -- one addition at a time, in the voxels' order, each label's from its
+  // first voxel -- so a tie falls the same way (critic 2026-10-16, tonight's fixes, finding 3: a single long sum let the
+  // compiler reorder it, and 7 of 655,360 test points chose the other label of a tie).
   var occ = 0.0;
-  for (var i = 0; i < 8; i = i + 1) {
-    let c = vec3<f32>(f32(i & 1), f32((i >> 1) & 1), f32((i >> 2) & 1));
-    let w = ((1.0 - c.x) + (2.0 * c.x - 1.0) * f.x)
-          * ((1.0 - c.y) + (2.0 * c.y - 1.0) * f.y)
-          * ((1.0 - c.z) + (2.0 * c.z - 1.0) * f.z);
-    let vi = vec3<i32>(clamp(b + c, vec3<f32>(0.0), d - vec3<f32>(1.0)));
-    let lab = i32(textureLoad(t_lab_clz${s}, vi, 0).r);
-    if (lab <= 0) { continue; }
-    if (u_material.clz${s}_params.w < 1.5 && textureLoad(t_lut_clz${s}, vec2<i32>(lab, 1), 0).a <= 0.001) { continue; }
-    occ = occ + w;
-    var found = false;
-    for (var j = 0; j < n; j = j + 1) { if (labs[j] == lab) { ws[j] = ws[j] + w; found = true; break; } }
-    if (!found) { labs[n] = lab; ws[n] = w; n = n + 1; }
-  }
+${[0,1,2,3,4,5,6,7].map((i) => `  if (l${i} > 0) { occ = occ + w${i}; }`).join("\n")}
   var best = 0; var bw = -1.0;
-  for (var j = 0; j < n; j = j + 1) { if (ws[j] > bw) { bw = ws[j]; best = labs[j]; } }
+${[0,1,2,3,4,5,6,7].map((i) => `  if (l${i} > 0${[...Array(i).keys()].map((j) => ` && l${i} != l${j}`).join("")}) {
+    var s${i} = w${i};
+${[...Array(7 - i).keys()].map((k) => i + 1 + k).map((j) => `    if (l${j} == l${i}) { s${i} = s${i} + w${j}; }`).join("\n")}
+    if (s${i} > bw) { bw = s${i}; best = l${i}; }
+  }`).join("\n")}
   return vec2<f32>(occ, f32(best));
 }
 /** SOLID LOOK: the smoothed solid at a patient-space point, 0..1, filtered by the card. */
@@ -510,7 +530,8 @@ fn vislab_clz${s}(wp : vec3<f32>) -> i32 {
  *  contour lines like wood grain (first render, 2026-09-23); the blurred copy smooths them away, as
  *  surface nets does when it builds a mesh. One coarsest voxel either side (times a tuning factor). */
 fn solid_nrm_smooth_clz${s}(hit : vec3<f32>, rd : vec3<f32>) -> vec3<f32> {
-  let h = max(u_material.clz${s}_clim.z, 1e-3) * max(u_material.clz${s}_clim.w, 0.25);
+  // The coarsest voxel's floor guards a zero only, so it is the finest voxel (dims.w), never 1e-3 mm (scene-scale.ts).
+  let h = max(u_material.clz${s}_clim.z, u_material.clz${s}_dims.w) * max(u_material.clz${s}_clim.w, 0.25);
   let g = vec3<f32>(
     smooth_clz${s}(hit + vec3<f32>(h,0,0)) - smooth_clz${s}(hit - vec3<f32>(h,0,0)),
     smooth_clz${s}(hit + vec3<f32>(0,h,0)) - smooth_clz${s}(hit - vec3<f32>(0,h,0)),
@@ -526,7 +547,7 @@ fn solid_nrm_label_clz${s}(hit : vec3<f32>, lab : i32, rd : vec3<f32>) -> vec3<f
   // seen through a see-through structure showed a fine grid (2026-09-23). Two and a half coarsest
   // voxels either side (one radius: two cost twice the reads for no visible difference).
   let d = u_material.clz${s}_dims.xyz;
-  let c = max(u_material.clz${s}_clim.z, 1e-3);
+  let c = max(u_material.clz${s}_clim.z, u_material.clz${s}_dims.w);   // the coarsest voxel, at least the finest
   var g = vec3<f32>(0.0);
   {
     let h = c * 2.5;
@@ -615,7 +636,7 @@ fn solid_thin_block_clz${s}(wp : vec3<f32>) -> bool {
 fn solid_class_clz${s}(wp : vec3<f32>, cur : i32, rd : vec3<f32>) -> i32 {
   let sm = smooth_clz${s}(wp);
   let d = u_material.clz${s}_dims.xyz;
-  let coarse = max(u_material.clz${s}_clim.z, 1e-3);
+  let coarse = max(u_material.clz${s}_clim.z, u_material.clz${s}_dims.w);
   // Under the cut-off is outside: half what a lone labeled voxel reaches under the blur
   // (solid-smooth.ts EMPTY_CUTOFF), so no single voxel falls under it (critic, finding 12).
   if (sm < ${EMPTY_CUTOFF.toFixed(5)}) { return 0; }
@@ -767,7 +788,7 @@ fn sample_field_clz${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
       if (u_material.clz${s}_params.y <= 0.0) { return vec4<f32>(0.0); }   // no body shown: nothing left to draw
       if (visocc_clz${s}(wp).x >= 0.5) { return vec4<f32>(0.0); }
     } else {
-      let sc = solid_clz${s}(wp, rd, 2.0 * max(u_material.scene.x, 1e-3));
+      let sc = solid_clz${s}(wp, rd, 2.0 * scene_step());
       if (sc.a >= 0.0) { return sc; }
     }
     // outside every structure: the unlabeled body, if it is shown at all
@@ -799,7 +820,7 @@ fn sample_field_clz${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   if (dens <= 0.001) { return vec4<f32>(0.0); }
 
   let step = u_material.scene.x;
-  let unit = max(u_material.clz${s}_params.x, 1e-3);
+  let unit = max(u_material.clz${s}_params.x, 1e-3 * step);   // a zero guard, relative to the step (scene-scale.ts)
   let opacity = clamp(1.0 - pow(1.0 - clamp(dens, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
 

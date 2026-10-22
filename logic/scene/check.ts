@@ -54,6 +54,14 @@ export function checkScene(doc: unknown): SceneProblem[] {
     if (typeof src.producer !== "string") out.push({ where: "file", what: "source.producer (the build that wrote it) is missing" });
     if (typeof src.producedAt !== "string") out.push({ where: "file", what: "source.producedAt is missing" });
   }
+  // Each extension block well formed, and named with its version in extensionsUsed (logic/scene/extensions.ts).
+  if (d.extensions !== undefined && d.extensions && typeof d.extensions === "object" && !Array.isArray(d.extensions)) {
+    const used = Array.isArray(d.extensionsUsed) ? d.extensionsUsed : [];
+    for (const [name, b] of Object.entries(d.extensions as Record<string, Obj>)) {
+      if (!b || typeof b !== "object" || !Number.isInteger(b.v) || !("state" in b)) { out.push({ where: `extension ${name}`, what: "is not { v, state }" }); continue; }
+      if (!used.includes(`${name}/${b.v}`)) out.push({ where: `extension ${name}`, what: `extensionsUsed does not name ${name}/${b.v}` });
+    }
+  }
   const study = d.study as Obj | undefined;
   if (study && (typeof study.studyInstanceUID !== "string" || !study.studyInstanceUID)) out.push({ where: "file", what: "study.studyInstanceUID is missing — a scene belongs to one study" });
   const nodes = d.nodes;

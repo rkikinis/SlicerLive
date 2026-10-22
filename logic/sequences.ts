@@ -23,6 +23,7 @@ import type { LocalBlobStore } from "./ingest.ts";
 import { loadVolumeIntoScene } from "./ingest.ts";
 import type { Volume } from "./readers/nifti.ts";
 import type { FrameTiming } from "./readers/dicom-series.ts";
+import { volumeInterpreters } from "./readers/volume-interpreters.ts";
 
 /** One frame: its index value (the label's number), its image node, and WHEN it is, in seconds. */
 export interface SequenceItem { index: string; node: string; time?: number }
@@ -258,9 +259,6 @@ export function joinSequence(live: LiveScene, nodeId: string): { browserId: stri
   live.write({ op: "patch", id: companion.id, path: "#/items", value: items });
   live.write({ op: "patch", id: nodeId, path: "#/sequence", value: companion.id });
   live.write({ op: "patch", id: nodeId, path: "#/hidden", value: true });
-  // A PHASE JOINING A FAMILY GIVEN SURFACE MODELS DOES NOT TAKE THEM. Ron, 2026-09-24: "Surfaces should only
-  // be available if they have been created in the firewalled section. No implicit or accidental creation."
-  // Generate Surface Models shows the family as "k of m phases have none" with "Generate the rest".
   // The browser last, so the displayable manager sees the whole picture in one change.
   live.write({ op: "patch", id: browser.id, path: "#/sequences", value: synced });
   return { browserId: browser.id, sequenceId: companion.id, index: masterItem.index };
@@ -290,6 +288,43 @@ function memberAt(companion: MrsonNode, master: MrsonNode, sel: number): Sequenc
   let best = items[0];
   for (const it of items) if (order.get(it.index)! <= sel) best = it;
   return best;
+}
+
+/** THE MEMBER ON SCREEN of `id`'s family -- a time series' segmentation stands for all of its phases -- or `id` itself.
+ *  A module's row names the member on screen when the row was drawn; while the series plays that member is gone from the
+ *  screen within a quarter of a second, and a click acting on it changed a phase not shown, undone at the next step
+ *  (Ron, 2026-10-17: the 3D buttons did nothing while the heart played). Buttons resolve their id through this when
+ *  they are clicked. */
+export function shownMember(live: LiveScene, id: string): string {
+  const seqId = live.nodes.get(id)?.sequence as string | undefined;
+  if (!seqId) return id;
+  for (const b of sequenceBrowsers(live)) {
+    const synced = (b.sequences as { sequence: string }[] | undefined) ?? [];
+    const k = synced.findIndex((x) => x.sequence === seqId);
+    if (k < 1) continue;
+    const it = companionItem(live, b.id, k);
+    if (it && live.nodes.has(it.node)) return it.node;
+  }
+  return id;
+}
+
+/** A SEQUENCE THAT PLAYS: indexed by times rising frame by frame (the beating heart's phases), not by names or repeated
+ *  values (a diffusion scan's b-values). One rule for preparing frames ahead (load-panel.ts) and for the colored series
+ *  field (livescene.ts framesPlay); critic 2026-10-16, general audit, finding 15. */
+export function sequencePlays(seq: { indexType?: unknown; items?: unknown } | undefined): boolean {
+  const idx = ((seq?.items as { index?: string }[] | undefined) ?? []).map((it) => Number(it.index));
+  return seq?.indexType === "numeric" && idx.length > 1 && idx.every((v, i) => Number.isFinite(v) && (i === 0 || v > idx[i - 1]));
+}
+
+/** A SERIES OF MEASUREMENTS, NOT OF MOMENTS: a sequence that does not play and whose volumes an extension's volume
+ *  interpreter tells apart (its key on the frame: a diffusion scan's b-value and direction, the diffusion extension's).
+ *  Not one volume to look at in 3D (Ron, 2026-10-19: the diffusion scans "left the 3D view empty"). Only these: a CT or
+ *  MR series in time that does not play for another reason (indexed by names, values repeated) is still a volume to look
+ *  at (critic 2026-10-20, finding 16: the skip had covered every modality). */
+export function measurementSeries(seq: { indexType?: unknown; items?: unknown } | undefined, frame: object | undefined): boolean {
+  if (!seq || sequencePlays(seq)) return false;
+  const o = ((frame as { origin?: unknown } | undefined)?.origin ?? {}) as Record<string, unknown>;
+  return volumeInterpreters().some((i) => o[i.name] !== undefined);
 }
 
 /**

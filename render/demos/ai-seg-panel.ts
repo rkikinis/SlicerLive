@@ -25,6 +25,7 @@
 // database. That is the more valuable half and it is the next step, because the moment of creation
 // is the only moment the provenance is free -- see docs/WORKING-STATE.md, "Provenance, decided
 // 2026-09-04". The labels currently land in the scene, which is what makes the round trip visible.
+import { startWork } from "../working.ts";
 import { holdsInstance } from "../../logic/instance-key.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
 import { escapeHtml } from "./html.ts";
@@ -34,9 +35,10 @@ import { runAction } from "./app-shell.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { LocalBlobStore } from "../../logic/ingest.ts";
 import { exportVolume } from "../../logic/export.ts";
-import { packLabelsToByte, parseNrrdSeg } from "../nrrd.ts";
+import { runProvenanceOf, segmentationFromResult } from "../../logic/ai-result.ts";
+import { BUILD_ID } from "../build-id.ts";
 import { licenseFor, outputRestriction } from "../../logic/model-license.ts";
-import { ecosystemOf, resolveTask, unversioned } from "../../logic/task-name.ts";
+import { ecosystemOf, parseTask, resolveTask, unversioned } from "../../logic/task-name.ts";
 import {
   type Checkpoint,
   discardCheckpoint,
@@ -53,11 +55,8 @@ import { openNetworkBrowser } from "./network-browser.ts";
 import { acceptedParameters, describeStatus, type HaversackTask, isFinished, job, keepAcceptedOptions, missingWeightIds, result, serverStatus, submitVolume, tasks, type WeightEntry, weightPresent } from "../../logic/haversack.ts";
 import { formatCitation, paperFor } from "../../logic/anatomy/model-papers.ts";
 import { type Attribution, attributionOf, formatCite, licenseLine, primaryCite } from "../../logic/attribution.ts";
-import { freesurferStructureFor, lookupStructure, systemColour, usesFreesurferNumbering } from "../../logic/segment-naming.ts";
-import { coloursFor, type LookedUp } from "../../logic/segment-colours.ts";
 import { allPresets, PRESETS, presentationFor, presentationParams, presetIdFor } from "../../logic/presentation.ts";
 import { colorizeParamOf, setColorizeParams, setLook3D, setVolumeRenderingOn, volumeRenderingOn, vrNodeFor } from "./tf-editor.ts";
-import { storedLook3D } from "../look3d.ts";
 import { isColorMap } from "../fields.ts";
 
 /** How often to ask a running job how it is doing. The server's own stages are seconds long. */
@@ -168,11 +167,12 @@ export function registerAiSegPanel(
   // as colorize volume is slower"); the colorized volume is a choice, and then the volume is
   // rendered with the chosen preset the moment the result lands. Sequences stay colorized (the
   // surfaces are one still mesh; "It doesn't move in 3D.").
-  const SURFACES = "surfaces";
-  let arrival = SURFACES;
-  /** The result in its volume's look from Scene: Surfaces if that was chosen there, else Colored (solid);
-   *  a sequence's Colored is its colored volume, which steps with the frames. */
-  const arriveInSceneLook = (imageId: string) => setLook3D(live, imageId, storedLook3D(live, imageId) === "surfaces" ? "surfaces" : "solid");
+  // Since 2026-10-21 (Ron, option B) surface models are not drawn at all: the default arrival is the solid look.
+  const SOLID_LOOK = "solid";
+  let arrival = SOLID_LOOK;
+  /** The result drawn solid (Scene › In 3D › Solid); a sequence's solid look is its colored volume, which steps
+   *  with the frames. Surfaces were the other choice here until 2026-10-21. */
+  const arriveInSceneLook = (imageId: string) => setLook3D(live, imageId, "solid");
   /** The see-through colored volume (a colorized look chosen here): the volume rendered and tinted. */
   const seeThroughColored = (imageId: string) => {
     setVolumeRenderingOn(live, imageId, true);
@@ -276,14 +276,15 @@ export function registerAiSegPanel(
 
   let starting = false;
   let startingNote = "";
+  let failedNote = "";            // why the last start did not answer, on the face until the next press (critic 2026-10-14, 18)
   /** Ask our own server to launch haversack, then wait for it to answer. */
   async function startServer() {
     if (starting) return;
-    starting = true; startingNote = "starting the segmentation server…"; render();
+    starting = true; failedNote = ""; startingNote = "starting the segmentation server…"; render();
     const t0 = Date.now();
     try {
       const r = await fetch("/_haversack/_start", { method: "POST" }).then((x) => x.json()).catch((e) => ({ started: false, error: String(e) }));
-      if (!r.started) { startingNote = r.error ?? r.note ?? "it did not start"; if (r.note === "already running") await refreshServer(); return; }
+      if (!r.started) { startingNote = r.error ?? r.note ?? "it did not start"; if (r.note !== "already running") failedNote = startingNote; if (r.note === "already running") await refreshServer(); return; }
       status(`starting the segmentation server (log: ${r.log})`);
       for (;;) {
         await new Promise((res) => setTimeout(res, 1500));
@@ -294,19 +295,22 @@ export function registerAiSegPanel(
           ? `starting… ${secs} s (the first start builds its Python environment and can take a minute or two)`
           : `still starting after ${secs} s — the log is at ${r.log}`;
         render();
-        if (secs > 300) { startingNote = `not answering after ${secs} s; see ${r.log}, or start it by hand with the command below`; return; }
+        if (secs > 300) { startingNote = `not answering after ${secs} s; the log is at ${r.log} (a developer can start it by hand: Advanced › Server)`; failedNote = startingNote; return; }
       }
     } finally { starting = false; render(); }
   }
 
   /** A refresh started by opening the module is in flight (onShow). */
   let refreshingOnShow = false;
+  /** The server's haversack version, for a result's provenance (an engine's result, FastSurfer's, does not carry it). */
+  let serverVersion: string | undefined;
   async function refreshServer() {
     // Server state and credential state in one answer. Asking /v1/health alone reports a healthy
     // server while its token is unusable, which is how "requires a bearer token" arrives with no
     // indication that anything is running.
     const st = await serverStatus(transport);
     serverNote = describeStatus(st);
+    serverVersion = st.version;
     if (!st.reachable) {
       startCommand = st.start ?? "";
       catalog = [];
@@ -377,13 +381,15 @@ export function registerAiSegPanel(
     // starts the server (desktop/haversack-proxy.ts _start) and waits for its first answer -- a minute the first time,
     // while uvx builds the environment; a few seconds after that. The button stands where Segment stands, in the Segment
     // box, until the server runs: one yellow, not two (Ron, 2026-10-14, the module review's proposal 3: "yes"). The command,
-    // for anyone who would rather run it themselves, is the button's tooltip.
+    // for anyone who would rather run it themselves, is under Advanced › Server ("By hand").
 
     // ---- Segment: everything needed to start a run ----
     const seg = shell.section(root, "Segment", {
       open: true,
       band: "yellow",
-      note: startCommand ? (starting ? "starting the segmentation server…" : "the segmentation server is not running")
+      // THE WAIT ON THE FACE (critic 2026-10-14, 18): the running count and the first-start warning in the section's
+      // note, where it was before the start button moved into the box's actions; a failed start says why here too.
+      note: startCommand ? (starting ? startingNote : failedNote || "the segmentation server is not running")
         : catalog.length ? `${catalog.filter((t) => t.installed === true).length} of ${catalog.length} ready` : "",
     });
     const inputCell = shell.row(seg, "Input", { value: vols.length ? String(vols.length) : "0" });
@@ -509,7 +515,7 @@ export function registerAiSegPanel(
       }
       ra.innerHTML = `<button class="sl-ai-res-colors" title="Opens the Segmentations module: each structure's color and visibility, and whether groups are folded (one color) or open (each its own)">Colors and grouping…</button>` +
         `<button class="sl-ai-res-scene" title="Opens the Scene module, where you choose which views show it, its drawing order, 3D on or off, and can remove it">Adjust views…</button>` +
-        (lr.savable && !lr.saved ? `<button class="sl-primary sl-ai-res-save" title="Write this segmentation into the DICOM database, under the series it was made on (with its surface models only if they were made in Generate Surface Models)">Save to DICOM</button>` : "");
+        (lr.savable && !lr.saved ? `<button class="sl-primary sl-ai-res-save" title="Write this segmentation into the DICOM database, under the series it was made on">Save to DICOM</button>` : "");
       ra.querySelector(".sl-ai-res-scene")?.addEventListener("click", () => { void shell.showPanel("data"); });
       ra.querySelector(".sl-ai-res-colors")?.addEventListener("click", () => { void shell.showPanel("segmentations"); });
       // THE BUTTON SAYS WHAT IS HAPPENING TO IT, not only the status line. Ron pressed this one and
@@ -551,17 +557,17 @@ export function registerAiSegPanel(
     const presetCell = shell.row(adv, "Appearance", { wide: true });
     const chosenPreset = presetInUse();
     presetCell.innerHTML = `<select class="sl-ai-preset">` +
-      `<option value="${SURFACES}"${arrival === SURFACES ? " selected" : ""}>The look chosen in Scene (default)</option>` +
+      `<option value="${SOLID_LOOK}"${arrival === SOLID_LOOK ? " selected" : ""}>Solid (default)</option>` +
       allPresets().map((p) =>
-        `<option value="${p.id}"${arrival !== SURFACES && p.id === chosenPreset ? " selected" : ""}>${escapeHtml(p.name)}${
+        `<option value="${p.id}"${arrival !== SOLID_LOOK && p.id === chosenPreset ? " selected" : ""}>${escapeHtml(p.name)}${
           p.id === presetIdFor(chosenTask) ? " (this network's colorized volume)" : ""
         }</option>`
       ).join("") + `</select>`;
     // The preset's own reason, because a person choosing an appearance should be told what it is for
     // rather than having to try it. Every entry in the table carries one.
     const why = PRESETS[chosenPreset];
-    presetCell.querySelector("select")!.title = arrival === SURFACES
-      ? "The result arrives in the 3D look chosen for this volume in Scene: Solid unless you chose Surfaces there. Choose a colorized volume here for the see-through look, the scan tinted with this network's colors, instead."
+    presetCell.querySelector("select")!.title = arrival === SOLID_LOOK
+      ? "The result arrives drawn solid in 3D, as Scene › In 3D › Solid shows it. Choose a colorized volume here for the see-through look, the scan tinted with this network's colors, instead."
       : (why ? why.why + (why.by ? ` — ${why.by}` : "") : "");
 
     // Right-justified: a button row starting at the body's left edge sits under the label column.
@@ -578,7 +584,7 @@ export function registerAiSegPanel(
     // the one thing to press (critic 2026-09-22, 2.6: the run failed after an upload, with a
     // terminal command under the button).
     if (startCommand) {
-      acts.innerHTML = `<button class="sl-primary sl-ai-start"${starting ? " disabled" : ""} title="${escapeHtml(`Starts the segmentation server; it runs while the application does. ${starting ? startingNote : ""} Or start it yourself, in a terminal: ${startCommand}`)}">${starting ? "Starting…" : "Start the segmentation server"}</button>`;
+      acts.innerHTML = `<button class="sl-primary sl-ai-start"${starting ? " disabled" : ""} title="Starts the segmentation server, which runs the networks on this Mac. It stops when Albula quits.">${starting ? "Starting…" : "Start the segmentation server"}</button>`;
       acts.querySelector<HTMLButtonElement>(".sl-ai-start")?.addEventListener("click", () => void startServer());
     } else acts.innerHTML = (needsFiles ? `<button class="sl-ai-fetch"${fetching ? " disabled" : ""} title="Get this network's model files from the project's release. If it fails, the server says why in the status line.">${fetching ? "Downloading…" : "Download the model files"}</button>` : "") +
       `<button class="sl-primary sl-ai-run"${!vols.length || !chosenTask || mine || needsFiles ? " disabled" : ""} title="${needsFiles ? "Download the model files first" : mine ? "This network is running on this volume" : "Run the chosen network on the chosen volume. The result lands in the scene and is offered for saving."}">${
@@ -625,6 +631,12 @@ export function registerAiSegPanel(
     {
       const srv = shell.row(adv, "Server", { wide: true });
       srv.innerHTML = `<span class="sl-hint">${serverNote}</span>`;
+      // For a developer who would rather start it in a terminal (it was in the start button's tooltip; PALETTE's rule:
+      // tooltips carry no commands -- critic 2026-10-14, 18).
+      if (startCommand) {
+        const cmd = shell.row(adv, "By hand", { wide: true });
+        cmd.innerHTML = `<code class="sl-ai-cmd" title="The same server, started in a terminal">${escapeHtml(startCommand)}</code>`;
+      }
     }
 
     // ---- This network: what it produces, and the paper that defines it ----
@@ -820,14 +832,14 @@ export function registerAiSegPanel(
     });
     q<HTMLSelectElement>(".sl-ai-preset")?.addEventListener("change", (e) => {
       const v = (e.target as HTMLSelectElement).value;
-      arrival = v === SURFACES ? SURFACES : "colorized";
-      if (v !== SURFACES) presetChoice = v;
+      arrival = v === SOLID_LOOK ? SOLID_LOOK : "colorized";
+      if (v !== SOLID_LOOK) presetChoice = v;
       // Applied at once when there is already a result on screen, so choosing an appearance shows
       // one rather than promising one for next time: the volume's rendering goes on or off with it.
       if (presentedVolume && live.nodes.get(presentedVolume)) {
         const p = PRESETS[presetChoice];
-        if (p && v !== SURFACES) setColorizeParams(live, presentedVolume, presentationParams(p));
-        if (v === SURFACES) arriveInSceneLook(presentedVolume);
+        if (p && v !== SOLID_LOOK) setColorizeParams(live, presentedVolume, presentationParams(p));
+        if (v === SOLID_LOOK) arriveInSceneLook(presentedVolume);
         else seeThroughColored(presentedVolume);
       }
       render();
@@ -907,6 +919,19 @@ function rememberRun(task: string, inputId: string, cached: boolean, ms: number)
 }
 function priorRun(task: string, inputId: string): RunNote | undefined {
   return loadRuns()[runKey(task, inputId)];
+}
+/** A network in words a person knows: "TotalSegmentator: total", not "ts.v2:total" (critic 2026-10-17, finding 21). */
+function plainTask(task: string): string {
+  const p = parseTask(task);
+  return `${licenseFor(task)?.project ?? (p.ecosystem || p.name)}${p.ecosystem ? `: ${p.name.replace(/_/g, " ")}` : ""}`;
+}
+/** What a network usually takes on this Mac when it has to be computed: the lower median of its computed runs (the one
+ *  record the panel keeps; critic 2026-10-17, findings 6-7). Nothing when this scan has been computed before: the server
+ *  answers from its cache, and a time would be wrong. */
+function usualComputedMs(task: string, inputId: string): number | undefined {
+  if (priorRun(task, inputId)?.computedMs != null) return undefined;
+  const ms = Object.entries(loadRuns()).filter(([k, v]) => k.startsWith(`${unversioned(task)}\u0000`) && v.computedMs != null).map(([, v]) => v.computedMs!).sort((a, b) => a - b);
+  return ms.length ? ms[(ms.length - 1) >> 1] : undefined;
 }
 /** The longest a task actually took on this machine, over every volume it has run on; undefined if never. */
 function lastComputedMs(task: string): number | undefined {
@@ -1073,6 +1098,15 @@ function lastComputedMs(task: string): number | undefined {
     if (!target) { jobRec.state = "failed"; jobRec.progress = "the volume is no longer loaded"; render(); return; }
     jobRec.state = "running";
     jobRec.startedAt = Date.now();
+    // ON THE 3D VIEW while it runs (render/working.ts; Ron, 2026-10-17): the network and the scan, Stop, and the time this
+    // network usually takes on this Mac once it has been measured here.
+    const usual = jobRec.restore ? undefined : usualComputedMs(jobRec.task, jobRec.inputId);
+    const work = startWork({
+      title: `AI segmentation: ${plainTask(jobRec.task)} on ${jobRec.inputName}`,
+      ...(usual !== undefined ? { usualMs: usual } : {}),
+      stop: () => { jobRec.cancel = true; jobRec.progress = "canceling…"; render(); },
+      stopTitle: "Stop this job. The scan stays; nothing is written.",
+    });
     // THE WHOLE WALL CLOCK, from this click to the labels being in the scene -- not just the job.
     // The existing timer starts when the server accepts the job, so it leaves out writing and
     // uploading the volume (a minute on a full-body CT) and fetching and decoding the result. Ron
@@ -1101,6 +1135,9 @@ function lastComputedMs(task: string): number | undefined {
       // NRRD rather than the original DICOM: one file, and the grid the labels come back on is the
       // grid we sent, so nothing has to be re-registered afterwards.
       const nrrd = await exportVolume(live, jobRec.inputId, "nrrd-gz");
+      // STOPPED WHILE THE SCAN WAS WRITTEN: nothing is sent (critic 2026-10-17, finding 12: Stop did nothing visible
+      // during writing and upload).
+      if (jobRec.cancel) { jobRec.progress = progress = "canceled before it was sent"; return; }
       jobRec.progress = progress = `uploading ${(nrrd.bytes.byteLength / 1e6).toFixed(0)} MB…`;
       render();
 
@@ -1121,6 +1158,7 @@ function lastComputedMs(task: string): number | undefined {
         return;
       }
 
+      if (jobRec.cancel) { jobRec.progress = progress = "canceled before it was sent"; return; }
       const sub = await submitVolume(transport, {
         task: jobRec.task,
         bytes: nrrd.bytes,
@@ -1181,16 +1219,9 @@ function lastComputedMs(task: string): number | undefined {
           // Remembered as well as said, so the NEXT run can be predicted rather than discovered.
           if (j.cached) progress = `${jobRec.task} — already computed for this volume, returned from the server's cache`;
           rememberRun(jobRec.task, jobRec.inputId, j.cached === true, Date.now() - runStarted);
-          if (j.provenance) {
-            const pv = j.provenance as { models?: { version?: string; folder?: string; folds?: string[]; sha256?: string | null }[]; lineage?: string; device?: string; dtype?: string; haversack?: string };
-            runProv = {
-              server: "haversack", haversack: pv.haversack, task: jobRec.task, engine: pv.lineage,
-              device: pv.device, dtype: pv.dtype, cached: j.cached === true,
-              models: (pv.models ?? []).map((m) => ({ folder: m.folder, version: m.version, folds: m.folds, sha256: m.sha256 ?? undefined })),
-              input: j.inputIdentity, timings: j.timings, job: sub.jobId, at: new Date().toISOString(),
-              options: j.provenance,                    // the whole block, as the server wrote it
-            };
-          }
+          work.unstoppable();   // the server is done: a Stop now would stop nothing (finding 12)
+          // Albula's version: the build stamp's core part ("v0.1.0 Oct 20 15:29 dab8042"), without the extensions'.
+          runProv = runProvenanceOf(jobRec.task, j, sub.jobId, { haversack: serverVersion, albula: BUILD_ID.split(" · ")[0], weights: detail?.weights_installed as WeightEntry[] | undefined }) as typeof runProv;
           break;
         }
         if (Date.now() - lastChange > STALL_MS) {
@@ -1225,120 +1256,12 @@ function lastComputedMs(task: string): number | undefined {
           sourceId: jobRec.inputId,
         });
 
-      // A .seg.nrrd carries its own segment table -- name, label value, color, layer -- which is
-      // where the anatomical names arrive: TotalSegmentator's own keys, the same ones
-      // logic/anatomy/totalsegmentator.json is keyed by, so the grouping recognizes them without a
-      // translation step.
-      const seg = await parseNrrdSeg(bytes);
-      // Layer 0 only for now. A multi-layer .seg.nrrd holds overlapping segments, which the scene's
-      // single labelmap cannot represent; taking the first is honest and the count below says how
-      // many were left behind rather than hiding them.
-      const layer0 = seg.layers[0];
-      if (!layer0) { progress = "the result carried no labelmap"; return; }
-      // The scene's labelmap is 8-bit; a .seg.nrrd layer may be 16- or 32-bit. This used to require
-      // every VALUE to be under 256, which refused far more than it had to: FastSurfer numbers its
-      // output the way FreeSurfer does, with the cortical parcellations at 1000-1035 and 2000-2035,
-      // so a result with well under a hundred structures was turned away. Ron: "this result uses
-      // label values up to 2035; the scene's labelmap holds 255". The values are sparse; the count
-      // is not large. packLabelsToByte renumbers them densely instead of truncating -- see there for
-      // why a label value is an identity rather than an index.
-      const packed = packLabelsToByte(layer0);
-      if (!packed.ok) {
-        jobRec.progress = progress = packed.reason === "too-many"
-          ? `this result puts ${packed.distinct} distinct structures in one layer, and the scene's ` +
-            `labelmap holds 255`
-          : `this result has negative label values (down to ${packed.min}); those are not labels, ` +
-            `so nothing was loaded rather than guessing at what they meant`;
-        return;
-      }
-      const labels = packed.labels;
-      // The names and colors the FILE carries are not the best available.
-      //
-      // dcmjs/dcmqi writes each segment with `ColorAutoGenerated:=1` -- an arbitrary hue, which is
-      // why a fresh import looks like a bag of highlighter pens rather than anatomy. But the label
-      // names ARE TotalSegmentator's own keys, and logic/anatomy/totalsegmentator.json is keyed by
-      // exactly those, carrying the recommended RGB the segmenter publishes for each structure
-      // (liver 221,130,101; spleen 157,108,162) and the readable name.
-      //
-      // So a recognized structure gets the segmenter's color and its readable name, including Ron's
-      // corrections -- autochthon arrives labeled "Erector spinae muscle". An unrecognized one
-      // keeps whatever the file said, because a color we cannot justify is worse than an arbitrary
-      // one we can at least attribute.
-      // COLORS ARE 0..1 HERE, not 0..255. segPalette() writes them straight into a Float32Array the
-      // GPU samples, and SEG_PALETTE -- the built-in default -- is [0.502, 0.6824, 0.502]. I had
-      // this wrong in both directions at once: the anatomy table publishes 0..255 (liver is
-      // 221,130,101) and went in undivided, while the NRRD's own colors are already 0..1 and were
-      // being multiplied by 255. Every channel saturated, which is why the result was wrong in the
-      // 3D view and in the slice overlay alike -- both read the same palette.
-      let recognised = 0;
-      // The labelmap was renumbered, so its table follows it. The value the FILE used is kept as
-      // `sourceLabelValue`: FreeSurfer's 17 for the left hippocampus identifies the structure as
-      // surely as a SNOMED code does, and it is only its use as a voxel address that had to go.
-      // A segment whose value never occurs has no new number; it is empty, and is dropped here
-      // rather than arriving as a structure made of nothing.
-      const layer0Segments = seg.segments
-        .filter((sg) => sg.layer === 0)
-        .map((sg) => ({ ...sg, labelValue: packed.remap.get(sg.labelValue) ?? 0, sourceLabelValue: sg.labelValue }))
-        .filter((sg) => sg.labelValue !== 0);
-      // NAME AND COLOR FROM THE LABEL VALUE, for a family that numbers its labels meaningfully.
-      //
-      // FastSurfer names its output from its own ColorLUT.tsv, and that file is a subset: 17 of the
-      // 95 segments in Ron's first result arrived as `label_2003` ... `label_2035`, all
-      // right-hemisphere cortex, because they are simply absent from it. A name lookup cannot rescue
-      // a segment with no name. The VALUE identifies it exactly -- FreeSurfer's 2035 is
-      // ctx-rh-insula wherever it is written -- and it survived the renumbering as
-      // `sourceLabelValue`. Ron: "Use the colors and organization as presented by the freesurfer
-      // people. I assume that fastsurfer has just used that, but don't assume." It had not: its
-      // table is incomplete and gives Left-VentralDC the right side's color.
-      const byValue = usesFreesurferNumbering(taskName);
-      const looked = layer0Segments.map((sg) => ({
-        sg,
-        known: (byValue ? freesurferStructureFor(sg.sourceLabelValue) : null) ?? lookupStructure(sg.name),
-      }));
-      // A system color tells systems apart -- useful across a mixed result like ts:total, where
-      // bone, muscle and vessel each read as one hue. Ron, after running ts:liver_segments (eight
-      // Couinaud segments, all "Alimentary system", none with a published RGB): "They are all the
-      // same color." Correct, and the fix is not a bigger palette -- when EVERY uncolored segment
-      // in this result shares one system, there is no diversity for the system color to expose, so
-      // it just erases the one distinction the segmentation exists to draw. Falling back further, to
-      // the file's own per-segment hue, keeps that distinction. A result that mixes systems keeps
-      // the grouping as before.
-      const noRgbSystems = new Set(
-        looked.filter(({ known }) => known && !known.rgb).map(({ known }) => known!.system),
-      );
-      const singleSystem = noRgbSystems.size <= 1;
-      // WHEN THE PUBLISHED COLORS CANNOT BE TOLD APART, the file's own are used instead. Ron, on
-      // ts:abdominal_muscles: "I have no way to visually assess the muscles as abdominal muscle all
-      // have the same color." TotalSegmentator's table colors by TISSUE, so its eleven abdominal
-      // muscles land within a narrow brown -- while the file the segmenter wrote carries 22 well
-      // spread ones we were discarding. See logic/segment-colours.ts: a published color is kept
-      // wherever it distinguishes, because those colors are the convention (FreeSurfer's above all).
-      const { resolved, moved } = coloursFor(looked.map(({ sg, known }) => ({
-        known: known as LookedUp | undefined, name: sg.name,
-        fallback: [
-          Math.round(sg.color[0] * 255), Math.round(sg.color[1] * 255), Math.round(sg.color[2] * 255),
-        ] as [number, number, number],
-      })));
-      const segments = looked.map(({ sg, known }, i) => {
-          if (known) recognised++;
-          const rgb = known?.rgb;
-          return {
-            labelValue: sg.labelValue,
-            // WHICH structure, not just what to call it. Three display names live in both
-            // catalogs, so a segment stored with only its name resolves to the wrong one later and
-            // lands in the wrong branch — the third and fourth ventricles and the brainstem of a
-            // FastSurfer result appeared at the top of the nervous system instead of inside the
-            // brain. We know the key exactly here, from the FreeSurfer label value.
-            ...(known?.key ? { structure: known.key } : {}),
-            sourceLabelValue: sg.sourceLabelValue,
-            name: known?.name ?? sg.name ?? `Segment ${sg.sourceLabelValue}`,
-            color: (rgb
-              ? [resolved[i][0] / 255, resolved[i][1] / 255, resolved[i][2] / 255]
-              : known && !singleSystem
-              ? systemColour(known.system).map((c) => c / 255)
-              : [sg.color[0], sg.color[1], sg.color[2]]) as [number, number, number],
-          };
-        });
+      // THE ANSWER AS A SEGMENTATION, by the one function that says what a result means (logic/ai-result.ts: the labels
+      // renumbered into bytes, each structure named and colored from the catalog), shared with the import-time job.
+      const fromResult = await segmentationFromResult(taskName, bytes);
+      if (!fromResult.ok) { jobRec.progress = progress = fromResult.why; return; }
+      const { labels, segments, recognised, moved } = fromResult;
+      const seg = { layers: { length: fromResult.layers } };
       const made = await createSegmentationFromLabelmap(live, store, jobRec.inputId, labels, segments, {
         // NAMED AFTER THE VOLUME, SHORTLY. `target.name` is the volume's full label -- patient,
         // series and date -- and putting all of it inside this name is what gave Ron
@@ -1366,7 +1289,7 @@ function lastComputedMs(task: string): number | undefined {
       // table in logic/presentation.ts holds the reason next to the values, and every one of these
       // parameters is a control the Volume Rendering module already exposes, so nothing here puts the
       // scene somewhere the user cannot reach by hand.
-      // THE SURFACES ARE PART OF THE RESULT, so the run makes them. Ron: "Surfaces are an integral
+      // HISTORY (2026-09-22 to 09-24): THE SURFACES WERE PART OF THE RESULT, so the run made them. Ron: "Surfaces are an integral
       // part of a segmentation. Creation, saving and loading should be as transparent to the user as
       // possible."
       //
@@ -1374,16 +1297,16 @@ function lastComputedMs(task: string): number | undefined {
       // a segmentation you can turn in 3D, and a save that has to build them first is a save that
       // waits. Extraction is a few seconds on a study this size and runs in a worker, so nothing
       // below is held up by it.
-      // (No longer: surface models are made only in Generate Surface Models -- Ron, 2026-09-24, the
-      // firewall. __ensureSurfaces refuses a segmentation without them; the result is drawn solid.)
+      // (No longer: surface models were made only in Generate Surface Models from 2026-09-24 (the firewall), and
+      // since 2026-10-21 only as an export, from Save › Files (Ron, option B); the result is drawn solid.)
 
       const preset = PRESETS[presetInUse()] ?? presentationFor(taskName);
       setColorizeParams(live, jobRec.inputId, presentationParams(preset));
-      // AND THE 3D VIEW GOES TO THE SURFACES. Ron, looking at a finished run: "Why is the volume 3d
+      // AND THE 3D VIEW GOES TO THE SOLID LOOK (the surfaces, until 2026-09-24). Ron, looking at a finished run: "Why is the volume 3d
       // still the inital presentation?"
       //
-      // Because the presentation just applied makes the volume COLORIZE the segmentation, and
-      // `pushSurfaces` declines to draw meshes for labels a volume is already drawing -- otherwise
+      // (History: ) Because the presentation just applied made the volume COLORIZE the segmentation, and
+      // `pushSurfaces` declined to draw meshes for labels a volume is already drawing -- otherwise
       // the same anatomy is rendered twice. So the surfaces were built (2.7 s, said so in the status
       // bar) and then not shown, which is the worst of both.
       //
@@ -1394,7 +1317,8 @@ function lastComputedMs(task: string): number | undefined {
       // The same correction as in the load path: a volume's 3D is volumeRenderingDisplay.visible,
       // not the image's `visible3D`, which is a segmentation's toggle and is read by nothing here.
       //
-      // EXCEPT ON A SEQUENCE. Surfaces are one still mesh; what a person wants from a segmented
+      // EXCEPT ON A SEQUENCE (said of surfaces, which were one still mesh; the solid look of a sequence is its colored
+      // volume, which follows the frames). What a person wants from a segmented
       // beating heart is the colorized volume rendering, which follows the frames and hides the
       // surfaces by itself. Ron, with the surfaces up: "It doesn't move in 3D."
       // SAID, WHEN IT UNDOES A CHOICE. Ron, 2026-09-23 19:11, with the colored volume on while a network
@@ -1404,7 +1328,7 @@ function lastComputedMs(task: string): number | undefined {
       // NOW: THE VOLUME'S LOOK FROM SCENE (Ron, 2026-09-23: the default is the solid colored look, the
       // surfaces kept). A colorized look chosen here is the see-through colored volume, on request.
       const volumeWasOn = volumeRenderingOn(live, jobRec.inputId);
-      if (arrival === SURFACES) arriveInSceneLook(jobRec.inputId);
+      if (arrival === SOLID_LOOK) arriveInSceneLook(jobRec.inputId);
       else seeThroughColored(jobRec.inputId);
       const volumeTurnedOff = volumeWasOn && !volumeRenderingOn(live, jobRec.inputId) ? jobRec.inputId : undefined;
       if (volumeTurnedOff) status(`The volume rendering was switched off so the ${taskName} result shows — Scene → In 3D → Volume brings it back.`);
@@ -1425,14 +1349,10 @@ function lastComputedMs(task: string): number | undefined {
       const kept = checkpointed
         ? " · not saved yet — a temporary copy is kept for a day"
         : " · not saved, and no temporary copy — save it now";
-      // AND THE SURFACES, WHICH ARE PART OF THE RESULT. Ron: "the surface generation should happen
-      // at the end of the segmentation run, with a proper message."
-      //
-      // It already does -- a new segmentation is visible in 3D, and being shown in 3D is what builds
-      // the surfaces -- but the only thing that said so was the shared status bar, which the next
-      // message overwrites. So this line, which is the panel's own and holds until the next run,
-      // says the run is not finished with the machine yet. The triangle count arrives in the status
-      // bar a few seconds later, from the extractor itself.
+      // THE RUN'S OWN LINE, which holds until the next run (the shared status bar is overwritten by the next message).
+      // Until 2026-09-24 it also stood for the surface extraction that followed (Ron: "the surface generation should
+      // happen at the end of the segmentation run, with a proper message"); since 2026-10-21 surfaces are made only when
+      // saved as files (render/surface-export.ts), and nothing follows the run.
       jobRec.progress = progress = `${made.segments} structures on ${(target.name as string) ?? "the volume"} in ${hms(Date.now() - runStarted)} — ${named}${extra}${kept}`;
       void refreshCheckpoints();
       status(`AI segmentations: ${made.segments} structures from ${taskName}${restore ? " (restored)" : ""} (${made.segId})`);
@@ -1474,6 +1394,7 @@ function lastComputedMs(task: string): number | undefined {
       jobRec.progress = progress = `failed after ${hms(Date.now() - runStarted)}: ${(e as Error).message}`;
     } finally {
       if (jobRec.state === "running") jobRec.state = jobRec.cancel ? "cancelled" : jobRec.segId ? "done" : "failed";
+      work.done(jobRec.state === "done");   // the time is the panel's own record (rememberRun), not this banner's
       jobRec.finishedAt = Date.now();
       rememberJobs();
       render();
@@ -1549,9 +1470,20 @@ function lastComputedMs(task: string): number | undefined {
       const jobRec: Job = { id: nextJobId++, task: r.task, inputId: "", inputName: r.inputName, state: "running", progress: "re-attached after the page restarted — waiting for the server", queuedAt: r.startedAt, startedAt: r.startedAt, serverJobId: r.serverJobId, cancel: false };
       jobs.push(jobRec);
       render();
+      // A JOB RE-ATTACHED AFTER A RELOAD is said as one started here (critic 2026-10-17, finding 13), with Stop.
+      const work = startWork({
+        title: `AI segmentation: ${plainTask(r.task)} on ${r.inputName}`,
+        stop: () => { jobRec.cancel = true; jobRec.progress = "canceling…"; render(); },
+        stopTitle: "Stop this job. The scan stays; nothing is written.",
+      });
       void (async () => {
         try {
           for (;;) {
+            if (jobRec.cancel) {
+              await fetch(`/_haversack/jobs/${encodeURIComponent(r.serverJobId)}`, { method: "DELETE" }).catch(() => {});
+              jobRec.state = "cancelled"; jobRec.progress = "canceled (re-attached)";
+              break;
+            }
             const j = await job(transport, r.serverJobId);
             jobRec.progress = `${j.state}${j.progress !== undefined ? ` ${Math.round(j.progress * 100)}%` : ""} · ${hms(Date.now() - r.startedAt)} (re-attached)`;
             render();
@@ -1580,6 +1512,7 @@ function lastComputedMs(task: string): number | undefined {
             await new Promise((res) => setTimeout(res, POLL_MS));
           }
         } catch (e) { jobRec.state = "failed"; jobRec.progress = `re-attach failed: ${(e as Error).message}`; }
+        work.done(jobRec.state === "done");
         jobRec.finishedAt = Date.now();
         render();
       })();

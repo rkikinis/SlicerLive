@@ -350,7 +350,7 @@ fn skip_fib${s}(wp : vec3<f32>) -> f32 {
     let edge = min(min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)), min(f.z, 1.0 - f.z));
     d = (k - 1.0 + edge) * cell;
   }
-  return max(d - ${LOOKBACK.toFixed(1)} * max(u_material.scene.x, 1e-3), 0.0);
+  return max(d - ${LOOKBACK.toFixed(1)} * scene_step(), 0.0);
 }`;
   }
 
@@ -417,7 +417,7 @@ fn fib_density${s}(p : vec3<f32>) -> f32 {
 fn fib_ao${s}(q : vec3<f32>, n : vec3<f32>, r : f32) -> f32 {
   let strength = u_material.fib${s}_params.y;
   if (strength <= 0.0) { return 1.0; }
-  let R = max(u_material.fib${s}_params.z, 1e-3);
+  let R = max(u_material.fib${s}_params.z, 1e-3 * u_material.fib${s}_lo.w);   // a zero guard: a thousandth of a grid cell, not of a mm
   let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(n.z) > 0.9);
   let t = normalize(cross(up, n));
   let b = cross(n, t);
@@ -444,7 +444,8 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
   let lo = u_material.fib${s}_lo.xyz; let cell = u_material.fib${s}_lo.w;
   let hi = u_material.fib${s}_hi.xyz; let r = u_material.fib${s}_hi.w;
   let dims = vec3<i32>(u_material.fib${s}_dims.xyz);
-  let len = min(seg, ${LOOKBACK.toFixed(1)} * max(u_material.scene.x, 1e-3));
+  // scene_step: the march step with a zero guard relative to the scene, not 1e-3 mm (scene-scale.ts).
+  let len = min(seg, ${LOOKBACK.toFixed(1)} * scene_step());
   if (!(len > 0.0)) { return vec4<f32>(0.0); }
   // The interval runs from q0 (t = 0, excluded) to wp (t = len, included), clipped to the grid.
   let q0 = wp - rd * len;

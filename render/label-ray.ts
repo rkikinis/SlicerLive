@@ -64,6 +64,21 @@ export interface LabelRayHit {
 /** How many labelmaps one pass can ask. Matches the slice shader's overlay slots. */
 export const LABEL_RAY_SLOTS = 2;
 
+/** The most steps one march takes (the shader's guard). */
+export const LABEL_RAY_MAX_STEPS = 20000;
+
+/**
+ * THE MARCH'S STEP, as the shader takes it: the step asked for, but never so small that the march would stop at its
+ * guard before the end of the labelmaps (`spanMm` is the stretch of ray inside them). A FLOOR IN PROPORTION, not in
+ * mm: it was 0.01 mm here and 1e-3 mm in the shader, which at a microscope's 1 nm voxels stepped over a thousand
+ * voxels at a time and saw nothing (Ron, 2026-10-20: "did you forget about scales? from astrophysics to electron
+ * microscope"). The WGSL below computes the same; this is its copy for the tests.
+ */
+export function labelRayStep(stepMm: number, spanMm: number): number {
+  const asked = Number.isFinite(stepMm) && stepMm > 0 ? stepMm : 0;
+  return Math.max(asked, Math.max(spanMm, 0) / LABEL_RAY_MAX_STEPS);
+}
+
 const WGSL = /* wgsl */ `
 struct U {
   p2t0 : mat4x4<f32>,
@@ -170,11 +185,12 @@ fn main() {
   if (i1.y >= i1.x) { lo = min(lo, i1.x); hi = max(hi, i1.y); }
   if (hi < lo) { return; }
   lo = max(lo, 0.0);
-  let step = max(u.params.x, 1e-3);
+  // labelRayStep: the step asked for, never so small the guard stops the march short of hi (no length in mm here).
+  let step = max(u.params.x, (hi - lo) / ${LABEL_RAY_MAX_STEPS}.0);
   var t = lo;
   var guard = 0;
   loop {
-    if (t > hi || guard >= 20000) { break; }
+    if (t > hi || guard >= ${LABEL_RAY_MAX_STEPS}) { break; }
     // Slot order IS priority: the overlay list is back to front, so the LAST slot is what is drawn
     // on top and is what the person is looking at where two labelmaps overlap.
     var found = 0u;
@@ -192,6 +208,7 @@ fn main() {
       out.t = t;
       return;
     }
+    if (step <= 0.0) { break; }   // a ray that only touches the box: its one sample is taken
     t = t + step;
     guard = guard + 1;
   }
@@ -262,7 +279,7 @@ export class LabelRay {
       const L = Math.hypot(dir[0], dir[1], dir[2]) || 1;
       u[32] = origin[0]; u[33] = origin[1]; u[34] = origin[2]; u[35] = 1;
       u[36] = dir[0] / L; u[37] = dir[1] / L; u[38] = dir[2] / L; u[39] = 0;
-      u[40] = Math.max(stepMm, 0.01); u[41] = use.length;
+      u[40] = Number.isFinite(stepMm) && stepMm > 0 ? stepMm : 0; u[41] = use.length;   // the shader floors it (labelRayStep)
       // The visibility masks: 8 u32 per slot at 44 and 52. Written through a Uint32Array view of the
       // same buffer, because these are bit patterns and must not go through float conversion.
       const bits = new Uint32Array(u.buffer, u.byteOffset, u.length);

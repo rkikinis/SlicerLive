@@ -94,16 +94,3 @@ Deno.test("SequenceDisplayableManager: one member on screen per companion; the d
   assertEquals(vis(), "truefalsefalse");
   assertEquals(live.nodes.get("s0")!.visible3D, false);
 });
-
-Deno.test("a phase joining a family given surface models does NOT take the flag: no implicit creation (Ron, 2026-09-24)", () => {
-  const { live } = scene();
-  seg(live, "s0", "f0");
-  joinSequence(live, "s0");
-  live.write({ op: "patch", id: "s0", path: "#/surfaceModels", value: true });
-  seg(live, "s1", "f1");
-  joinSequence(live, "s1");
-  assertEquals(live.nodes.get("s1")!.surfaceModels, undefined);
-  seg(live, "c1", "f1", "coronaries");
-  joinSequence(live, "c1");
-  assertEquals(live.nodes.get("c1")!.surfaceModels, undefined);
-});

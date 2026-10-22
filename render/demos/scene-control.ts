@@ -13,6 +13,7 @@
 // not duplicate.
 import { runAction, type AppShell } from "./app-shell.ts";
 import { writeScene } from "../../logic/scene/write.ts";
+import { collectExtensionState } from "../../logic/scene/extensions.ts";
 import type { LiveScene } from "../livescene.ts";
 
 type Cur = { uid: string; v: number; name: string } | null;
@@ -51,7 +52,8 @@ let timer: number | undefined;
 const loaded = () => !!live && [...live.nodes.values()].some((n) => ["image", "segmentation", "sequence", "markup", "model", "transform"].includes(n.type as string));
 async function signature(): Promise<string> {
   if (!live) return "";
-  const w = await writeScene(live.nodes.values(), { producer: "", origin: "", name: "", previousV: 0, now: () => "", layout: { arrangement: g.__layoutId ?? 0 } });
+  // The extensions' own state counts too: tracts ticked in Diffusion are a change the next save would write.
+  const w = await writeScene(live.nodes.values(), { producer: "", origin: "", name: "", previousV: 0, now: () => "", layout: { arrangement: g.__layoutId ?? 0 }, extensions: collectExtensionState() });
   const { name: _n, v: _v, source: _s, ...rest } = w.doc as Record<string, unknown>;
   return JSON.stringify(rest);
 }

@@ -17,6 +17,7 @@
 // The volume is oblique, so an axis-aligned box in patient space is a tilted region in voxel space;
 // the smallest sub-box of the grid that holds it is bigger than the box itself. That is the honest
 // trade and it errs the safe way -- nothing the user asked to keep is ever cut.
+import { tuned } from "../render/scene-scale.ts";
 
 /**
  * A box in patient space (RAS), as the `roi` markup stores one.
@@ -179,6 +180,11 @@ export function cropVolume<T extends { length: number; [i: number]: number }>(
 /**
  * A box around everything above `frac` of the volume's peak intensity, padded by `padMm`.
  *
+ * THE DEFAULT PADDING IS VOXELS OF THIS VOLUME, not a length (Ron, 2026-10-20: "did you forget about scales? from
+ * astrophysics to electron microscope"). It was 10 mm: on a microscope's 1 nm grid that is ten million voxels -- no
+ * crop at all -- and on a parsec grid 3e-19 of a voxel, no padding. The 10 mm stands as it was while it is 2.5 to 40 of
+ * the volume's finest voxels (every grid from 0.25 to 4 mm) and is held to that range outside it.
+ *
  * A starting box, not an answer: it is what a person then drags. The test study is "about half neck",
  * and thresholding finds the head and the neck alike -- so this narrows an empty 256 mm field of
  * view down to the tissue, and the operator does the anatomy.
@@ -189,7 +195,8 @@ export function boxAroundData(
   ijkToRAS: readonly number[],
   opts: { frac?: number; padMm?: number } = {},
 ): Box | null {
-  const frac = opts.frac ?? 0.08, pad = opts.padMm ?? 10;
+  const spacing = (k: number) => Math.hypot(ijkToRAS[k], ijkToRAS[4 + k], ijkToRAS[8 + k]) || 1;
+  const frac = opts.frac ?? 0.08, pad = opts.padMm ?? tuned(10, Math.min(spacing(0), spacing(1), spacing(2)), 2.5, 40);
   const [nx, ny, nz] = dims;
   let peak = 0;
   for (let i = 0; i < data.length; i++) if (data[i] > peak) peak = data[i];
@@ -215,7 +222,6 @@ export function boxAroundData(
   // around the tissue maps back onto the tilted grid as the entire volume. "The cropped volume is not
   // cropped." A box on the volume's own axes has neither problem, and is the only kind that crops
   // without resampling.
-  const spacing = (k: number) => Math.hypot(ijkToRAS[k], ijkToRAS[4 + k], ijkToRAS[8 + k]) || 1;
   const padV = [pad / spacing(0), pad / spacing(1), pad / spacing(2)];
   const l: [number, number, number] = [
     Math.max(0, lo[0] - padV[0]), Math.max(0, lo[1] - padV[1]), Math.max(0, lo[2] - padV[2]),

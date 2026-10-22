@@ -1,13 +1,12 @@
-// The 3D look's rules (render/look3d.ts), including the FIREWALL around surface models (Ron, 2026-09-24:
-// "remove the surface models as a 'first class' citizen … But I would firewall it."): a segmentation is
-// drawn as surfaces only when it was given surface models, whatever the volume's look says; Scene offers
-// "Surfaces" only then; and a look stored as "surfaces" without any is shown as what is drawn, Colored.
+// The 3D look's rules (render/look3d.ts). Since 2026-10-21 (Ron, option B) there is no "surfaces" look:
+// surface models are an export made from Save › Files, never drawn. A segmentation or a scene that still
+// says `surfaceModels: true` / `look3D: "surfaces"` (saved before then) is drawn solid.
 //
 //   deno test -A --no-check render/look3d.test.ts
 import { assertEquals } from "jsr:@std/assert";
 import type { LiveScene } from "./livescene.ts";
 import type { MrsonNode } from "./mrson.ts";
-import { hasSurfaceModels, look3DOf, looksOn, segLookOf } from "./look3d.ts";
+import { LOOKS_3D, look3DOf, looksOn, segLookOf } from "./look3d.ts";
 
 function scene(nodes: MrsonNode[]): LiveScene {
   return { nodes: new Map(nodes.map((n) => [n.id as string, n])) } as unknown as LiveScene;
@@ -23,20 +22,19 @@ Deno.test("a segmentation is drawn solid by default, with or without its volume"
   assertEquals(segLookOf(alone, alone.nodes.get("b")!), "solid");
 });
 
-Deno.test("THE FIREWALL: 'surfaces' draws surfaces only for a segmentation given surface models", () => {
+Deno.test("there is no Surfaces look any more: a segmentation flagged with surface models is drawn solid", () => {
+  assertEquals(LOOKS_3D.includes("surfaces" as never), false);
   const s = scene([ct("surfaces"), seg("with", true), seg("without")]);
-  assertEquals(segLookOf(s, s.nodes.get("with")!), "surfaces");
+  assertEquals(segLookOf(s, s.nodes.get("with")!), "solid");
   assertEquals(segLookOf(s, s.nodes.get("without")!), "solid");
+  const alone = scene([seg("b", true, "gone")]);
+  assertEquals(segLookOf(alone, alone.nodes.get("b")!), "solid");
 });
 
-Deno.test("Scene offers Surfaces only once a segmentation of the volume has surface models", () => {
-  assertEquals(hasSurfaceModels(scene([ct(), seg("a")]), "ct"), false);
-  assertEquals(hasSurfaceModels(scene([ct(), seg("a", true)]), "ct"), true);
-});
-
-Deno.test("a look stored as surfaces with no surface models is shown as what is drawn: Colored", () => {
+Deno.test("a look stored as surfaces by an older scene is read as Colored (solid)", () => {
   assertEquals(look3DOf(scene([ct("surfaces"), seg("a")]), "ct"), "solid");
-  assertEquals(look3DOf(scene([ct("surfaces"), seg("a", true)]), "ct"), "surfaces");
+  assertEquals(look3DOf(scene([ct("surfaces"), seg("a", true)]), "ct"), "solid");
+  assertEquals(looksOn(scene([ct("surfaces"), seg("a", true)]), "ct"), ["solid"]);
 });
 
 Deno.test("off and volume hide the segmentations in 3D", () => {
@@ -53,7 +51,7 @@ Deno.test("Scene lights every look that is on: the volume rendering and the soli
   assertEquals(looksOn(scene([ct("off")]), "ct"), ["off"]);
 });
 
-Deno.test("a sequence member follows its frame's look: hidden under Off and Volume, surfaces only when flagged", () => {
+Deno.test("a sequence member follows its frame's look: hidden under Off and Volume, solid otherwise", () => {
   const frame = (id: string, look: string) => ({ type: "image", id, sequence: "seq", look3D: look } as unknown as MrsonNode);
   const member = (id: string, src: string, models: boolean) =>
     ({ type: "segmentation", id, sequence: "segseq", hidden: true, refs: { source: [src] }, ...(models ? { surfaceModels: true } : {}) } as unknown as MrsonNode);
@@ -62,8 +60,7 @@ Deno.test("a sequence member follows its frame's look: hidden under Off and Volu
     assertEquals(segLookOf(s, s.nodes.get("m1")!), "hidden", look);
   }
   const s = scene([frame("f0", "surfaces"), frame("f1", "surfaces"), member("m0", "f0", true), member("m1", "f1", true)]);
-  assertEquals(segLookOf(s, s.nodes.get("m1")!), "surfaces");
-  assertEquals(hasSurfaceModels(s, "f1"), true);
+  assertEquals(segLookOf(s, s.nodes.get("m1")!), "solid");
 });
 
 Deno.test("a time series lights one look: its rendering decides (round 2, finding 5)", () => {

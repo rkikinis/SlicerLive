@@ -294,3 +294,27 @@ Deno.test("round 4, 2: an index another program holds unseen stops the batch at 
   assertEquals(r.results.filter((x) => /open by another program/.test(x.error ?? "")).length, 3);
   assert(took < 8000, `took ${took.toFixed(0)} ms`);
 });
+
+Deno.test("an import stopped before the database takes anything adds nothing and takes back its copies (Ron, 2026-10-17: Stop)", async () => {
+  const src = await tmp("albula-stop-");
+  const a = await makeCtSeries(8, 8, 4, { extra: { SeriesDescription: "A", PatientName: "TEST^STOP", PatientID: "T-S" } });
+  const b = await makeCtSeries(8, 8, 3, { extra: { SeriesDescription: "B", PatientName: "TEST^STOP", PatientID: "T-S" } });
+  for (const [i, x] of a.instances.entries()) await Deno.writeFile(`${src}/A${i}`, new Uint8Array(x));
+  for (const [i, x] of b.instances.entries()) await Deno.writeFile(`${src}/B${i}`, new Uint8Array(x));
+  const dir = `${await tmp("albula-db-stop-")}/db`;
+  await createDatabase(dir, { name: "Stop" });
+  const { files } = await filesUnder(src);
+  // Stopped while the files are copied: after the first series is in place.
+  let copyingSeen = 0;
+  const r = await importFiles(dir, files, { onProgress: (p) => { if (p.phase === "adding") copyingSeen++; }, stopped: () => copyingSeen > 0 && (() => { try { return [...Deno.readDirSync(`${dir}/dicom`)].length > 0; } catch { return false; } })() });
+  assertEquals(r.stopped, true);
+  assertEquals(r.series.length, 0);
+  assertEquals(await sql(`${dir}/ctkDICOM.sql`, "SELECT COUNT(*) FROM Images"), "0", "nothing in the index");
+  const left: string[] = [];
+  const walk = (d: string) => { try { for (const e of Deno.readDirSync(d)) { if (e.isDirectory) walk(`${d}/${e.name}`); else left.push(e.name); } } catch { /* none */ } };
+  walk(`${dir}/dicom`);
+  assertEquals(left, [], "the copies this import made were taken back");
+  const folders = (() => { try { return [...Deno.readDirSync(`${dir}/dicom`)].map((e) => e.name); } catch { return []; } })();
+  assertEquals(folders, [], "and the folders they left empty (critic 2026-10-17, finding 15)");
+  assertEquals((await filesUnder(src)).files.length, 7, "the originals untouched");
+});

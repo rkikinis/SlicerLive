@@ -43,7 +43,7 @@
   --sl-accent: #f8d764;        /* primary: the logo's yellow */
   --sl-accent-hover: #ffe485;  /* the logo's highlight */
   --sl-accent-fg: #211b16;     /* text on an accent fill: the well, 12:1 on the yellow */
-  --sl-callout: #ff9a5c;       /* orange: attention, unsaved, placement mode -- AND warning, */
+  --sl-callout: #ff9a5c;       /* orange: a warning only -- unsaved, edited and placing are the yellow button (PALETTE.md); */
   --sl-warn: #ff9a5c;          /* because yellow is the accent now and cannot also mean caution */
   --sl-ok: #4cc98a;            /* green */
   --sl-error: #f0655b;
@@ -293,13 +293,13 @@ html, body { overscroll-behavior: none; }
   border-left: 1px solid; border-right: 1px solid;
 }
 
-/* The command to start a segmentation server: selectable, because the point of showing it is that
-   someone copies it. Everything else in the toolbar and body has user-select:none. */
+/* The command to start a segmentation server (AI Segmentations › Advanced › Server, By hand): selectable, because the
+   point of showing it is that someone copies it. Everything else in the toolbar and body has user-select:none. */
 .sl-ai-cmd {
   margin: 4px 0 8px; padding: 8px 10px; border-radius: 6px; overflow-x: auto;
   background: var(--sl-surface-2); border: 1px solid var(--sl-border);
   font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--sl-fg);
-  user-select: text; -webkit-user-select: text; white-space: pre;
+  user-select: text; -webkit-user-select: text; white-space: pre-wrap; word-break: break-all; display: block;
 }
 
 /* ============================================================================
@@ -440,7 +440,12 @@ html, body { overscroll-behavior: none; }
    that does not spill over into a second line and is not overloaded." It had no layout CSS at all
    before this -- the row was plain inline spans, so four buttons and a name wrapped exactly like
    paragraph text once they did not fit. */
-.sl-sh { max-height: 220px; overflow-y: auto; border: 1px solid var(--sl-border); border-radius: var(--sl-radius); }
+.sl-sh { overflow-y: auto; border: 1px solid var(--sl-border); border-radius: var(--sl-radius); }   /* its height: fit-list.ts */
+/* The grip under a list that fits its space (fit-list.ts): drag for another height, double-click for the automatic one.
+   A bar the width of a thumb, visible at arm's length (PALETTE.md), on a strip tall enough to catch. */
+.sl-fit-grip { height: 12px; cursor: ns-resize; display: flex; align-items: center; justify-content: center; touch-action: none; }
+.sl-fit-grip::before { content: ""; width: 36px; height: 4px; border-radius: 2px; background: var(--sl-fg-muted); opacity: 0.55; }
+.sl-fit-grip:hover::before { opacity: 1; background: var(--sl-accent); }
 .sl-sh-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; white-space: nowrap; }
 .sl-sh-row:hover { background: var(--sl-surface-2); }
 .sl-sh-icon { flex: none; }
@@ -621,6 +626,10 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
    when I click the light of the x." My own check read the `hidden` PROPERTY, which was always true,
    so it verified state instead of appearance and reported success. */
 .sl-3d-panel[hidden] { display: none; }
+/* ONCE FOR EVERY ELEMENT (2026-10-15, the fifth instance: Ron asked what the empty dark box in the middle of the top
+   bar was -- the sequence transport, hidden with no sequence loaded, drawn anyway by .sl-transport's display:flex).
+   The per-class rules above and below came first; this one makes the next one unnecessary. */
+[hidden] { display: none !important; }
 .sl-3d-panel-head { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; }
 .sl-3d-panel-head > span { flex: 1; font: 700 10px var(--sl-font); letter-spacing: .04em; text-transform: uppercase; color: var(--sl-fg); }
 .sl-3d-panel-head button { background: transparent; color: var(--sl-fg); border: 0; font: 700 13px var(--sl-font); cursor: pointer; padding: 0 4px; }
@@ -690,18 +699,6 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
 .sl-action-done { box-shadow: inset 0 0 0 2px var(--sl-view-green); }
 .sl-action-failed { box-shadow: inset 0 0 0 2px var(--sl-view-red); }
 @media (prefers-reduced-motion: reduce) { .sl-action-busy { animation: none; } }
-
-/* THE DROP TARGET, made visible. Ron: "The most popular way to load data is drag and drop from
-   disk." It used to be one gray sentence at the bottom of the panel; a dashed well says the same
-   thing in the shape of the thing it describes. Not itself a drop handler -- the real target is the
-   whole view area (load-panel.ts), so dropping anywhere still works. */
-.sl-dropzone {
-  display: flex; flex-direction: column; gap: 2px; align-items: center;
-  padding: 14px 10px; margin: 6px 0 10px;
-  border: 1px dashed var(--sl-border); border-radius: 6px;
-  background: var(--sl-bg); color: var(--sl-fg-dim); text-align: center;
-}
-.sl-dropzone strong { color: var(--sl-fg); font-weight: 600; font-size: 12px; }
 
 /* A MODAL QUESTION. Used for the license notice that has to be read before a segmentation runs, and
    built to be reused for deletion. Deliberately plain: a dim backdrop, a panel in the well color,
@@ -1038,6 +1035,8 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
 }
 
 /* THE TRANSPORT IN THE TOP BAR (sequence-toolbar.ts): between the module picker and the layout menu. */
+/* The extensions' import-time work, while it runs (jobs-line.ts): quiet, one line, nothing to press. */
+.sl-jobs-line { color: var(--sl-fg-muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px; margin: 0 8px; }
 .sl-transport { display: flex; align-items: center; gap: 5px; margin-left: auto; margin-right: auto; height: 26px; padding: 0 8px; background: var(--sl-bg); border: 1px solid var(--sl-border); border-radius: 6px; font-size: 12px; white-space: nowrap; min-width: 0; }
 .sl-transport .sl-tool { height: 20px; min-width: 24px; padding: 0 6px; font-size: 11px; }
 .sl-transport .sl-transport-on { background: var(--sl-accent); color: var(--sl-accent-fg); font-weight: 700; }
@@ -1183,6 +1182,14 @@ button.sl-primary:hover { background: var(--sl-accent-hover); }
 .sl-save-item .sl-save-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sl-save-why { white-space: nowrap; }
 .sl-save-foot { margin-top: 8px; }
+/* SAVE AS FILES: "Everything shown in 3D" on top, and "Closed, for 3D printing" under a row that makes surfaces
+   (mockups/surface-export-2026-10-22.html in the workspace). */
+.sl-save-item .sl-save-closed { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; }
+.sl-save-item .sl-save-closed[hidden] { display: none; }
+.sl-save-all3d { border: 1px solid var(--sl-line-strong); border-radius: 4px; padding: 5px 4px; margin-bottom: 6px; }
+.sl-save-all3d .sl-save-name { grid-column: 1 / -1; white-space: normal; font-weight: 600; }
+.sl-save-all3d .sl-save-count { font-weight: 400; color: var(--sl-fg-muted); }
+.sl-save-all3d .sl-fmt { grid-column: 1 / 3; justify-self: end; }
 
 
 /* A row a script hides must stay hidden: .sl-3d-panel-row's display:flex overrode [hidden] (critic 2026-10-14, 16). */
@@ -1199,6 +1206,32 @@ button.sl-primary:hover { background: var(--sl-accent-hover); }
 .sl-row-menu { position: fixed; z-index: 1000; background: var(--sl-bg); border: 1px solid var(--sl-border); border-radius: 6px; padding: 3px; min-width: 150px; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
 .sl-row-menu button { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--sl-fg); font: inherit; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
 .sl-row-menu button:hover { background: var(--sl-surface-3); }
+
+/* THE GLASSES STRIP (live-views.ts; mockup glasses-strip-2026-10-15.html): across the top of the desk's 3D view while the
+   glasses view is on, under the view's bar. Text at 13px, as the rest of the panels (controls visible at arm's length). */
+.sl-glasses-strip {
+  position: absolute; left: 8px; right: 8px; top: 28px; z-index: 6; pointer-events: auto;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px;
+  background: var(--sl-surface); border: 1px solid var(--sl-accent); border-radius: 6px; box-shadow: var(--sl-shadow-float);
+  font: 13px var(--sl-font); color: var(--sl-fg);
+}
+.sl-glasses-strip > b { color: var(--sl-heading); margin-right: 4px; }
+.sl-glasses-strip select, .sl-glasses-strip button {
+  font: 13px var(--sl-font); color: var(--sl-fg); background: var(--sl-bg); border: 1px solid var(--sl-control-edge);
+  border-radius: 4px; padding: 4px 8px; cursor: pointer;
+}
+.sl-glasses-strip button:hover { background: var(--sl-fill-hover); }
+.sl-glasses-strip button[aria-pressed=true] { border-color: var(--sl-accent); }
+.sl-glasses-strip-hint { color: var(--sl-fg-dim); font-size: 12px; }
+.sl-glasses-strip button.sl-glasses-strip-stop { margin-left: auto; background: var(--sl-accent); color: var(--sl-accent-fg); border-color: var(--sl-accent); font-weight: 600; }
+.sl-glasses-strip button.sl-glasses-strip-stop:hover { background: var(--sl-accent-hover); }
+/* BANNERS ACROSS THE TOP OF THE 3D VIEW (live-views.ts viewBanner, SDK 14): the glasses strip's look, stacked. */
+.sl-view-banners { position: absolute; left: 8px; right: 8px; top: 28px; z-index: 8; display: grid; gap: 6px; pointer-events: none; }  /* above a rectangle's cover (z 7): its Done must be clickable */
+.sl-view-banners > .sl-glasses-strip { position: static; pointer-events: auto; }
+.sl-view-bar { flex: 1 1 120px; min-width: 80px; height: 8px; background: var(--sl-line-strong); border-radius: 4px; overflow: hidden; }
+.sl-view-bar > i { display: block; height: 100%; width: 0; background: var(--sl-accent); transition: width .2s; }
+.sl-view-bar.sl-indeterminate > i { width: 30%; animation: sl-indeterminate 1.2s ease-in-out infinite; }
+@keyframes sl-indeterminate { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
 
 /* ------------------------------------------------------------------------------------------------
    THE PRESS, ACKNOWLEDGED FOR A FIXED BEAT, on every button in the application (the pointerdown and
@@ -1325,3 +1358,4 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 
 /* Controls for development only (Settings › For developers; 2026-10-14): hidden unless that setting is on. */
 html:not(.sl-dev) .sl-dev-step { display: none !important; }
+

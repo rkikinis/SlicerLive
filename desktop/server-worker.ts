@@ -5,7 +5,8 @@
 import { serveDir } from "jsr:@std/http@1/file-server";
 import { handleSettingsRequest } from "./settings-file.ts";
 import { handleHaversackRequest, handleOpenRequest } from "./haversack-proxy.ts";
-import { handleDbRequest } from "./db-serve.ts";
+import { handleDbRequest, registeredDatabases } from "./db-serve.ts";
+import { handleJobsRequest, startExtensionJobs } from "./extension-jobs.ts";
 import { handleHeadsetRequest } from "./headset.ts";
 import { handleLogRequest, startSessionLog } from "./session-log.ts";
 import { handleWindowRequest } from "./window-frame.ts";
@@ -84,7 +85,11 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
         {
           port: p,
           hostname: "127.0.0.1",
-          onListen: (addr) => { listening = addr.port; (self as unknown as Worker).postMessage({ port: addr.port }); },
+          onListen: (addr) => {
+            listening = addr.port; (self as unknown as Worker).postMessage({ port: addr.port });
+            // The extensions' import-time work (extension-jobs.ts): after imports, and once over every database.
+            startExtensionJobs({ port: addr.port, databases: () => registeredDatabases(root), galleryRoot: root });   // { id, path, exists }
+          },
         },
         // Three dynamic routes; everything else is the static gallery.
         //   /_settings    the single persistence store (settings-file.ts)
@@ -96,6 +101,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
         //   /_window      where the native window is and how big, so a Dock start puts it back
         //   /_models/*    trained models the page runs itself (nnLive), fetched once and kept (model-store.ts)
         //   /_headset/*   VR / AR glasses: their head tracking and 3D mode (headset.ts)
+        //   /_jobs        the extensions' import-time work: running, done, or why there is none (extension-jobs.ts)
         async (req) =>
           refuseForeign(req, listening) ??
             (await handleSettingsRequest(req, root)) ??
@@ -108,6 +114,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             (await handlePictureRequest(req, root)) ??
             (await handleModelRequest(req)) ??
             (await handleHeadsetRequest(req)) ??
+            handleJobsRequest(req) ??
             await serveCode(req, root),
       );
       return;

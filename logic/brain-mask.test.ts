@@ -80,8 +80,33 @@ Deno.test("a job the server never starts, while it runs nothing else, ends the w
   const idle = await synthstripBrainMask(live, "z", (l) => lines.push(l), { transport: { fetch: server(false, () => "queued") as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 100 });
   assertEquals(!idle.ok && idle.reason, "stuck");
   assertEquals(lines.includes("waiting for the segmentation server: it is busy with another job"), true);
-  // Another job running (a long FastSurfer): not stuck, the wait goes on -- here until our job ends on its own.
-  const t0 = performance.now();
-  const busy = await synthstripBrainMask(live, "w", undefined, { transport: { fetch: server(true, () => (performance.now() - t0 > 400 ? "failed" : "queued")) as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 100 });
-  assertEquals(!busy.ok && busy.reason, "failed");
+  // ANOTHER JOB RUNNING AHEAD OF IT IS WAITED FOR, never restarted away (critic 2026-10-20, finding 1: a restart would stop
+  // the person's segmentation). The three minutes count again from the last time the other job was seen running.
+  let polls = 0;
+  const ahead = (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).endsWith("/result")) return Promise.resolve(new Response("", { status: 404 }));
+    if (String(url).endsWith("/jobs") && init?.method !== "POST") polls++;
+    // the job ahead is seen running at two looks at the list; then ours starts (and ends) as the one ahead ends
+    return server(polls < 3, () => polls >= 2 ? "succeeded" : "queued")(url, init);
+  };
+  const busyLines: string[] = [];
+  const busy = await synthstripBrainMask(live, "w", (l) => busyLines.push(l), { transport: { fetch: ahead as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 30 });
+  assertEquals(!busy.ok && busy.reason, "failed");   // it ran: the stand-in has no answer to send, so "failed", not "stuck"
+  assertEquals(busyLines.includes("waiting behind another job on the segmentation server"), true);
+  // And once the job ahead is gone and ours is still not started three minutes later: stuck, said as such.
+  const after = await synthstripBrainMask(live, "u", undefined, { transport: { fetch: ((u: string | URL | Request, i?: RequestInit) => server(false, () => "queued")(u, i)) as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, queuedStuckMs: 30 });
+  assertEquals(!after.ok && after.reason, "stuck");
+  assertEquals(!after.ok && after.message.includes("runs nothing else"), true);
+});
+
+Deno.test("a running job that makes no progress is a stuck server too (Ron, 2026-10-15: be aggressive)", async () => {
+  const fetchFn = (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("tasks/")) return Promise.resolve(new Response("{}", { status: 200 }));
+    if (init?.method === "POST") return Promise.resolve(new Response(JSON.stringify({ id: "j4" }), { status: 200 }));
+    if (u.endsWith("/jobs")) return Promise.resolve(new Response(JSON.stringify({ jobs: [{ id: "j4", state: "running" }] }), { status: 200 }));
+    return Promise.resolve(new Response(JSON.stringify({ state: "running", progress: 0.3 }), { status: 200 }));
+  };
+  const r = await synthstripBrainMask(live, "v", undefined, { transport: { fetch: fetchFn as typeof fetch, base: "/_haversack/" }, upload, pollMs: 5, stallMs: 100 });
+  assertEquals(!r.ok && r.reason, "stuck");
 });

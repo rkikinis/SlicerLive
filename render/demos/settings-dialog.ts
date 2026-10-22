@@ -39,7 +39,6 @@ export interface SettingsDeps {
 /** The shipped defaults, in one place, so the dialog and the code that reads them cannot drift. */
 export const SETTING_DEFAULTS = {
   Launch: { restoreModule: true, restoreLayout: true },
-  Surfaces: { onGpu: false },
   Loading: { fromCopy: true },
   Pictures: { folder: "downloads", only3d: false, panel: false, scale: 1 },
   View3D: { drawing: true, lighting: LIGHT_PRESETS[DEFAULT_LIGHT].name, shading: LATEST_SHADING },
@@ -142,21 +141,11 @@ export function openSettingsDialog(deps: SettingsDeps): void {
       into.appendChild(hint("Where “Picture · Save…” in the 3D view writes."));
       void refreshPicFolder();
 
-      // THE EXPERIMENT, WHERE RON CAN REACH IT. Measured 2026-09-23 on the whole-body checkpoints:
-      // the whole extraction is 0.91 s on the card against 10.02 s on the processor, and the meshes
-      // are identical -- same triangles, same vertices, surface areas within 0.0002%. Off until he
-      // has run it on real studies in his own window; the old path is one switch away.
-      into.appendChild(h2("Surfaces"));
-      into.appendChild(row("Build surfaces on the graphics card", "Builds surface models on the graphics card: faster, and the same surfaces. If it fails, they are built on the processor instead.",
-        toggle(() => st.getBool("Surfaces", "onGpu", SETTING_DEFAULTS.Surfaces.onGpu), (v) => {
-          st.set("Surfaces", "onGpu", v);
-          (globalThis as unknown as { __gpuSurfaces?: boolean }).__gpuSurfaces = v;
-        })));
-      into.appendChild(hint("Applies to the next segmentation whose surfaces are built."));
+      // "Surfaces › Build surfaces on the graphics card" stood here (the card's extraction, 0.91 s against 10.02 s,
+      // identical meshes; algorithms/surface-nets-gpu.ts). Gone 2026-10-21 with the drawing of surface models (Ron,
+      // option B): they are an export now, made by the processor's worker in Save › Files, with nothing on the card to
+      // compete with the 3D view (CONSTRAINTS.md, the watchdog).
 
-      // THE DUCKN WORKING COPY (the workspace brief, Contents/docs/DUCKN-WORKING-COPY.md). ON by
-      // default since 2026-09-23 (Ron, after his own load from it and the sweep: "yes to both"); a
-      // series without a valid copy is read from DICOM either way, and the status line says which.
       // FOR DEVELOPERS (Ron, 2026-10-14: the glasses' step-by-step rows "developer setting"): the controls that do one
       // step of what a single button does, kept for development. Off by default.
       into.appendChild(h2("For developers"));
@@ -167,6 +156,9 @@ export function openSettingsDialog(deps: SettingsDeps): void {
         })));
 
       into.appendChild(h2("Loading"));
+      // THE DUCKN WORKING COPY (the workspace brief, Contents/docs/DUCKN-WORKING-COPY.md). ON by
+      // default since 2026-09-23 (Ron, after his own load from it and the sweep: "yes to both"); a
+      // series without a valid copy is read from DICOM either way, and the status line says which.
       into.appendChild(row("Load images from their fast copy", "A compressed copy of each series kept beside the DICOM files: one description and a few hundred pieces instead of hundreds of files. The same images, checked piece by piece. A series without a copy loads from DICOM as before.",
         toggle(() => st.getBool("Loading", "fromCopy", SETTING_DEFAULTS.Loading.fromCopy), (v) => {
           st.set("Loading", "fromCopy", v);
@@ -176,9 +168,9 @@ export function openSettingsDialog(deps: SettingsDeps): void {
 
       // THE COLOR SCHEME, BY VERSION (logic/anatomy/palettes.ts). Ron, 2026-09-25: "All of these settings should be
       // versioned. That makes it easier to get back to a particular state." What arrives with its own colors keeps them;
-      // this is where new colors come from, and what "Use the current colors" brings a segmentation to.
+      // this is where new colors come from, and what "Use Albula's colors" (Segmentations) brings a segmentation to.
       into.appendChild(h2("Colors"));
-      into.appendChild(row("Color scheme", "Where new segmentations get their colors, and what “Use the current colors” applies. Earlier versions stay available.",
+      into.appendChild(row("Color scheme", "Where new segmentations get their colors, and what “Use Albula’s colors” applies. Earlier versions stay available.",
         select(PALETTES.map((p) => [String(p.version), `v${p.version} — ${p.name} (${p.date})`] as [string, string]).reverse(),
           () => String(st.getNumber("Colors", "scheme", SETTING_DEFAULTS.Colors.scheme)),
           (v) => { st.set("Colors", "scheme", Number(v)); setPaletteVersion(Number(v)); })));

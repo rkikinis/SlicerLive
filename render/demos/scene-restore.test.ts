@@ -116,19 +116,29 @@ Deno.test("a scene saved with folded branches comes back folded", async () => {
   assertEquals((back as unknown as { mergedGroups?: unknown[] }).mergedGroups?.length, 1);
 });
 
-// THE 3D LOOK AND THE SURFACE MODELS ARE SAVED CHOICES. The restore patched neither, so every scene came
-// back Colored and without its surface models, and so did the automatic Reload (critic, 2026-09-24,
-// finding 2).
-Deno.test("a scene saved with a 3D look and surface models comes back with both", async () => {
+// THE 3D LOOK IS A SAVED CHOICE (critic, 2026-09-24, finding 2: the restore patched it not, and every scene came back
+// Colored). THE SURFACE MODELS ARE NOT, since 2026-10-21 (Ron, option B: surface models are an export only, never
+// drawn): a scene saved with `surfaceModels: true` and the Surfaces look opens drawn solid, with no flag that would
+// ask for surfaces.
+Deno.test("a scene saved with surface models and the Surfaces look opens solid, without surface models", async () => {
   const nodes = liveNodes().map((n) =>
     n.type === "segmentation" ? { ...n, surfaceModels: true } : n.type === "image" ? { ...n, look3D: "surfaces" } : n);
   const first = await writeScene(nodes, opts);
   const live = fakeLive(arrivedNodes());                       // arrives without either, as a fresh load does
   applySceneState(live, first.doc);
   const seg = [...live.nodes.values()].find((n) => n.type === "segmentation")!;
-  assertEquals((seg as unknown as { surfaceModels?: boolean }).surfaceModels, true);
+  assertEquals((seg as unknown as { surfaceModels?: boolean }).surfaceModels, undefined);
   const imgs = [...live.nodes.values()].filter((n) => n.type === "image");
-  assertEquals(imgs.every((n) => (n as unknown as { look3D?: string }).look3D === "surfaces"), true);
+  assertEquals(imgs.every((n) => (n as unknown as { look3D?: string }).look3D === "solid"), true);
+});
+
+Deno.test("a scene saved with the Volume look comes back with it", async () => {
+  const nodes = liveNodes().map((n) => n.type === "image" ? { ...n, look3D: "volume" } : n);
+  const first = await writeScene(nodes, opts);
+  const live = fakeLive(arrivedNodes());
+  applySceneState(live, first.doc);
+  const imgs = [...live.nodes.values()].filter((n) => n.type === "image");
+  assertEquals(imgs.every((n) => (n as unknown as { look3D?: string }).look3D === "volume"), true);
 });
 
 Deno.test("what has no live counterpart is listed, not silently skipped", async () => {

@@ -5,6 +5,8 @@
 // sform (sform_code > 0) over qform (qform_code > 0) over pixdim-only.
 // Supports datatypes 2/4/8/16/64/256/512/768 (u8,i16,i32,f32,f64,i8,u16,u32); .nii.gz via DecompressionStream.
 
+import { tuned } from "../../render/scene-scale.ts";
+
 /**
  * Where a reader got the geometry, and what the format could not tell it.
  *
@@ -20,8 +22,17 @@ export interface GeometrySource {
   origin: "acquired" | "derived" | "assumed";
   /** The mechanism, in the format's own vocabulary: `sform`, `qform`, `pixdim`, `slice positions`. */
   mechanism: string;
-  /** Spatial unit as declared. Absent when the format has no way to state one. */
+  /** Spatial unit as declared. Absent when the format has no way to state one. NIfTI's meters and micrometers are
+   *  converted to the scene's millimeters in `ijkToRAS` (the unit kept here is the file's); one it does not state is
+   *  taken as mm, as ITK takes it. */
   spaceUnit?: string;
+  /**
+   * THE AXES WHOSE SPACING THE FILE DID NOT DECLARE (0 = i, 1 = j, 2 = k): left at 0 or not a number, and read as 1 of
+   * the file's unit, as the NIfTI reference library does. "Absent means unknown" (DUCKN-WORKING-COPY.md, "Dimensions are
+   * declared, never assumed"; Ron: "People use slicer from microscopy to astrophysics"): 1 is a guess, so it is on the
+   * record and `origin` says "assumed". Absent when every spacing was declared.
+   */
+  spacingNotDeclared?: number[];
   /** Temporal unit as declared, where there is a time axis. */
   timeUnit?: string;
   /** True when the frame is anatomical, so `ijkToRAS` means RAS rather than a bare world frame. */
@@ -79,6 +90,8 @@ export interface Volume {
 
 /** NIfTI's `xyzt_units` byte: spatial unit in bits 0-2, temporal in bits 3-5. Six values, total. */
 const NIFTI_SPACE_UNITS: Record<number, string> = { 1: "m", 2: "mm", 3: "um" };
+/** Each of those units in the scene's millimeters. */
+const NIFTI_SPACE_TO_MM: Record<number, number> = { 1: 1000, 2: 1, 3: 1e-3 };
 const NIFTI_TIME_UNITS: Record<number, string> = { 8: "s", 16: "ms", 24: "us" };
 
 const DT: Record<number, { ctor: new (b: ArrayBuffer, o?: number, n?: number) => Volume["data"]; bytes: number; zarr: string }> = {
@@ -197,10 +210,14 @@ export async function parseNiftiVolumes(input: Uint8Array, name?: string): Promi
   // ijkToRAS: sform > qform > pixdim (NIfTI voxel->RAS; NO LPS flip here). NIfTI mandates RAS+, so
   // the frame is always anatomical — unlike NRRD, the format gives no way to say otherwise.
   const sform = (): number[] => [...srow.slice(0, 4), ...srow.slice(4, 8), ...srow.slice(8, 12), 0, 0, 0, 1];
+  // A SPACING THE FILE DID NOT GIVE (0, or not a number) is read as 1, as the reference library (nifti1_io) does --
+  // and recorded, not hidden: it was 1 silently, and a qform built from a 0 had a flat axis.
+  const notDeclared = [1, 2, 3].filter((a) => !(Number.isFinite(pixdim[a]) && pixdim[a] !== 0)).map((a) => a - 1);
+  const pd = (a: number) => notDeclared.includes(a - 1) ? 1 : pixdim[a];
   const qform = (): number[] => {
     // pixdim[0] is qfac, ±1, smuggling handedness through a field documented as grid spacing. Many
     // real files leave it 0, where the reader must take it as 1.
-    const R = quaternToMat(quat[0], quat[1], quat[2], pixdim[0] === 0 ? 1 : pixdim[0], pixdim[1], pixdim[2], pixdim[3]);
+    const R = quaternToMat(quat[0], quat[1], quat[2], pixdim[0] === 0 ? 1 : pixdim[0], pd(1), pd(2), pd(3));
     return [R[0], R[1], R[2], qoff[0], R[3], R[4], R[5], qoff[1], R[6], R[7], R[8], qoff[2], 0, 0, 0, 1];
   };
 
@@ -216,19 +233,31 @@ export async function parseNiftiVolumes(input: Uint8Array, name?: string): Promi
     M = sform();
     // Both mechanisms present is legal and the format does not say which wins. Compute the loser too
     // and report whether it agreed, rather than resolving an ambiguity in silence.
+    // AGREE within a ten-thousandth of a mm on a clinical grid, and within that share of a voxel on any other: a fixed
+    // 1e-4 is ten voxels of a 1e-5 mm grid and nothing at all on a parsec grid (MODULE-DESIGN-RULES "Any scale").
     if (qformCode > 0) {
       const q = qform();
-      geometry.qformAgreesWithSform = M.every((v, i) => Math.abs(v - q[i]) < 1e-4);
+      const voxel = Math.min(...[0, 1, 2].map((c) => Math.hypot(M[c], M[4 + c], M[8 + c])).filter((x) => x > 0));
+      const tol = tuned(1e-4, Number.isFinite(voxel) ? voxel : undefined, 2.5e-5, 4e-4);
+      geometry.qformAgreesWithSform = M.every((v, i) => Math.abs(v - q[i]) < tol);
     }
   } else if (qformCode > 0) {
     M = qform();
     geometry.mechanism = "qform";
+    if (notDeclared.length) { geometry.origin = "assumed"; geometry.spacingNotDeclared = notDeclared; }
   } else {
     // Method 1: ANALYZE 7.5. Spacing only, no orientation at all — an axis-aligned guess.
-    M = [pixdim[1] || 1, 0, 0, 0, 0, pixdim[2] || 1, 0, 0, 0, 0, pixdim[3] || 1, 0, 0, 0, 0, 1];
+    M = [pd(1), 0, 0, 0, 0, pd(2), 0, 0, 0, 0, pd(3), 0, 0, 0, 0, 1];
     geometry.origin = "assumed";
     geometry.mechanism = "pixdim (no orientation in the file)";
+    if (notDeclared.length) geometry.spacingNotDeclared = notDeclared;
   }
+  // IN THE SCENE'S mm, WHATEVER THE FILE'S UNIT. xyzt_units was recorded and then ignored, so a microscope's volume
+  // written in micrometers loaded a thousand times too large, and one in meters a thousand times too small (Ron,
+  // 2026-10-20: "did you forget about scales? from astrophysics to electron microscope"). The whole map is in the
+  // file's unit -- spacing and position alike -- so the whole of it is scaled, as ITK's reader does.
+  const toMm = NIFTI_SPACE_TO_MM[xyzt & 0x07] ?? 1;
+  if (toMm !== 1) M = M.map((v, i) => i < 12 ? v * toMm : v);
   if (nt > 1) meta.volumes = nt;
   return Array.from({ length: nt }, (_, t) => ({
     dims: [nx, ny, nz] as [number, number, number], ijkToRAS: M, data: data.subarray(t * n3, (t + 1) * n3) as Volume["data"],

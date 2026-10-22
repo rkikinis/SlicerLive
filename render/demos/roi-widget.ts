@@ -6,6 +6,7 @@
 import { FiducialField, type Sphere } from "../fiducial-field.ts";
 import { RoiBoxField } from "../roi-box-field.ts";
 import type { Vec3 } from "../mat4.ts";
+import { tuned, voxelFromExtent } from "../scene-scale.ts";
 
 export type HandleMeta =
   | { kind: "center" }
@@ -50,6 +51,8 @@ export interface RoiWidget {
   setBox(center: Vec3, half: Vec3): void;
   /** Re-orient the box; row-major 3x3, columns are the axes, must be orthonormal. */
   setAxes(axes?: number[]): void;
+  /** The smallest half-side (scene units): half a voxel of the finest volume shown. */
+  setMinHalf(half: number): void;
 }
 
 /**
@@ -78,7 +81,13 @@ export const ROI_HOVER_RGB: [number, number, number] = [0.95, 0.35, 0.05];
 
 export interface RoiWidgetOpts {
   coverage?: number;    // initial half-extent as a fraction of the volume extent (default 0.35)
-  minHalfMm?: number;   // never let a side collapse below this (default 5 mm)
+  /** Never let a side collapse below twice this, in the scene's units. NO FIXED LENGTH (Ron, 2026-10-20: "did you forget
+   *  about scales? from astrophysics to electron microscope"): the caller gives half a voxel of the finest volume shown
+   *  (setMinHalf), so the smallest box is one voxel at any scale; without one, a thousandth of the box it starts as. */
+  minHalfMm?: number;
+  /** The finest voxel of the data the box crops (scene units), which sizes its bars and handles' bounds. Without one, a
+   *  256th of the box it starts as (scene-scale.ts voxelFromExtent). */
+  voxel?: number;
   /**
    * The box's own axes in world space: row-major 3x3, COLUMNS are the axes. Must be orthonormal.
    * Omitted means world-aligned, and every number below is then what it always was.
@@ -225,9 +234,23 @@ export function sliceHandles(
   return out;
 }
 
+/**
+ * THE CROP BOX'S BAR HALF-THICKNESS: 0.0144 of the box's diagonal (a handle radius of 0.012 of it, the bar 0.12 of
+ * that), never under 0.5 mm on a clinical grid -- tuned by eye there, kept exactly on grids of 0.25 to 5 mm, and that
+ * many voxels at any other scale (scene-scale.ts; Ron, 2026-10-20: "from astrophysics to electron microscope"). The
+ * handle radius's own floor of 3 mm is six bar floors, as it was, so it still never decides.
+ */
+export function roiBarHalf(lo: Vec3, hi: Vec3, voxel: number | undefined): number {
+  const floor = tuned(0.5, voxel, 0.1, 2);
+  const hR = Math.max(6 * floor, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.012);
+  // Thin bars: the frame is a reference, not a feature. At 0.35 of the handle radius they read as
+  // fat painted lines against the sculpted volume; a third of that still reads crisply at any zoom.
+  return Math.max(floor, hR * 0.12);
+}
+
 /** Build an ROI widget spanning the middle `coverage` of the [lo,hi] volume box. */
 export function createRoiWidget(lo: Vec3, hi: Vec3, opts: RoiWidgetOpts = {}): RoiWidget {
-  const MIN_HALF = opts.minHalfMm ?? 5;
+  let MIN_HALF = opts.minHalfMm ?? 1e-3 * Math.max(Math.abs(hi[0] - lo[0]), Math.abs(hi[1] - lo[1]), Math.abs(hi[2] - lo[2])) * (opts.coverage ?? 0.35);
   let axes = opts.axes && opts.axes.length === 9 ? [...opts.axes] : [1, 0, 0, 0, 1, 0, 0, 0, 1];
   /** Column k: the box's k-th axis in world. */
   const ax = (k: number): Vec3 => [axes[k], axes[3 + k], axes[6 + k]];
@@ -239,19 +262,18 @@ export function createRoiWidget(lo: Vec3, hi: Vec3, opts: RoiWidgetOpts = {}): R
   const cov = opts.coverage ?? 0.35;
   const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const half: Vec3 = [(hi[0] - lo[0]) * cov, (hi[1] - lo[1]) * cov, (hi[2] - lo[2]) * cov];
-  const hR = Math.max(3, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.012);
-  // Thin bars: the frame is a reference, not a feature. At 0.35 of the handle radius they read as
-  // fat painted lines against the sculpted volume; a third of that still reads crisply at any zoom.
-  const bar = Math.max(0.5, hR * 0.12);
+  const voxel = opts.voxel !== undefined && opts.voxel > 0 ? opts.voxel
+    : voxelFromExtent(Math.max(Math.abs(hi[0] - lo[0]), Math.abs(hi[1] - lo[1]), Math.abs(hi[2] - lo[2])));
+  const bar = roiBarHalf(lo, hi, voxel);
 
   // Warm ivory rather than saturated gold: gold was chosen against the old dark navy view and reads
   // loud on Slicer's pale lavender. Kept off pure ivory so it still separates from the background.
-  const box = new RoiBoxField(center, half, { color: [...ROI_BAR_RGB], barHalfMm: bar, axes });
+  const box = new RoiBoxField(center, half, { color: [...ROI_BAR_RGB], barHalfMm: bar, axes, voxel });
   // Screen-space (constant on-screen size), ghost (shine through), not clipped by the box.
   // ghost:false — ghost mode multiplies every non-hovered glyph by 0.5 (fiducial-field.ts), which
   // halved these handles on top of their own alpha and left them washed out against Slicer's light
   // background. Hover is still distinguished by color and radius, so the cue is not lost.
-  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4, clippable: false, screenSpace: true, ghost: false });
+  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4, clippable: false, screenSpace: true, ghost: false, voxel });
   let hover: number | null = null;
 
   // Handle layout: 6 face centres + 8 corners + 1 centre = 15, in a fixed order so `id`
@@ -376,5 +398,6 @@ export function createRoiWidget(lo: Vec3, hi: Vec3, opts: RoiWidgetOpts = {}): R
     snapshot: () => ({ center: [...center] as Vec3, half: [...half] as Vec3 }),
     setBox(c, h) { for (let a = 0; a < 3; a++) { center[a] = c[a]; half[a] = h[a]; } box.setBox(center, half); refreshHandles(); },
     setAxes(a) { axes = a && a.length === 9 ? [...a] : [1, 0, 0, 0, 1, 0, 0, 0, 1]; box.setAxes(axes); refreshHandles(); },
+    setMinHalf(h) { if (Number.isFinite(h) && h > 0) MIN_HALF = h; },
   };
 }

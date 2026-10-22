@@ -1,6 +1,7 @@
 // "Data" panel (W1): open local volume files (NRRD / NIfTI, gzipped or not), drag-and-drop onto the views,
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
+import { fitList } from "./fit-list.ts";
 import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { renameCurrentScene, sceneControl, unsavedMarkups } from "./scene-control.ts";
 import { escapeHtml } from "./html.ts";
@@ -17,11 +18,13 @@ import { indexDirectory, indexFiles, loadEntry, type SeriesEntry } from "../../l
 import { dicomLibraryForDebugging } from "../../logic/dicom-io.ts";
 import { checkScene } from "../../logic/scene/check.ts";
 import { applySceneState } from "./scene-restore.ts";
+import { forgetCarriedExtensionState, restoreExtensionState } from "../../logic/scene/extensions.ts";
+import { askDerived, forgetAskedDerived } from "../../logic/asked-derived.ts";
 import { directorySource, httpSource, openDicomDatabase, recallDatabaseDir, rememberDatabaseDir, type DbProgress, type DbSeriesEntry, type DbSource, type DicomDatabase } from "../../logic/readers/dicom-db.ts";
 import { decodeSegmentationLazy, segCacheKeyFromHead } from "../../logic/readers/seg-cache.ts";
 import { BUILD_CODE, getBuiltSeg, putBuiltSeg } from "../../logic/readers/built-seg-cache.ts";
 import { describeProfile, describeProfilePhases, endLoadProfileWhenQuiet, mark, noteMs, span, spanSync, startLoadProfile } from "./load-profile.ts";
-import { loadSequenceFromCopy } from "../zarr-copy.ts";
+import { loadSequenceFromCopy, readCopyPieces } from "../zarr-copy.ts";
 import { volumeForSeg } from "../../logic/seg-placement.ts";
 import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../../logic/segmentation-editor.ts";
 import { keepScroll } from "./panel-scroll.ts";
@@ -31,16 +34,22 @@ import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { openPackageWindow } from "./package-window.ts";
 import { freesurferStructureByName, lookupStructure, usesFreesurferNumbering } from "../../logic/segment-naming.ts";
-import { segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
+import { followAlbulaColors, segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
 import { presentationFor, presentationParams } from "../../logic/presentation.ts";
 import { setColorizeParams } from "./tf-editor.ts";
 import { downloadSample } from "../../logic/sample-data.ts";
 import { setLook3D, setVolumeRenderingOn } from "./tf-editor.ts";
-import { hasSurfaceModels, look3DOf, type Look3D, LOOKS_3D, looksOn, segmentationsOf } from "../look3d.ts";
+import { applyAfterLoad } from "../after-load.ts";
+import { isBrainResult } from "../../logic/import-jobs/brain-structures-rule.ts";
+import { type Look3D, LOOKS_3D, looksOn, segmentationsOf } from "../look3d.ts";
 import { orderScene } from "./scene-order.ts";
 import { parseTerminology } from "../../logic/anatomy/terminology.ts";
-import { companionItem, currentFrames, loadSequenceIntoScene, type SequenceDocument } from "../../logic/sequences.ts";
+import { companionItem, currentFrames, loadSequenceIntoScene, sequencePlays, shownMember, type SequenceDocument } from "../../logic/sequences.ts";
+import { afterPress, pressedIn } from "./press-guard.ts";
+import { loadedElsewhere as loadedElsewhereIn } from "../../logic/loaded-elsewhere.ts";
+import { startWork } from "../working.ts";
+import { databaseForPath, dbIdOf, mergeListings, scanDatabases, seriesNamedIn, windowDatabase } from "../database-routing.ts";
 import { documentSeriesFor, parsePictures } from "../../logic/readers/dicom-picture.ts";
 import { readDicomHead } from "../../logic/readers/dicom-head.ts";
 import { explainSeries } from "../../logic/series-explain.ts";
@@ -117,13 +126,17 @@ function rasBounds(dims: [number, number, number], m: number[]): { lo: [number, 
  * it is, its study, and the file's SOP class, network and algorithm type, so a re-save writes them as the file
  * had them. The two paths built it separately and the cache path dropped the last three (code review, A5).
  */
-function segOrigin(entry: DbSeriesEntry, f: { sopClassUID?: string; task?: string; algorithmType?: string }): Record<string, string> {
+function segOrigin(entry: DbSeriesEntry, f: { sopClassUID?: string; sopInstanceUID?: string; task?: string; algorithmType?: string; writtenBy?: string }): Record<string, string> {
   return {
     seriesInstanceUID: entry.seriesInstanceUID,
+    // The SEG's own instance (a SEG is one object), for anything that names it as its source.
+    ...(f.sopInstanceUID ? { sopInstanceUID: f.sopInstanceUID } : {}),
     ...(entry.studyInstanceUID ? { studyInstanceUID: entry.studyInstanceUID } : {}),
     ...(f.sopClassUID ? { sopClassUID: f.sopClassUID } : {}),
     ...(f.task ? { task: f.task } : {}),
     ...(f.algorithmType ? { algorithmType: f.algorithmType } : {}),
+    // WHO WROTE THE FILE: only a file Albula wrote follows Albula's colors on load (logic/scheme-colors.ts).
+    ...(f.writtenBy ? { writtenBy: f.writtenBy } : {}),
   };
 }
 
@@ -318,6 +331,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
    * Ron, 2026-09-20: "we need a close scene button." The caller has asked about unsaved work.
    */
   const closeScene = (): number => {
+    forgetCarriedExtensionState();   // the blocks of extensions not installed here belonged to the scene that closes
+    forgetAskedDerived();            // and the tract sets asked for were for its scans
     const all = [...opts.live.nodes.values()];
     let n = 0;
     for (const x of all) if (x.type === "sequenceBrowser") { opts.live.write({ op: "del", id: x.id }); n++; }
@@ -325,6 +340,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     for (const x of all) if (x.type === "segmentation" || x.type === "markup" || x.type === "model" || x.type === "transform") { opts.live.write({ op: "del", id: x.id }); n++; }
     for (const x of all) if (x.type === "volumeRenderingDisplay" || x.type === "transferFunction") { opts.live.write({ op: "del", id: x.id }); }
     for (const x of all) if (x.type === "image") { removeVolumeFromScene(opts.live, x.id); n++; }
+    // THEIR PIECES GO TOO (critic 2026-10-15, render-audit-fixes finding 4: after closing, the store still held 869 MB of
+    // a CT read back once): every piece a closed node named, unless something left in the scene names it as well.
+    const named = (xs: Iterable<MrsonNode>) => { const h = new Set<string>(); for (const x of xs) for (const v of Object.values((x.zarr as ZarrDesc | undefined)?.chunkHashes ?? {})) h.add(v); return h; };
+    const still = named(opts.live.nodes.values());
+    opts.store.release([...named(all)].filter((h) => !still.has(h)));
     return n;
   };
 
@@ -391,12 +411,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           <line class="sl-io-line" x1="168" y1="64" x2="100" y2="176"/><rect class="sl-io-pill" x="118" y="140" width="64" height="26" rx="13"/><text class="sl-io-word" x="150" y="157" text-anchor="middle">Save</text></g>
         <g class="sl-io-arrow" data-pane="load-files" tabindex="0" role="button"><title>Load a file from disk, one thing at a time: NRRD, NIfTI, DICOM files or a folder.</title>
           <line class="sl-io-line" x1="304" y1="176" x2="226" y2="64"/><rect class="sl-io-pill" x="246" y="104" width="64" height="26" rx="13"/><text class="sl-io-word" x="278" y="121" text-anchor="middle">Load</text></g>
-        <g class="sl-io-arrow" data-pane="save-files" tabindex="0" role="button"><title>Save as a file on disk, one thing at a time: NRRD, NIfTI, STL. The file goes to your Downloads folder.</title>
+        <g class="sl-io-arrow" data-pane="save-files" tabindex="0" role="button"><title>Save as a file, one thing at a time: a volume as NRRD or NIfTI, a segmentation's surfaces as STL or OBJ. The file goes to your Downloads folder.</title>
           <line class="sl-io-line" x1="208" y1="64" x2="276" y2="176"/><rect class="sl-io-pill" x="194" y="140" width="64" height="26" rx="13"/><text class="sl-io-word" x="226" y="157" text-anchor="middle">Save</text></g>
-        <rect class="sl-io-box sl-io-db" x="8" y="180" width="176" height="52" rx="8"><title>The DICOM database: local, kept. Images, segmentations, surfaces and scenes stay here between sessions and come back together.</title></rect>
+        <rect class="sl-io-box sl-io-db" x="8" y="180" width="176" height="52" rx="8"><title>The DICOM database: local, kept. Images, segmentations and scenes stay here between sessions and come back together.</title></rect>
         <text class="sl-io-lbl" x="96" y="202" text-anchor="middle">DICOM database</text><text class="sl-io-sub" x="96" y="220" text-anchor="middle">local, kept</text>
         <rect class="sl-io-box sl-io-files" x="192" y="180" width="176" height="52" rx="8"><title>Files on disk: one thing at a time, in the formats other programs read.</title></rect>
-        <text class="sl-io-lbl" x="280" y="202" text-anchor="middle">Files</text><text class="sl-io-sub" x="280" y="220" text-anchor="middle">NRRD · NIfTI · STL · DICOM</text>
+        <text class="sl-io-lbl" x="280" y="202" text-anchor="middle">Files</text><text class="sl-io-sub" x="280" y="220" text-anchor="middle">NRRD · NIfTI · STL · OBJ</text>
       </svg>`;
     // THE PANES. The two load panes are the old Load Data blocks; the two save panes are drawn by
     // save-panel.ts. One at a time, under the graph.
@@ -651,11 +671,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // not identify a volume: a sequence's frames share one. So the record carries what the SEG
       // said about its own series and instances, and the same `volumeForSeg` that the decode path
       // uses has to agree that `target` is the right one. Anything else falls through and decodes.
-      const builtFits = alreadyBuilt && (() => {
-        if (!alreadyBuilt.referencedSeriesUID) return true;         // the SEG named no series: the guess stands, as on the decode path
-        const correct = volumeForSeg(images, { referencedSeriesUID: alreadyBuilt.referencedSeriesUID, referencedSOPInstanceUIDs: alreadyBuilt.referencedSOPInstanceUIDs });
-        return !!correct && correct.id === target.id;
-      })();
+      // AND THE VOLUME IT NAMES IS THE ONE IT GOES ON, when that volume has the grid the record was keyed with: the guess
+      // above named one phase of the heart for every phase's segmentation, the check refused 8 of 10 records, and those
+      // were decoded and compressed again (critic 2026-10-16, general audit, finding 5).
+      const builtFor = alreadyBuilt?.referencedSeriesUID
+        ? volumeForSeg(images, { referencedSeriesUID: alreadyBuilt.referencedSeriesUID, referencedSOPInstanceUIDs: alreadyBuilt.referencedSOPInstanceUIDs })
+        : undefined;
+      const sameGrid = (a: MrsonNode, b: MrsonNode) => JSON.stringify(a.dims) === JSON.stringify(b.dims) && JSON.stringify(a.ijkToRAS) === JSON.stringify(b.ijkToRAS);
+      const builtFits = !!alreadyBuilt && (!alreadyBuilt.referencedSeriesUID       // the SEG named no series: the guess stands, as on the decode path
+        || (!!builtFor && sameGrid(builtFor, target)));
+      if (builtFits && builtFor) target = builtFor;
       if (alreadyBuilt && builtFits) {
         // THE SAME ARRIVAL AS A COLD LOAD, which this did not do. A hit returned here and skipped
         // three things the slow path does further down, so a segmentation behaved differently on
@@ -669,7 +694,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         //    theirs, and only because something else happened to draw them.
         const cachedTask = alreadyBuilt.algorithmName ?? "";
         // THE FILE'S COLORS, as a decode now keeps them (Ron, 2026-09-25: what arrives with its own colors keeps
-        // them; "Use the current colors" is one click away). The record keeps the file's beside the colors of the
+        // them; "Use Albula's colors" is one click away). The record keeps the file's beside the colors of the
         // build; the file's are the ones that arrived.
         type CachedSeg = { labelValue: number; color?: number[]; fileColor?: number[] };
         const builtNow = { ...alreadyBuilt, segments: (alreadyBuilt.segments as unknown as CachedSeg[]).map((sg) =>
@@ -679,7 +704,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           name: label,
           ...(cachedTask ? { task: cachedTask } : {}),
           ...(arrival?.visible3D === false ? { hiddenIn3D: true } : {}),
-          origin: segOrigin(entry, { sopClassUID: alreadyBuilt.sopClassUID, task: cachedTask, algorithmType: alreadyBuilt.algorithmType }),
+          origin: segOrigin(entry, { sopClassUID: alreadyBuilt.sopClassUID, sopInstanceUID: alreadyBuilt.sopInstanceUID, task: cachedTask, algorithmType: alreadyBuilt.algorithmType, writtenBy: alreadyBuilt.writtenBy }),
         });
         opts.live.write({ op: "patch", id: made.segId, path: "#/colorScheme", value: "file" });
         if (cachedTask) setColorizeParams(opts.live, target.id as string, presentationParams(presentationFor(cachedTask)));
@@ -787,7 +812,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         return { value, r, g, b, name, known };
       });
       // THE FILE'S COLORS ARE KEPT (Ron, 2026-09-25): the lookup above still says WHAT each segment is; its color is
-      // the one it arrived with. "Use the current colors" (logic/scheme-colors.ts) applies the scheme on request.
+      // the one it arrived with. "Use Albula's colors" (logic/scheme-colors.ts) applies the scheme on request.
       const segments = looked.map(({ value, r, g, b, name, known }) => {
         return {
           labelValue: value,
@@ -827,7 +852,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           // again. Ron, loading it back: "It recomputed the surfaces."
           // The type as the file said it, written back as it was: a SEMIAUTOMATIC or a
           // MANUAL-with-a-name file was re-saved as AUTOMATIC (second critic, finding 8).
-          origin: segOrigin(entry, { sopClassUID: seg.sopClassUID, task, algorithmType: seg.algorithmType }),
+          origin: segOrigin(entry, { sopClassUID: seg.sopClassUID, sopInstanceUID: seg.sopInstanceUID, task, algorithmType: seg.algorithmType, writtenBy: seg.writtenBy }),
           // 3D ON AS IT LOADS. Ron: "If a surface is loaded show it in 3d upon loading", part of
           // "I would like to minimize the clicks and travel distance with the mouse."
           //
@@ -863,7 +888,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           desc: made.built.desc, chunks: Object.fromEntries(made.built.chunks), segments: made.built.segments, code: BUILD_CODE,
           ...(task ? { algorithmName: task } : {}),
           ...(seg.sopClassUID ? { sopClassUID: seg.sopClassUID } : {}),
+          ...(seg.sopInstanceUID ? { sopInstanceUID: seg.sopInstanceUID } : {}),
           ...(seg.algorithmType ? { algorithmType: seg.algorithmType } : {}),
+          ...(seg.writtenBy ? { writtenBy: seg.writtenBy } : {}),
           // Kept so a later hit can answer "which volume is this for" (see BuiltSeg).
           ...(seg.referencedSeriesUID ? { referencedSeriesUID: seg.referencedSeriesUID } : {}),
           ...(seg.referencedSOPInstanceUIDs ? { referencedSOPInstanceUIDs: seg.referencedSOPInstanceUIDs } : {}),
@@ -875,10 +902,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // the default, which is at least a stated choice.
       if (task) setColorizeParams(opts.live, target.id as string, presentationParams(presentationFor(task)));
 
-      // NO SURFACES ASKED FOR. They were, on every load, until the firewall (Ron, 2026-09-24: surface models
-      // no longer first-class; stored ones come back "only via the new module"). A segmentation loaded
-      // here has none; Generate Surface Models gives them, and a scene that had them brings the flag back
-      // (scene-restore), which the display manager then honors on its own.
+      // NO SURFACES. They were asked for on every load until the firewall (Ron, 2026-09-24), and drawn only
+      // when Generate Surface Models made them until 2026-10-21 (Ron, option B): now they are an export only,
+      // made from Save › Files (render/surface-export.ts). A segmentation is drawn solid from its labels.
 
       // AND THE GRAYSCALE STEPS OUT OF THE WAY IN 3D. Ron: "after loading, the volume 3d is on. I
       // have to go to scene data to turn it off ... On load, it should turn surface on and 3D in
@@ -957,7 +983,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // stands on its own. Bringing a cropped CT's parent along made the load fail on a
         // parent the user never asked for (a JPEG Lossless original) and the window stay
         // open on the failure -- Ron: "Load and close loaded but did not close."
-        const par = s.modality === "SEG" ? derivedFrom.get(uid) : undefined;
+        // FIBER TRACTS need their diffusion scan the same way (Ron, 2026-10-21: "when I loaded the tracts it did not load
+        // its parent"): the Diffusion module shows them on it.
+        const par = s.modality === "SEG" || tractsSeries.has(uid) ? derivedFrom.get(uid) : undefined;
         const parent = par ? byUid.get(par) : undefined;
         if (parent) add(parent, guard);            // the thing it is derived FROM goes in first
         if (!placed.has(uid)) { placed.add(uid); out.push(s); }
@@ -986,7 +1014,60 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
      */
     /** Surfaces series ticked in the last load (loadDbEntries fills it; the browser offers the module). */
     let surfacesTicked: string[] = [], tractsTicked: string[] = [];
-    const loadDbEntries = async (db: DicomDatabase, list: DbSeriesEntry[], setBusy: (s: string) => void, timings: string[], failures: string[], arrivalFor?: (seriesInstanceUID: string) => { visible3D?: boolean } | undefined, onEach?: () => void): Promise<void> => {
+    // THE WORKING BANNER over every load of series (render/working.ts; Ron, 2026-10-17: "tell the user that you are
+    // working"): a scene, the DICOM browser's Load, a module's load. Counted by the loop's own "(n/N)" line.
+    /** WHAT THE 3D VIEW SHOWS AFTER A LOAD (render/after-load.ts; Ron, 2026-10-19): not after a scene, which puts back
+     *  what was on screen. */
+    /** The slice planes the rules switched on and that are still theirs (version 3: only those are taken back). */
+    const rulesPlanes = new Set<string>();
+    const afterLoad = async (before: Set<string>, db?: DicomDatabase): Promise<{ claimed: boolean }> => {
+      const added = [...opts.live.nodes.keys()].filter((id) => !before.has(id));
+      const gg = globalThis as unknown as { __setSliceIn3D?: (cell: string, on: boolean) => void; __sliceIn3D?: () => string[]; __drawnSurfaces?: () => { meshes: number }[] };
+      // VERSION 2: an MR's stored brain's structures (the import-time job's, or saved from the panel), loaded with it.
+      const loadStored = async (imageIds: string[]): Promise<number> => {
+        if (!db) return 0;
+        const uids = new Set(imageIds.map((id) => (opts.live.nodes.get(id)?.origin as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID).filter((u): u is string => !!u));
+        if (!uids.size) return 0;
+        const edges = (await provenanceEdges()) ?? [];
+        const want = new Set(edges.filter((e) => e.kind === "algorithm" && uids.has(e.parent)).map((e) => e.child));
+        const brains = db.series.filter((e) => want.has(e.seriesInstanceUID) && e.modality === "SEG" && isBrainResult(e.description) && !alreadyLoaded(e));
+        // The newest one of each scan (several runs: the last made).
+        const newest = new Map<string, DbSeriesEntry>();
+        for (const e of brains) {
+          // The scan it was made from: the algorithm edge to one of these scans (critic 2026-10-20, finding 16: the first
+          // edge whose child is the SEG need not be that one).
+          const parent = edges.find((x) => x.child === e.seriesInstanceUID && x.kind === "algorithm" && uids.has(x.parent))?.parent ?? "";
+          const have = newest.get(parent);
+          if (!have || (e.seriesNumber ?? 0) > (have.seriesNumber ?? 0)) newest.set(parent, e);
+        }
+        if (!newest.size) return 0;
+        await loadDbEntries(db, [...newest.values()], () => {}, [], [], undefined, undefined, "Loading the brain's structures");
+        return newest.size;
+      };
+      try {
+        // Version 3 chooses a study's T1 as the import-time job does: by the description and the number of images.
+        const facts = (id: string) => {
+          const uid = (opts.live.nodes.get(id)?.origin as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID;
+          const e = uid ? db?.series.find((x) => x.seriesInstanceUID === uid) : undefined;
+          return e ? { description: e.description ?? "", images: e.count } : undefined;
+        };
+        const r = await applyAfterLoad({ live: opts.live, added }, {
+          setSliceIn3D: gg.__setSliceIn3D, sliceIn3D: gg.__sliceIn3D, rulesPlanes, facts,
+          meshesIn3D: () => (gg.__drawnSurfaces?.() ?? []).some((g) => g.meshes > 0),
+          setVolumeRendering: (id, on) => setVolumeRenderingOn(opts.live, id, on), loadStored,
+        });
+        if (r.line) void fetch("/_log", { method: "POST", body: r.line, keepalive: true }).catch(() => {});
+        return r;
+      } catch { return { claimed: false }; }
+    };
+    const loadDbEntries = async (db: DicomDatabase, list: DbSeriesEntry[], setBusy: (s: string) => void, timings: string[], failures: string[], arrivalFor?: (seriesInstanceUID: string) => { visible3D?: boolean } | undefined, onEach?: () => void, workTitle = "Loading"): Promise<void> => {
+      const work = startWork({ title: workTitle, unit: "series", total: list.length });
+      const counted = (msg: string) => { const m = /^\((\d+)\/(\d+)\)/.exec(msg); if (m) work.step(Number(m[1]) - 1, Number(m[2])); setBusy(msg); };
+      const before = failures.length;
+      try { await loadDbEntries0(db, list, counted, timings, failures, arrivalFor, onEach); work.step(list.length); }   // all in
+      finally { work.done(failures.length === before); }
+    };
+    const loadDbEntries0 = async (db: DicomDatabase, list: DbSeriesEntry[], setBusy: (s: string) => void, timings: string[], failures: string[], arrivalFor?: (seriesInstanceUID: string) => { visible3D?: boolean } | undefined, onEach?: () => void): Promise<void> => {
     // STORED FIBER TRACTS ON EVERY PATH IN (critic 2026-10-06, finding 15): the browser's tree fills tractsSeries, but a
     // module's loadDatabaseSeries does not build the tree; the provenance edges say which series are tracts.
     for (const e of (await provenanceEdges()) ?? []) if (e.kind === "tracts") tractsSeries.add(e.child);
@@ -1009,17 +1090,19 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           timings.push(`${label}: already loaded — not loaded again`);
           continue;
         }
-        // STORED SURFACES ARE NOT LOADED HERE, AND NOT WITH THEIR SEGMENTATION EITHER. Since the firewall
-        // (Ron, 2026-09-24: stored surfaces come back "only via the new module") they come back only when
-        // Generate Surface Models is asked; `withAncestors` has put the segmentation earlier in this list,
-        // and the browser offers that module when the load ends (surfacesTicked). This line said "loaded
-        // … as its 3D surfaces" when nothing was (critic, 2026-09-24, finding 9).
+        // STORED SURFACES ARE NOT LOADED: surface models are not shown in Albula (Ron, 2026-10-21, option B; the
+        // firewall before that, 2026-09-24). `withAncestors` has put the segmentation earlier in this list, so it
+        // is loaded and drawn solid, and the browser says so when the load ends (surfacesTicked). This line said
+        // "loaded … as its 3D surfaces" when nothing was (critic, 2026-09-24, finding 9).
         if (surfaceSeries.has(entry.seriesInstanceUID)) {
           surfacesTicked.push(label);
-          timings.push(`${label}: stored surface models, not loaded — Generate Surface Models brings them back`);
+          timings.push(`${label}: stored surface models, not loaded — surface models are not shown in Albula`);
         } else if (tractsSeries.has(entry.seriesInstanceUID)) {
-          tractsTicked.push(label);
-          timings.push(`${label}: fiber tracts, not an image — not loaded here`);
+          // Its scan was put before it in the list (withAncestors); the Diffusion module shows THIS set on it, not the
+          // newest of the scan's sets (logic/asked-derived.ts). Said only when the scan is not here.
+          const scanUid = derivedFrom.get(entry.seriesInstanceUID);
+          if (!scanUid) tractsTicked.push(label);
+          timings.push(scanUid ? `${label}: fiber tracts, shown in Diffusion on their scan` : `${label}: fiber tracts, not an image, and their scan is not in this database — not loaded`);
         } // A SEG is not a volume: it is a set of 1-bit masks placed on ANOTHER series' grid, so
         // it is decoded onto a loaded volume rather than reconstructed on its own.
         else if (entry.modality === "SEG") {
@@ -1049,6 +1132,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           if (copy && "missing" in copy) timings.push(`no duckn copy used (${copy.missing}) — read from DICOM`);
           const fromCopy = copy && !("missing" in copy) ? copy : null;
           const seq = fromCopy ?? await db.loadSequence(entry, note);
+          // WHICH DATABASE EACH VOLUME CAME FROM, carried into its origin (critic 2026-10-15, render-audit-fixes finding 2:
+          // after the window switched databases, a volume given back could not be read again, and a segmentation drawn on it
+          // could not be saved -- both looked in the database the window shows NOW).
+          // The path only ("/_db/<id>/"): a saved scene keeps it, and the app's port is not the same from run to run.
+          if (dbBase) for (const f of seq.frames) (f as { meta?: Record<string, unknown> }).meta = { ...((f as { meta?: Record<string, unknown> }).meta ?? {}), fromDatabase: new URL(dbBase, location.href).pathname };
           if (fromCopy) {
             noteMs("volume · copy: the description", fromCopy.ms.describe);
             noteMs("volume · copy: fetch and unpack the pieces", fromCopy.ms.pieces);
@@ -1072,10 +1160,22 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             // before the heart beat (critic, 2026-09-19, finding 4). Built here, with the
             // status line saying so; the samples were just written, so this is the chunks
             // read back once per frame and nothing else.
+            //
+            // ONLY FOR A SERIES THAT PLAYS (render-audit 2026-10-15, finding 4: PAT16's 102 diffusion images went to the card
+            // at load, 108 MB and 0.9 s of a 1.6 s load, and nothing draws them). A sequence indexed by numbers -- the heart's
+            // phases, timed frames -- is played in order; one indexed by names (a diffusion scan's b-values and directions)
+            // is not, and a frame of it is made when it is first shown.
+            //
+            // "INDEXED BY NUMBERS" IS NOT ENOUGH (critic 2026-10-15, render-audit-fixes finding 3): a diffusion label such as
+            // "b 1000 · 0.71, 0.71, 0.00" holds a number, so the sequence is marked numeric and all 102 frames were still
+            // prepared. A series that plays has one distinct time per frame, in order; a diffusion scan repeats its b-values.
             const layers = opts.live.managers.find((m): m is VolumeLayersDisplayableManager => m instanceof VolumeLayersDisplayableManager);
-            const tPrep = performance.now();
-            await layers?.prepare(r.frameIds.slice(1), opts.live, (i, n) => setBusy(`${label}: preparing frame ${i + 2} of ${n + 1}…`));
-            timings.push(`frames prepared ${((performance.now() - tPrep) / 1000).toFixed(1)}s`);
+            const plays = sequencePlays(opts.live.nodes.get(r.sequenceId));
+            if (plays) {
+              const tPrep = performance.now();
+              await layers?.prepare(r.frameIds.slice(1), opts.live, (i, n) => setBusy(`${label}: preparing frame ${i + 2} of ${n + 1}…`));
+              timings.push(`frames prepared ${((performance.now() - tPrep) / 1000).toFixed(1)}s`);
+            }
             // THE SCANNER'S OWN PICTURES OF THIS RECONSTRUCTION -- the ECG it gated on -- come
             // with the sequence, not as a series to tick: on their own they mean nothing.
             const docs = await loadSequenceDocuments(db, entry, note);
@@ -1234,7 +1334,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // No separate Close button: the red light closes, and Escape still does too.
       // Credit for the zarr working-copy format the series cache is built on.
       const credit = document.createElement("span");
-      credit.style.cssText = "color:var(--sl-warn);font-size:11px;white-space:nowrap;opacity:.9;";
+      // A credit, not a warning: in the muted text color (critic 2026-10-16, general audit, finding 18).
+      credit.style.cssText = "color:var(--sl-fg-muted);font-size:11px;white-space:nowrap;";
       const duckn = document.createElement("a");
       duckn.textContent = "duckn";
       duckn.href = "https://github.com/mhalle/duckn";
@@ -1503,6 +1604,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // keeps a stored-surfaces series after the segmentation it belongs to.
         const list = withAncestors([...selected])
           .sort((a, b) => Number(a.modality === "SEG") - Number(b.modality === "SEG"));
+        // THE TRACT SETS ASKED FOR, recorded BEFORE anything loads: the Diffusion module reads its scan's stored tracts as
+        // the scan arrives, which is before this list reaches the tracts' row.
+        for (const e of list) { const scan = tractsSeries.has(e.seriesInstanceUID) ? derivedFrom.get(e.seriesInstanceUID) : undefined; if (scan) askDerived("tracts", scan, e.seriesInstanceUID); }
         loadBtn.disabled = loadCloseBtn.disabled = true;
         const failures: string[] = [];
         const timings: string[] = [];
@@ -1510,19 +1614,23 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // opposed to the sum of whichever phases happen to be instrumented.
         const tClick = performance.now();
         surfacesTicked = []; tractsTicked = [];
-        await loadDbEntries(db, list, setBusy, timings, failures);
+        const nodesBefore = new Set(opts.live.nodes.keys());
+        await loadDbEntries(db, list, setBusy, timings, failures, undefined, undefined, "Loading from the DICOM database");
+        const shown = await afterLoad(nodesBefore, db);
+        followAlbulaColors(opts.live, [...opts.live.nodes.keys()].filter((id) => !nodesBefore.has(id)));
         // Fiber tracts ticked with their study: said in the line that stays (critic 2026-10-06, finding 15: a line set here
         // was overwritten at once by the timings), as a hint, not as a failure.
-        const tractsNote = tractsTicked.length ? `${tractsTicked.length === 1 ? "the fiber tracts were" : `${tractsTicked.length} sets of fiber tracts were`} not loaded here (not an image: the module that made them shows them)` : "";
-        // A BUTTON, NOT A SENTENCE (the first-time user does not read): stored surface models were ticked,
-        // and they come back only through Generate Surface Models.
+        const tractsNote = tractsTicked.length && !shown.claimed ? `${tractsTicked.length === 1 ? "the fiber tracts were" : `${tractsTicked.length} sets of fiber tracts were`} not loaded: their diffusion scan is not in this database` : "";
+        // STORED SURFACE MODELS WERE TICKED: said once, plainly, with where surfaces are made now (Ron, 2026-10-21,
+        // option B: surface models are not shown in Albula; a segmentation's surfaces are saved from Save › Files).
+        // A button, not only a sentence (the first-time user does not read): it opens Load / Save on Save as files.
         if (surfacesTicked.length && !failures.length) {
           shell.notify({
             title: surfacesTicked.length === 1 ? "Stored surface models were not loaded" : `${surfacesTicked.length} sets of stored surface models were not loaded`,
-            body: "The segmentation is loaded and drawn solid. Surface models come back only when you ask for them, in the module Generate Surface Models.",
+            body: "Surface models are not shown in Albula: the segmentation is loaded and its anatomy is drawn solid. To save a segmentation's surfaces (STL, OBJ or DICOM), use Save as files.",
             actions: [
-              { label: "Open Generate Surface Models", primary: true, onClick: () => { void shell.showPanel("surface-models"); } },
-              { label: "Not now", onClick: () => {} },
+              { label: "Open Save as files", primary: true, onClick: () => { void shell.showPanel("add-data").then(() => showPane("save-files")); } },
+              { label: "OK", onClick: () => {} },
             ],
           });
         }
@@ -1545,8 +1653,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           return;
         }
         const total = `TOTAL ${((performance.now() - tClick) / 1000).toFixed(1)}s`;
+        // The person reads how many and how long; the parts (copies, decoding, compression) go to the session log
+        // (critic 2026-10-16, general audit, finding 8: "duckn copy", "naturalize", "deflate" on the status line).
+        void fetch("/_log", { method: "POST", body: `loaded from the DICOM browser: ${[...timings, total].join(" · ")}`, keepalive: true }).catch(() => {});
+        const plain = `${list.length} series loaded in ${((performance.now() - tClick) / 1000).toFixed(1)} s`;
         if (closeAfter) {
-          status([...(tractsNote ? [tractsNote] : []), ...timings, total].join(" · "));
+          status([...(tractsNote ? [tractsNote] : []), plain].join(" · "));
           close();
           // AND SHOW WHAT WAS LOADED. Ron: "When I load and close the dicom db, take me to the scene
           // data module." Closing the browser used to leave you wherever you started, which is
@@ -1554,7 +1666,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           void shell.showPanel("data");
         }
         else {
-          setBusy([...(tractsNote ? [tractsNote] : []), ...timings, total].join(" · "));
+          setBusy([...(tractsNote ? [tractsNote] : []), plain].join(" · "));
           selected.clear();
           for (const el of scroll.querySelectorAll("input[type=checkbox]")) (el as HTMLInputElement).checked = false;
           refreshSelection();
@@ -2371,7 +2483,26 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // own instances (a SEG references them) and the folder to write into. Exposed here, beside the
     // state, rather than plumbed through the panel's options.
     /** The served database open in this window (opened on first use, re-read when a series asked for is not in it). */
+    /** THE OPEN DATABASE IS THE ONE THE PERSON CHOSE (Ron, 2026-10-20: the beating heart's scene "not in the
+     *  database" after he had switched to the main one): this snapshot was kept from before the switch -- the browser
+     *  window's Change… moved the current database and the scene load went on reading the previous one. Followed here,
+     *  for every load that uses the snapshot. */
+    //
+    // A SWITCH, NOT EVERY CALL (critic 2026-10-20, finding 10, and render/database-routing.ts windowDatabase): following
+    // the machine-wide database on every call also undid a database opened in this window only (Sample Data's Brain
+    // with DTI asked the main database for its scans) and a folder opened by hand.
+    let currentSeen: string | null = null, windowOwn: string | null = null;
+    const followCurrent = async () => {
+      const seen = currentSeen;
+      await loadRegistered();
+      currentSeen = servedDb;
+      const d = windowDatabase({ open: lastSource?.label, current: servedDb, seen, own: windowOwn });
+      windowOwn = d.own;
+      if (d.own) { servedDb = d.own; servedLabel = registered.find((x) => x.id === dbIdOf(d.own))?.path ?? servedLabel; }
+      if (d.use && d.use !== lastSource?.label) { lastSource = httpSource(d.use); openDb = null; }
+    };
     const ensureOpenDb = async (wantUids: string[] = []): Promise<DicomDatabase | null> => {
+      await followCurrent();
       if (!openDb) {
         if (!servedDb) await loadRegistered();
         if (!lastSource && servedDb) lastSource = httpSource(servedDb);
@@ -2382,6 +2513,96 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }
       return openDb;
     };
+    // THE ONE READING OF A VOLUME WHOSE PIECES WERE GIVEN BACK (2026-10-15, checked in the pane): the store asks once
+    // per missing piece, a dozen at a time, and each asking read the whole series again -- C3N-01524's CT took the page
+    // to 9.5 GB and 42 s. Every piece of a volume now waits for the one reading under way, then is looked up in the store.
+    //
+    // The critic's round on it (2026-10-15, qa/2026-10-15-render-audit-fixes.md): the volume is found in its copy by one
+    // of its own pieces, not by its label (finding 1: six diffusion volumes are all "b 0"); it is read from the database
+    // it CAME from, whatever the window shows now (finding 2); a reading that failed is not tried again for a minute
+    // (finding 7); and the person is told in words what failed and what to do (finding 8).
+    const restoring = new Map<string, Promise<boolean>>();
+    const failedAt = new Map<string, number>();
+    const FAILED_HOLD_MS = 60_000;
+    /** The database a volume came from (its origin says, since 2026-10-15), opened on first use and kept. */
+    const otherDbs = new Map<string, Promise<DicomDatabase | null>>();
+    const databaseAt = async (base: string | null, fresh = false): Promise<DicomDatabase | null> => {
+      if (!base || (lastSource && lastSource.label === base)) return await ensureOpenDb();
+      let p = fresh ? undefined : otherDbs.get(base);
+      if (!p) { p = openDicomDatabase(httpSource(base)).catch(() => null); otherDbs.set(base, p); }
+      return await p;
+    };
+    // A MODULE'S CALLS FOR A SCAN IN THE SCENE GO TO THAT SCAN'S OWN DATABASE (critic 2026-10-20, finding 10;
+    // render/database-routing.ts): the open database, and every database a scan of the scene came from.
+    const dbUrl = (id: string) => new URL(`/_db/${encodeURIComponent(id)}/`, location.href).href;
+    const scansElsewhere = (): string[] => {
+      const open = dbIdOf(lastSource?.label);
+      return scanDatabases(opts.live.nodes.values()).filter((id) => id !== open);
+    };
+    const edgesOf = async (id: string): Promise<{ child: string; parent: string; kind: string }[]> => {
+      const r = await fetch(`/_db/${encodeURIComponent(id)}/_provenance`, { cache: "no-store" }).catch(() => null);
+      return r?.ok ? (((await r.json().catch(() => ({}))) as { edges?: { child: string; parent: string; kind: string }[] }).edges ?? []) : [];
+    };
+    /** The registered database a file of a module is in (database-routing.ts databaseForPath); null: none is open. */
+    const databaseIdFor = async (path: string): Promise<string | null> => {
+      await ensureOpenDb();
+      const open = dbIdOf(lastSource?.label), elsewhere = scansElsewhere();
+      if (!elsewhere.length) return open;
+      const pick = async (fresh: boolean) => {
+        const lists = new Map<string, Set<string>>();
+        for (const id of elsewhere) { const d = await databaseAt(dbUrl(id), fresh); if (d) lists.set(id, new Set(d.series.map((x) => x.seriesInstanceUID))); }
+        if (open && openDb) lists.set(open, new Set(openDb.series.map((x) => x.seriesInstanceUID)));
+        return databaseForPath(path, open, elsewhere, (id) => { const l = lists.get(id); return l ? (u: string) => l.has(u) : undefined; });
+      };
+      const first = await pick(false);
+      // Named after a series none of them listed when it was read: an import job may have written it since.
+      const named = seriesNamedIn(path);
+      return first === open && named.length && !openDb?.series.some((x) => named.includes(x.seriesInstanceUID)) ? await pick(true) : first;
+    };
+    const imageNaming = (hash: string) => [...opts.live.nodes.values()].find((n) =>
+      n.type === "image" && !!(n.zarr as ZarrDesc | undefined)?.chunkHashes &&
+      Object.values((n.zarr as ZarrDesc).chunkHashes!).includes(hash));
+    const readVolumeBack = async (image: MrsonNode, hash: string): Promise<boolean> => {
+      const origin = (image.origin ?? {}) as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string; frame?: number; frameLabel?: string; fromCopy?: boolean; fromDatabase?: string };
+      const series = origin.seriesInstanceUID ?? origin.savedSeriesInstanceUID;
+      if (!series) return false;
+      const z = image.zarr as ZarrDesc;
+      const base = origin.fromDatabase ? new URL(origin.fromDatabase, location.href).href : (lastSource && /\/_db\/[^/]+\/$/.test(lastSource.label) ? lastSource.label : null);
+      // FROM THE COPY, THIS VOLUME'S PIECES ONLY (2026-10-15, the beating heart in the pane: two phases read back
+      // through the whole series from DICOM, each, took 13 s and 6.3 GB). The DICOM read below stays the fallback.
+      const t0 = performance.now();
+      const fromCopy = origin.fromCopy && base
+        ? await readCopyPieces(base, series, { hash }).catch((e) => ({ missing: String((e as Error)?.message ?? e) }))
+        : null;
+      if (fromCopy && !("missing" in fromCopy) && fromCopy.has(hash)) {
+        opts.store.add(fromCopy);
+        status(`read ${(image.name as string) ?? "the volume"} back from its working copy in ${((performance.now() - t0) / 1000).toFixed(1)}s — its voxels were needed again`);
+        return true;
+      }
+      try {
+        const db = await databaseAt(base);
+        const entry = db?.series.find((se) => se.seriesInstanceUID === series);
+        if (!db || !entry) return false;
+        const seq = await db.loadSequence(entry);
+        // By the frame's place in the series when the series still has as many volumes, else by its label.
+        const i = typeof origin.frame === "number" && seq.frames.length > origin.frame ? origin.frame
+          : origin.frameLabel ? Math.max(0, seq.labels.indexOf(origin.frameLabel)) : 0;
+        const vol = seq.frames[i];
+        if (!vol) return false;
+        // A series without a copy is cut again, deterministically, as at load.
+        const blobs = vol.prebuilt?.blobs ?? (await volumeToZarr(vol.data, vol.dims, z.dtype, { compressor: (z.compressor as "deflate" | "raw" | undefined) ?? "deflate" })).blobs;
+        if (!blobs.has(hash)) return false;              // another volume's pieces are not put in the store
+        opts.store.add(blobs);
+        status(`read ${(image.name as string) ?? "the volume"} back from the database in ${((performance.now() - t0) / 1000).toFixed(1)}s — its voxels were needed again`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    /** What the person is told when a volume's voxels could not be read again. */
+    const couldNotReadBack = (image: MrsonNode) => new Error(
+      `The voxels of ${String(image.name ?? "a scan")} could not be read again from the database it came from. ` +
+      "Open that database (Load data › DICOM database) or load the scan again, then try once more.");
     Object.assign(globalThis, {
       /** SDK 9: the open database's series, and how they derive from each other (the provenance edges), for a module
        *  that lists cases itself (the diffusion extension's Tract review). Null: no database is served. */
@@ -2391,8 +2612,20 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         if (opts.fresh && lastSource) { try { openDb = await openDicomDatabase(lastSource); } catch { /* keep the snapshot */ } forgetProvenance(); }
         const db = await ensureOpenDb();
         if (!db) return null;
-        return { series: db.series.slice(), edges: (await provenanceEdges()) ?? [] };
+        const own = { series: db.series.slice(), edges: (await provenanceEdges()) ?? [] };
+        // AND THE DATABASES THE SCENE'S SCANS CAME FROM (finding 10): a diffusion case keeps finding its stored tracts
+        // after the person switched to another database.
+        const elsewhere = scansElsewhere();
+        if (!elsewhere.length) return own;
+        const more = await Promise.all(elsewhere.map(async (id) => {
+          const d = await databaseAt(dbUrl(id), !!opts.fresh);
+          return d ? { series: d.series, edges: await edgesOf(id) } : { series: [], edges: [] };
+        }));
+        return mergeListings([own, ...more]);     // the open database's rows first
       },
+      /** SDK 17: the registered database a module's file is in -- named after a series of a scan loaded from another
+       *  database, that one (finding 10); otherwise the database this window has open. */
+      __databaseIdFor: (path: string): Promise<string | null> => databaseIdFor(path),
       /** SDK 9: which registered database this window has open (null: none, or a folder picked by hand) -- so a module
        *  reads and writes beside THAT one, not the machine-wide current one (critic 2026-10-06, finding 7). */
       __openDatabaseId: async (): Promise<string | null> => {
@@ -2401,15 +2634,20 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         return m ? decodeURIComponent(m[1]) : null;
       },
       /** SDK 9: load series of the open database into the scene, as the browser's Load does (images before
-       *  segmentations, a segmentation's image with it, nothing loaded twice). What could not be loaded, in words. */
-      __loadDatabaseSeries: async (uids: string[], onProgress?: (line: string) => void): Promise<{ loaded: number; failures: string[] }> => {
+       *  segmentations, a segmentation's image with it, nothing loaded twice). What could not be loaded, in words.
+       *  SDK 17: `afterLoad: false` -- a module's load for its own purpose, without what the rules show after a load
+       *  (critic 2026-10-20, finding 14: the Tract review's T1 came up under the brain's 95 structures). */
+      __loadDatabaseSeries: async (uids: string[], onProgress?: (line: string) => void, o: { afterLoad?: boolean } = {}): Promise<{ loaded: number; failures: string[] }> => {
         const db = await ensureOpenDb(uids);
         if (!db) return { loaded: 0, failures: ["no DICOM database is served by this window"] };
         const entries = uids.map((u) => db.series.find((s) => s.seriesInstanceUID === u)).filter((e): e is DbSeriesEntry => !!e);
         const failures: string[] = uids.filter((u) => !entries.some((e) => e.seriesInstanceUID === u)).map((u) => `series ${u} is not in the database`);
         const list = withAncestors(entries).sort((a, b) => Number(a.modality === "SEG") - Number(b.modality === "SEG"));
         const missing = failures.length;
+        const nodesBefore = new Set(opts.live.nodes.keys());
         await loadDbEntries(db, list, (s) => onProgress?.(s), [], failures);
+        if (o.afterLoad !== false) await afterLoad(nodesBefore, db);
+        followAlbulaColors(opts.live, [...opts.live.nodes.keys()].filter((id) => !nodesBefore.has(id)));
         // Stored fiber tracts are not loaded as series (their module draws them): not counted (critic 2026-10-06, R2-7).
         return { loaded: list.filter((e) => !tractsSeries.has(e.seriesInstanceUID)).length - (failures.length - missing), failures };
       },
@@ -2420,6 +2658,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // it once. Ron, 2026-09-20, on "open the DICOM database this volume came from first":
         // "What first time user will know what they need to do? I say save my scene. You take care
         // of everything else."
+        // FROM THE DATABASE THE SERIES WAS LOADED FROM, when a volume in the scene says which (critic 2026-10-15,
+        // render-audit-fixes finding 2: after Change… the save looked only in the database the window shows now).
+        const home = [...opts.live.nodes.values()].map((n) => n.origin as { seriesInstanceUID?: string; fromDatabase?: string } | undefined)
+          .find((o) => o?.seriesInstanceUID === seriesInstanceUID && o.fromDatabase)?.fromDatabase;
+        const homeUrl = home ? new URL(home, location.href).href : null;
+        if (homeUrl && !(lastSource && lastSource.label === homeUrl)) {
+          const other = await databaseAt(homeUrl);
+          const row = other?.series.find((se) => se.seriesInstanceUID === seriesInstanceUID);
+          if (other && row) return await other.readSeriesFiles(row);
+        }
         if (!openDb) {
           if (!servedDb) await loadRegistered();
           if (!lastSource && servedDb) lastSource = httpSource(servedDb);
@@ -2428,7 +2676,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         if (!openDb) return null;
         let entry = openDb.series.find((se) => se.seriesInstanceUID === seriesInstanceUID);
         if (!entry && lastSource) { try { openDb = await openDicomDatabase(lastSource); forgetProvenance(); } catch { /* keep the old snapshot */ } entry = openDb.series.find((se) => se.seriesInstanceUID === seriesInstanceUID); }
-        if (!entry) return null;
+        if (!entry) {
+          // NOT A SCAN OF THE SCENE BUT OF ITS DATABASE (stored tracts of a diffusion case, finding 10): the databases the
+          // scene's scans came from.
+          for (const id of scansElsewhere()) {
+            const other = await databaseAt(dbUrl(id), true);
+            const row = other?.series.find((se) => se.seriesInstanceUID === seriesInstanceUID);
+            if (other && row) return await other.readSeriesFiles(row);
+          }
+          return null;
+        }
         return await openDb.readSeriesFiles(entry);
       },
       /**
@@ -2564,31 +2821,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
        * every reader.
        */
       __restoreVolumeChunks: async (hash: string): Promise<boolean> => {
-        const image = [...opts.live.nodes.values()].find((n) =>
-          n.type === "image" && !!(n.zarr as ZarrDesc | undefined)?.chunkHashes &&
-          Object.values((n.zarr as ZarrDesc).chunkHashes!).includes(hash)
-        );
-        const uid = (image?.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined);
-        const series = uid?.seriesInstanceUID ?? uid?.savedSeriesInstanceUID;
-        if (!image || !series || !openDb) return false;
-        const entry = openDb.series.find((se) => se.seriesInstanceUID === series);
-        if (!entry) return false;
-        const z = image.zarr as ZarrDesc;
-        try {
-          const t0 = performance.now();
-          const seq = await openDb.loadSequence(entry);
-          const frameLabel = (image.origin as { frameLabel?: string } | undefined)?.frameLabel;
-          const i = frameLabel ? Math.max(0, seq.labels.indexOf(frameLabel)) : 0;
-          const vol = seq.frames[i] ?? seq.frames[0];
-          if (!vol) return false;
-          const { blobs } = await volumeToZarr(vol.data, vol.dims, z.dtype, { compressor: (z.compressor as "deflate" | "raw" | undefined) ?? "deflate" });
-          opts.store.add(blobs);
-          const secs = ((performance.now() - t0) / 1000).toFixed(1);
-          status(`read ${(image.name as string) ?? "the volume"} back from the database in ${secs}s — its voxels were needed again`);
-          return opts.store.has(hash);
-        } catch {
-          return false;                                  // the caller falls through to the network
-        }
+        const image = imageNaming(hash);
+        if (!image) return false;                        // not a volume of this scene: the network, as before
+        const id = image.id as string;
+        if (performance.now() - (failedAt.get(id) ?? -Infinity) < FAILED_HOLD_MS) throw couldNotReadBack(image);
+        let p = restoring.get(id);
+        if (!p) { p = readVolumeBack(image, hash).finally(() => restoring.delete(id)); restoring.set(id, p); }
+        const ok = await p && opts.store.has(hash);
+        if (!ok) { failedAt.set(id, performance.now()); throw couldNotReadBack(image); }
+        failedAt.delete(id);
+        return true;
       },
       __refreshDicomDb: async (): Promise<number | null> => {
         forgetProvenance();                          // a save has just written an edge, probably
@@ -2609,6 +2851,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
        */
       __loadSceneDoc: async (doc: Record<string, unknown>): Promise<{ ok: boolean; loaded?: number; missing?: string[]; seconds?: number; applied?: string[]; error?: string; timings?: string[]; failures?: string[]; v?: number; name?: string }> => {
         const t0 = performance.now();
+        await followCurrent();
         if (!openDb) {
           if (!lastSource && servedDb) lastSource = httpSource(servedDb);
           if (!lastSource) return { ok: false, error: "no DICOM database is open or served here" };
@@ -2631,12 +2874,41 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }
         let byUid = new Map(openDb.series.map((se) => [se.seriesInstanceUID, se]));
         if ([...wanted.keys()].some((u) => !byUid.has(u))) { await (globalThis as unknown as { __refreshDicomDb?: () => Promise<number | null> }).__refreshDicomDb?.(); byUid = new Map(openDb!.series.map((se) => [se.seriesInstanceUID, se])); }
-        const missing = [...wanted].filter(([u]) => !byUid.has(u)).map(([, what]) => what);
-        const entries = [...wanted.keys()].filter((u) => byUid.has(u)).map((u) => byUid.get(u)!);
+        let missing = [...wanted].filter(([u]) => !byUid.has(u)).map(([, what]) => what);
+        let entries = [...wanted.keys()].filter((u) => byUid.has(u)).map((u) => byUid.get(u)!);
+        // THE SCENE'S OWN DATABASE (Ron, 2026-10-20, after a diffusion demo in the brain tumor test cases: the beating heart
+        // said "11 things in this scene are not in the database" -- they were in the main one). The scenes of every
+        // database are listed together (one provenance store), so a scene is looked for where its scans are: the
+        // registered database holding more of them than the open one is opened, and the person is told.
         if (missing.length) {
+          if (!registered.length) await loadRegistered();
+          let best: { id: string; path: string; n: number } | undefined;
+          for (const d of registered) {
+            const url = new URL(`/_db/${encodeURIComponent(d.id)}/`, location.href).href;
+            if (!d.exists || url === lastSource?.label) continue;
+            try {
+              const other = await openDicomDatabase(httpSource(url));
+              const have = new Set(other.series.map((se) => se.seriesInstanceUID));
+              const n = [...wanted.keys()].filter((u) => have.has(u)).length;
+              if (n > entries.length && (!best || n > best.n)) best = { id: d.id, path: d.path, n };
+            } catch { /* a database that cannot be read is not the scene's */ }
+          }
+          if (best) {
+            await (globalThis as unknown as { __useDatabase: (id: string) => Promise<void> }).__useDatabase(best.id);
+            if (!lastSource && servedDb) lastSource = httpSource(servedDb);
+            if (lastSource) { openDb = await openDicomDatabase(lastSource); forgetProvenance(); }
+            byUid = new Map(openDb!.series.map((se) => [se.seriesInstanceUID, se]));
+            missing = [...wanted].filter(([u]) => !byUid.has(u)).map(([, what]) => what);
+            entries = [...wanted.keys()].filter((u) => byUid.has(u)).map((u) => byUid.get(u)!);
+            status(`This scene's scans are in the database ${best.path.split("/").pop()}: it is the open database now.`);
+          }
+        }
+        if (missing.length) {
+          const dbName = (registered.find((d) => d.current)?.path ?? "").split("/").pop() || "the open database";
           const go = await new Promise<boolean>((resolve) => shell.notify({
-            title: `${missing.length === 1 ? "One thing" : `${missing.length} things`} in this scene ${missing.length === 1 ? "is" : "are"} not in the database`,
-            body: missing.join("\n") + (src?.producer ? `\n\nSaved by ${src.producer}.` : ""),
+            title: `${missing.length === 1 ? "One thing" : `${missing.length} things`} in this scene ${missing.length === 1 ? "is" : "are"} not in ${dbName} or any other database here`,
+            // One per line (the notice is HTML: "\n" ran them together, Ron's picture 2026-10-20).
+            body: missing.map((m) => esc(m)).join("<br>") + (src?.producer ? `<br><br>Saved by ${esc(src.producer)}.` : ""),
             actions: [{ label: "Load what is here", primary: true, onClick: () => resolve(true) }, { label: "Stop", onClick: () => resolve(false) }],
           }));
           if (!go) return { ok: false, missing };
@@ -2646,10 +2918,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // so the question is asked only when the scene would land beside data it does not name;
         // opening a scene over its own study, or into an empty window, just opens. Unsaved work is
         // named in the question, because closing is what would lose it.
-        const loadedElsewhere = [...opts.live.nodes.values()].filter((n) => (n.type === "image" || n.type === "segmentation") && !(n as { hidden?: boolean }).hidden).filter((n) => {
-          const org = n.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
-          return !wanted.has(org?.seriesInstanceUID ?? "") && !wanted.has(org?.savedSeriesInstanceUID ?? "");
-        });
+        // Counted as the Scenes list shows it, a series in time as one item (logic/loaded-elsewhere.ts): the beating heart
+        // and a diffusion scan were left out, so opening another scene over them asked nothing (Ron, 2026-10-17).
+        const loadedElsewhere = loadedElsewhereIn(opts.live.nodes.values(), new Set(wanted.keys()));
         if (loadedElsewhere.length) {
           const unsaved = unsavedWork();
           const choice = await new Promise<"close" | "keep" | "stop">((resolve) => shell.notify({
@@ -2695,7 +2966,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           mark(`series ${painted} on screen`);
           try { spanSync("put the saved state back", () => applySceneState(opts.live, doc, sceneHooks())); } catch { /* the full pass at the end is the one that must hold */ }
         };
-        await loadDbEntries(openDb, list, status, timings, failures, arrivalFor, paintWhatIsHere);
+        await loadDbEntries(openDb, list, status, timings, failures, arrivalFor, paintWhatIsHere, "Loading the scene");
         setTimeout(() => (globalThis as unknown as { __memoryCheck?: () => string }).__memoryCheck?.(), 4000);
         // A LOAD WITH FAILURES IS NOT "LOADED" (critic, finding 2): it says so, it does not become
         // the current scene, and the saved state is applied to what did arrive.
@@ -2704,6 +2975,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // the file says is what the views show (SCENE-DESIGN §5, step 4).
         await new Promise((r) => setTimeout(r, 250));
         const report = spanSync("put the saved state back", () => applySceneState(opts.live, doc, sceneHooks()));
+        // THE EXTENSIONS' OWN STATE, after core's (logic/scene/extensions.ts): the Diffusion module's tracts and its map
+        // over the T1 go back on top of the views core just put back. A scene without a block gets the extension's own
+        // choice (the diffusion extension: what a load of the scan shows).
+        { const ext = await restoreExtensionState(doc); report.applied.push(...ext.applied); report.missing.push(...ext.missing); }
         gg.__holdCardiacDefaults?.(false);   // the scene's planes are in; a heart added from now on gets the default
         // WHAT THIS LOAD SPENT, in the session log, every time. Ron: "loading is a very important
         // function ... instrument the scene loading process so you can analyze where time is spent.
@@ -2714,23 +2989,23 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // have a stable display"), and writes its line then.
         void endLoadProfileWhenQuiet(list.length).then((profile) => {
           if (!profile) return;
+          // To the session log only: the status line is for the person (critic 2026-10-16, general audit, finding 8).
           const line = describeProfile(profile);
-          status(line);
+          void fetch("/_log", { method: "POST", body: line, keepalive: true }).catch(() => {});
           void fetch("/_log", { method: "POST", body: describeProfilePhases(profile), keepalive: true }).catch(() => {});
           (globalThis as unknown as { __lastLoadProfile?: unknown }).__lastLoadProfile = profile;
         });
         const seconds = (performance.now() - t0) / 1000;
         const name = String(doc.name ?? "scene");
-        const surfacesFollow = [...opts.live.nodes.values()].some((n) => n.type === "segmentation" && n.surfaceModels === true && n.visible3D !== false && !(n as { hidden?: boolean }).hidden);
         if (failures.length) return { ok: false, error: `${failures.length} of ${list.length} series could not be loaded`, loaded: list.length - failures.length, missing: [...missing, ...report.missing], seconds, applied: report.applied, timings, failures };
-        status(`Scene "${name}" loaded in ${seconds.toFixed(1)} s · ${list.length} series · ${report.applied.length} settings put back${surfacesFollow ? " · the 3D surfaces follow" : ""}${report.missing.length ? ` · not restored: ${report.missing.join(", ")}` : ""}`);
+        status(`Scene "${name}" loaded in ${seconds.toFixed(1)} s · ${list.length} series · ${report.applied.length} settings put back${report.missing.length ? ` · not restored: ${report.missing.join(", ")}` : ""}`);
         // Colors other than the scheme's are KEPT (Ron, 2026-09-25: "yes as default so people do not need to click on
         // it"); the notice says so and offers the one button (logic/scheme-colors.ts).
         const off = segmentationsOffScheme(opts.live);
-        const offLine = off.length ? `<br>${off.length === 1 ? "One segmentation keeps its" : `${off.length} segmentations keep their`} saved colors, not those of colors v${paletteVersion()}.` : "";
-        shell.notify({ title: `Scene loaded — "${esc(name)}"`, body: `${list.length} series in ${seconds.toFixed(1)} s${surfacesFollow ? "; the 3D surfaces follow" : ""}${missing.length ? `<br>Not in the database: ${esc(missing.join(", "))}` : ""}${report.missing.length ? `<br>Not restored: ${esc(report.missing.join(", "))}` : ""}${report.notes.length ? `<br>Markups: ${esc(report.notes.join("; "))}` : ""}${offLine}`, ttl: off.length ? 15000 : 8000,
+        const offLine = off.length ? `<br>${off.length === 1 ? "One segmentation is" : `${off.length} segmentations are`} shown in the colors ${off.length === 1 ? "it was" : "they were"} saved with.` : "";
+        shell.notify({ title: `Scene loaded — "${esc(name)}"`, body: `${list.length} series in ${seconds.toFixed(1)} s${missing.length ? `<br>Not in the database: ${esc(missing.join(", "))}` : ""}${report.missing.length ? `<br>Not restored: ${esc(report.missing.join(", "))}` : ""}${report.notes.length ? `<br>Markups: ${esc(report.notes.join("; "))}` : ""}${offLine}`, ttl: off.length ? 15000 : 8000,
           ...(off.length ? { offerOnly: true, actions: [
-            { label: "Use the current colors", onClick: () => { const n = off.reduce((k, o) => k + useCurrentColors(opts.live, o.id), 0); status(`Colors: ${n} structures now in the colors of v${paletteVersion()}`); } },
+            { label: "Use Albula's colors", onClick: () => { const n = off.reduce((k, o) => k + useCurrentColors(opts.live, o.id), 0); status(`Colors: ${n} structures now in Albula's colors`); } },
             { label: "Keep", primary: true, onClick: () => {} },
           ] } : {}) });
         // SEGMENTATIONS, WHEN THE SCENE HAS ANY. Ron, 2026-09-23: "when I hit load scene you change
@@ -2751,6 +3026,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         servedDb = new URL(`/_db/${encodeURIComponent(id)}/`, location.href).href;
         servedLabel = d.path;
         lastSource = httpSource(servedDb);
+        windowOwn = servedDb;            // this window's own, until the machine-wide one is switched
         openDb = null;
         forgetProvenance();
       },
@@ -2758,6 +3034,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       __unsavedWork: (): string[] => unsavedWork(),
       __useDatabase: async (id: string) => {
         await fetch("/_db", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ current: id }) });
+        windowOwn = null;
         const was = servedDb;
         await loadRegistered();
         if (servedDb && servedDb !== was) { lastSource = httpSource(servedDb); openDb = null; }
@@ -2765,6 +3042,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       },
       /** Load a saved scene by its uid from the current database's store. */
       __loadScene: async (uid: string) => {
+        await loadRegistered();   // the database open now, not the one listed when this window started
         const cur = registered.find((d) => d.current && d.exists) ?? registered.find((d) => d.exists);
         if (!cur) return { ok: false, error: "no database" };
         const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`, { cache: "no-store" });
@@ -2802,7 +3080,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }
       } catch { /* no native side: a browser build has no /_db */ }
     };
-    void loadRegistered().then(() => {
+    // The line naming the open database, said again whenever the registered list is read (after Change… too).
+    const showCurrentDb = () => {
       const hint = el.querySelector(".sl-db-hint") as HTMLElement | null;
       if (!hint) return;
       const cur = registered.find((d) => d.current) ?? registered[0];
@@ -2812,7 +3091,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         ? cur.path
         : `${cur.path} (not reachable)`;
       hint.title = registered.map((d) => `${d.current ? "→ " : "  "}${d.id}: ${d.path}${d.exists ? "" : "  (missing)"}`).join("\n");
-    });
+    };
+    void loadRegistered().then(showCurrentDb);
 
     const failed = (e: unknown) => {
       const err = e as Error;
@@ -2850,7 +3130,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // explicitly asked to choose a folder.
       // The label passed through is the full path, so the browser's title names the database
       // unambiguously rather than repeating the word "database" back at the user.
-      if (!pick && servedDb) { browseSource(httpSource(servedDb), servedLabel || "DICOM database").catch(failed); return; }
+      // WHICH ONE IS CURRENT IS ASKED AGAIN EACH TIME (Ron, 2026-10-15: "The change button does not change what is
+      // listed"): Change… writes the new current database to the server and reopens, but `servedDb` was read once when
+      // the panel mounted, so the old one opened again. A served database is re-read here; the folder picker below stays
+      // synchronous, since it needs the click's activation.
+      if (!pick && servedDb) { loadRegistered().then(() => { showCurrentDb(); return browseSource(httpSource(servedDb!), servedLabel || "DICOM database"); }).catch(failed); return; }
 
       const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
       if (!picker) {
@@ -3051,6 +3335,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // "like in Mac Finder" / "delete is a right click"); since 2026-10-14 a click on the name renames and the row's ⋯
     // (or a right-click) holds Remove (row-actions.ts). Only the visibility toggles stay as persistent controls.
     const shEl = el.querySelector(".sl-sh") as HTMLElement;
+    fitList(shEl, "scene-hierarchy");   // as tall as its rows and the column allow; a grip for another height (Ron, 2026-10-15)
     const DATA_TYPES = new Set(["image", "segmentation", "markup", "model", "transform", "sequence"]);
     const ICON: Record<string, string> = { image: "🧊", segmentation: "🎨", markup: "📍", model: "🧩", transform: "⭮" };
 
@@ -3140,32 +3425,28 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
     // keepScroll: the rows carry the view toggles, so clicking one rebuilds the list underneath the
     // pointer -- the same jump-to-top Ron hit in the Segmentations module.
-    // "IN 3D" UNDER EACH VOLUME: Off · Volume · Colored · Surfaces (render/look3d.ts). Ron, 2026-09-23: "in
+    // "IN 3D" UNDER EACH VOLUME: Off · Volume · Solid (render/look3d.ts; "Surfaces" was the fourth until 2026-10-21,
+    // Ron, option B: surface models are an export now, Save › Files). Ron, 2026-09-23: "in
     // the scene module I need presets for: surface rendering, colorized volume, volume rendering of the
     // gray scale. We use default behavior when loading, and the user can override with the presets."
     // What is highlighted is read back from what is on, not from what was last clicked here.
     // "Solid", not "Colored" (Ron, 2026-09-25): Slicer's "colorized volume" (the Colorize Volume module) is the see-through
     // tinted rendering, which is not this. Stored as "solid" too; the saved scenes were rewritten (a file from elsewhere
     // that says "colored" is read as "solid", look3d.ts).
-    const LOOK_LABEL: Record<Look3D, string> = { off: "Off", volume: "Volume", solid: "Solid", surfaces: "Surfaces" };
+    const LOOK_LABEL: Record<Look3D, string> = { off: "Off", volume: "Volume", solid: "Solid" };
     const LOOK_TIP: Record<Look3D, string> = {
       off: "Nothing of this scan in 3D.",
       volume: "Volume: the scan itself in 3D, see-through by tissue density (a CT starts as flesh; other presets in Volume Rendering). Its segmentations are not shown.",
       solid: "Solid: the anatomy of its segmentations as solid shapes, each structure in its own color. Appears at once. How it looks (Illustration or Realistic) is chosen with the Look button in the 3D view's panel. The scan itself is not shown.",
-      surfaces: "Surfaces: the anatomy as surface models, for the segmentations given them in Generate Surface Models; the others are shown solid. The scan itself is not shown.",
     };
-    const IN3D_TIP = "What this scan shows in 3D. Volume: the scan itself. Solid: the anatomy of its segmentations as solid shapes. Surfaces: the anatomy as surface models. How the anatomy looks (Illustration or Realistic) is set with the Look button in the 3D view's panel.";
+    const IN3D_TIP = "What this scan shows in 3D. Volume: the scan itself. Solid: the anatomy of its segmentations as solid shapes. How the anatomy looks (Illustration or Realistic) is set with the Look button in the 3D view's panel.";
     const NEEDS_SEG = "Needs a segmentation of this volume: run one in AI Segmentation, or load one from the DICOM browser.";
     const lookRow = (imageId: string): string => {
-      const cur = look3DOf(opts.live, imageId);
       const on = looksOn(opts.live, imageId);           // what is on screen: may be two (see looksOn)
       const hasSegs = segmentationsOf(opts.live, imageId).length > 0;
-      // "Surfaces" appears only once surface models have been generated for one of its segmentations
-      // (Generate Surface Models) -- Ron: "at which time the proper controls would appear in the scene".
-      const withSurfaces = hasSurfaceModels(opts.live, imageId);
       return `<div class="sl-sh-look" data-look-for="${imageId}"><span class="sl-sh-look-l" title="${IN3D_TIP}">In 3D</span>` +
-        LOOKS_3D.filter((l) => l !== "surfaces" || withSurfaces || cur === "surfaces").map((l) => {
-          const na = (l === "solid" || l === "surfaces") && !hasSegs;
+        LOOKS_3D.map((l) => {
+          const na = l === "solid" && !hasSegs;
           return `<button class="sl-sh-look-b${on.includes(l) ? " sl-on" : ""}${na ? " sl-sh-look-na" : ""}" data-look="${l}" aria-pressed="${on.includes(l)}" title="${na ? NEEDS_SEG : LOOK_TIP[l]}">${LOOK_LABEL[l]}</button>`;
         }).join("") + `</div>`;
     };
@@ -3177,7 +3458,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const hasSegs = segmentationsOf(opts.live, id).length > 0;
         row.querySelectorAll<HTMLButtonElement>("[data-look]").forEach((b) => {
           const l = b.dataset.look as Look3D;
-          const na = (l === "solid" || l === "surfaces") && !hasSegs;
+          const na = l === "solid" && !hasSegs;
           b.classList.toggle("sl-on", on.includes(l)); b.setAttribute("aria-pressed", String(on.includes(l)));
           b.classList.toggle("sl-sh-look-na", na); b.title = na ? NEEDS_SEG : LOOK_TIP[l];
         });
@@ -3288,7 +3569,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }));
       shEl.querySelectorAll("[data-vis2d]").forEach((b) => b.addEventListener("click", (e) => {
         e.stopPropagation();
-        const id = (b.closest(".sl-sh-row") as HTMLElement).dataset.id!;
+        // The phase on screen NOW, not the one when the row was drawn (a playing series; logic/sequences.ts shownMember).
+        const id = shownMember(opts.live, (b.closest(".sl-sh-row") as HTMLElement).dataset.id!);
         const n = opts.live.nodes.get(id);
         opts.live.write({ op: "patch", id, path: "#/visible", value: n?.visible === false });
       }));
@@ -3334,7 +3616,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }));
       shEl.querySelectorAll<HTMLButtonElement>("[data-view3d]").forEach((b) => b.addEventListener("click", (e) => {
         e.stopPropagation();
-        const id = (b.closest(".sl-sh-row") as HTMLElement).dataset.id!;
+        const id = shownMember(opts.live, (b.closest(".sl-sh-row") as HTMLElement).dataset.id!);   // the phase on screen now
         const n = opts.live.nodes.get(id);
         if (!n) return;
         // Only segmentation rows have a 3D button: a volume's 3D is the "In 3D" row.
@@ -3348,7 +3630,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         e.stopPropagation();
         const id = (b.closest(".sl-sh-look") as HTMLElement).dataset.lookFor!;
         const look = b.dataset.look as Look3D;
-        if ((look === "solid" || look === "surfaces") && !segmentationsOf(opts.live, id).length) { status(NEEDS_SEG); return; }
+        if (look === "solid" && !segmentationsOf(opts.live, id).length) { status(NEEDS_SEG); return; }
         setLook3D(opts.live, id, look);
         refresh();
       }));
@@ -3398,12 +3680,18 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // list -- eight times a step with two companions (critic, 2026-09-19, finding 3). One rebuild
     // on the next animation frame shows the same final state.
     let refreshQueued = false;
+    // NOT UNDER A PRESS (press-guard.ts; Ron, 2026-10-17: the 3D buttons did nothing while the heart played): each step
+    // rebuilt the rows, and the button pressed was gone before the press ended.
     const refreshSoon = () => {
       if (refreshQueued) return;
       refreshQueued = true;
       // A timer behind the frame: a hidden window runs no animation frames (see tf-editor renderSoon).
       let done = false;
-      const go = () => { if (done) return; done = true; refreshQueued = false; refresh(); };
+      const go = () => {
+        if (done) return; done = true; refreshQueued = false;
+        if (pressedIn(shEl)) { afterPress(refreshSoon); return; }
+        refresh();
+      };
       requestAnimationFrame(go);
       setTimeout(go, 250);
     };

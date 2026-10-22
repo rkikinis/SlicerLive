@@ -14,8 +14,8 @@ const g = () => globalThis as unknown as Hooks;
 
 export function registerSampleDataPanel(shell: AppShell, opts: { onStatus?: (s: string) => void }): void {
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
-  shell.registerPanel({ id: "sampledata", title: "Sample Data", groups: ["Data"], order: 5, tip: "Download one of Slicer's sample datasets to try things on",
-    help: `<p>Scans to try Albula on, downloaded from Slicer's sample data. Click one: it downloads, is checked, and opens in the views.</p>
+  shell.registerPanel({ id: "sampledata", title: "Sample Data", groups: ["Data"], order: 5, tip: "Download a sample scan to try things on: 3D Slicer's samples, and a brain with diffusion from OpenNeuro",
+    help: `<p>Scans to try Albula on: the first four are 3D Slicer's sample data; Brain with DTI comes from OpenNeuro. Click one: it downloads, is checked, and opens in the views.</p>
       <p><b>Brain with DTI</b> is a healthy volunteer's brain MRI with a diffusion scan (OpenNeuro ds001226, CON03; free to use). It is kept in a database of its own, <i>Sample data</i>, which this window then works in (the database Albula opens by default stays as it was); the brain is shown colored by fiber direction over the T1, in the Diffusion module.</p>`,
     mount(el) {
     el.innerHTML = `
@@ -24,10 +24,15 @@ export function registerSampleDataPanel(shell: AppShell, opts: { onStatus?: (s: 
       <div class="sl-progress" hidden><div class="sl-progress-bar"></div><span class="sl-progress-text"></span></div>`;
     const samples = el.querySelector(".sl-samples") as HTMLElement;
     const prog = el.querySelector(".sl-progress") as HTMLElement, bar = el.querySelector(".sl-progress-bar") as HTMLElement, ptxt = el.querySelector(".sl-progress-text") as HTMLElement;
+    // ONE PROGRESS LINE, shown under the button that started it (critic 2026-10-14, 27: it sat above "With diffusion",
+    // away from Brain with DTI). Its own place is under the four samples; the DTI button takes it into its section.
+    const progHome = { parent: prog.parentElement!, next: prog.nextSibling };
+    const progHomeAgain = () => { if (prog.parentElement !== progHome.parent) progHome.parent.insertBefore(prog, progHome.next); };
     for (const d of SAMPLE_DATA) {
       const row = document.createElement("div"); row.className = "sl-row";
       const b = document.createElement("button"); b.textContent = d.title; b.title = `Download and open it: ${d.modality ?? ""}, about ${d.mb ?? "?"} MB, one of Slicer's sample scans`;
       b.addEventListener("click", async () => {
+        progHomeAgain();
         b.disabled = true; prog.hidden = false; bar.style.width = "0%"; ptxt.textContent = `downloading ${d.title}…`;
         let got = 0; const total = (d.mb ?? 20) * 1048576;
         try {
@@ -55,6 +60,7 @@ export function registerSampleDataPanel(shell: AppShell, opts: { onStatus?: (s: 
         // THE DATABASE HOOKS live in Load / Save; mounted here, not shown, so the button works from a fresh window
         // (critic 2026-10-14, 1: Welcome → Sample Data → the button ended in "it could not be opened").
         await shell.mountPanel("add-data").catch(() => {});
+        sec.appendChild(prog);
         const h = g();
         if (!h.__openDatabaseInWindow || !h.__loadDatabaseSeries) { status("Brain with DTI: this window cannot open databases (quit Albula and start it again)"); return; }
         // IT OPENS IN THIS WINDOW, from its own database, which this window then works in (critic 2026-10-14, 3). Work

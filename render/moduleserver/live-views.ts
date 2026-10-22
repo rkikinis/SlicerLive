@@ -18,6 +18,7 @@ import { fitFovToVolume } from "../../logic/slice-logic.ts";
 import { applyMat4, type Mat4 } from "../mat4.ts";
 import { broadcastSlice, type LinkSliceState, type SliceLinkFlag } from "../../logic/link.ts";
 import { reformatSliceToRAS } from "../../logic/slice-logic.ts";
+import { type DrawPlane, drawPlaneOf, planeChange } from "../../logic/fill-polygon.ts";
 import { placeClick, removeControlPointOp } from "../../logic/markups/placer.ts";
 import { measurementsFor, polygonArea, polylineLength, type MarkupType } from "../../logic/markups/measurements.ts";
 import { interpolateCurve } from "../../logic/markups/curve.ts";
@@ -31,12 +32,13 @@ import type { Box, HandleMeta } from "../demos/roi-widget.ts";
 import { RoiBoxField } from "../roi-box-field.ts";
 import { orderScene } from "../demos/scene-order.ts";
 import { applyVrPreset, setLook3D, setVolumeRenderingOn, volumeRenderingOn } from "../demos/tf-editor.ts";
-import { applyLook, colorizeCostMB, currentLook, forgetLooks, LOOKS } from "../demos/looks.ts";
+import { applyLook, currentLook, forgetLooks, LOOKS } from "../demos/looks.ts";
 import { currentFrames } from "../../logic/sequences.ts";
 import { GEAR_SVG } from "../demos/gear-icon.ts";
 import { nearestRayHit } from "../demos/probe-extras.ts";
 import { CARDIAC_VIEWS, type CardiacAxes, type CardiacView, cardiacAxes, cardiacPlane, findCardiacLabels, planeToSliceToRAS } from "../../logic/cardiac-axes.ts";
 import { lineAxes, lineFieldOfView, lineOrientation, linePlane, lineRange, type LineView, LINE_VIEWS, parseLineOrientation } from "../../logic/line-axes.ts";
+import { sceneVoxel as sceneVoxelOf } from "../scene-scale.ts";
 import { decodedCacheReport, fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
 import { segCacheBytes } from "../../logic/readers/seg-cache.ts";
 import { rowMul, worldForNode } from "../../logic/transforms.ts";
@@ -54,6 +56,11 @@ import { mountSliceController, type SliceController } from "../demos/slice-contr
 import { mountSliceScheduler } from "../slice-scheduler.ts";
 import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextMenu client handlers
 import { type RGB, SLICER_BG_BOTTOM, SLICER_BG_TOP } from "../background.ts";
+import { HEAD_POSITION, HEAD_ROTATION, oneEuro } from "../one-euro.ts";
+import { count, gpuScoped, notePicture, PassClock } from "../gpu-scope.ts";
+import { setWorkBannerHost } from "../working.ts";
+import { boxRadius, BRUSH_DEFAULT_VOXELS, DRAW_SPACING_VOXELS, finest, nodeVoxel, onSliceDistance, sceneVoxel, STEREO_NEAREST_VOXELS, texelsAcross, voxelFromExtent, voxelOrUnit, voxels } from "../scene-scale.ts";
+import { lengthText, rulerLength } from "../length-text.ts";
 
 /** A chrome color ([number, number, number] by convention, but typed number[]) as an RGB tuple. */
 const rgbOf = (c: number[]): RGB => [c[0] ?? 0, c[1] ?? 0, c[2] ?? 0];
@@ -77,7 +84,6 @@ export let last3DFields: { volume: string | null; keys: string[]; suppressed: st
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
 export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[]; fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]): void }
 
-const SLAB_MM = 1.5;                  // overlay items within this distance of the plane are "in plane" (at least; see slabMm)
 // THE VIEW COLORS ARE THE THEME'S -- the same token the view bar and the Red / Yellow / Green
 // buttons use, read once for the canvases, which cannot use var(). These were literals here
 // (#f05a5a, #f0d24a, #5ad07a) beside different literals in theme.css (Slicer's own #F34A33,
@@ -131,7 +137,7 @@ export interface ProbeReading {
   rows: ProbeRow[];
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void; connect?: boolean; /** Click to outline (render/click-outline-tool.ts): a click at a point (+1 adds, -1 takes away), or null to end the tool. */ onClickOutline?: (ras: Vec3 | null, sign: 1 | -1) => void }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void; onNativeDraw?: (segId: string, segment: number, points: Vec3[], normal: Vec3) => void; connect?: boolean; /** Click to outline (render/click-outline-tool.ts): a click at a point (+1 adds, -1 takes away), or null to end the tool. */ onClickOutline?: (ras: Vec3 | null, sign: 1 | -1) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -387,13 +393,27 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const vol3d = new Map<string, Volume3D>();
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
   let threeVisible = false;
+  /** Called after a layout is applied: the banners follow the view they belong on (set where they are made). */
+  let afterLayout: (() => void) | null = null;
   /** Nothing at all is being composited in 3D — drawn as a note rather than a bare gradient.
    *  Declared here, above mountAdaptive3d: drawThreeOverlay is its onFrame, and a draw during
    *  setup would otherwise read this before it is initialized. */
   let nothingIn3D = false;
+  /** How many slice views are shown as planes in 3D (sliceQuads, below): a plane is something shown. */
+  let slicePlanesIn3D = 0;
   /** The frame-rate readout in the 3D view's bar (built with the bar, far below). */
   let fpsEl: HTMLElement | null = null;
-  const sizeCanvas = (c: HTMLCanvasElement) => { c.width = Math.max(1, Math.round(c.clientWidth * dpr)); c.height = Math.max(1, Math.round(c.clientHeight * dpr)); };
+  const FPS_TITLE = "New pictures a second while you turn the view; shown after a turn of half a second";
+  // NEVER PAST THE CARD'S LARGEST TEXTURE (2026-10-16, Ron's glasses at build 19:44: with the window stretched across the
+  // glasses the 3D view became 8,740 x 2,900 pixels against the card's 8,192, its drawing surface failed -- "GPUCanvasContext
+  // is not configured correctly" -- and the glasses, drawn by the same renderer, failed after it, "encoder state is not
+  // valid", ~80 a second). A view that large keeps its shape at a slightly lower resolution.
+  const maxPx = gpu.device.limits?.maxTextureDimension2D ?? 8192;
+  const sizeCanvas = (c: HTMLCanvasElement) => {
+    const w = Math.max(1, Math.round(c.clientWidth * dpr)), h = Math.max(1, Math.round(c.clientHeight * dpr));
+    const k = Math.min(1, maxPx / w, maxPx / h);
+    c.width = Math.max(1, Math.floor(w * k)); c.height = Math.max(1, Math.floor(h * k));
+  };
   const clearCanvas = (ctx: GPUCanvasContext) => {
     const enc = gpu.device.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view: ctx.getCurrentTexture().createView({ format: srgb }), clearValue: { r: 0.02, g: 0.024, b: 0.04, a: 1 }, loadOp: "clear", storeOp: "store" }] });
@@ -408,9 +428,25 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   let stereoActive = false;
   // THE 3D VIEW'S PICTURE QUALITY: one resolution for moving and still pictures, chosen by the person (Ron, 2026-10-14,
   // on the hospital Mac showing "30 fps · 25%": "I like the desk view to follow the same rule" as the glasses -- a
-  // picture whose resolution changes while you look reads as flicker). Best by default; remembered on this Mac.
-  let deskQuality = 1;
-  try { const v = localStorage.getItem("sl-3d-quality"); if (v && ["1", "0.7", "0.5"].includes(v)) deskQuality = Number(v); } catch { /* not remembered */ }
+  // picture whose resolution changes while you look reads as flicker). Remembered on this Mac.
+  // BALANCED BY DEFAULT (Ron, 2026-10-15 night, after the glasses test: Best, Balanced and Fastest "looked about the same",
+  // and Balanced drew twice the pictures a second -- "I meant balanced"). The remembered choice moved to a new name so a
+  // Mac that remembered Best from before starts at Balanced once; what the person picks after that is kept.
+  const QUALITY_KEY = "sl-3d-quality-2";
+  // THE CHOICES, ONCE (critic 2026-10-16, general audit, finding 16: written out in four places): every control lists these.
+  const QUALITIES: [string, string][] = [["1", "Best"], ["0.7", "Balanced"], ["0.5", "Fastest"]];
+  const qualityOptions = QUALITIES.map(([v, name]) => `<option value="${v}">${name}</option>`).join("");
+  let deskQuality = 0.7;
+  try { const v = localStorage.getItem(QUALITY_KEY); if (v && QUALITIES.some(([q]) => q === v)) deskQuality = Number(v); } catch { /* not remembered */ }
+  // ONE PICTURE QUALITY for the 3D view on the screen AND in the glasses (Ron, 2026-10-15: "yes", after he changed the
+  // gear's Picture quality and the glasses stayed at Best -- theirs was a second control, under Advanced, that he could
+  // not find). Every control showing it watches this one value.
+  const qualityWatchers: (() => void)[] = [];
+  const setPictureQuality = (v: number) => {
+    deskQuality = v;
+    try { localStorage.setItem(QUALITY_KEY, String(v)); } catch { /* not remembered */ }
+    for (const f of qualityWatchers) f();
+  };
   const a3d = mountAdaptive3d({
     scene: () => scene,
     // A sequence playing changes the content on a schedule: full-quality frames, not moving ones (accum-loop.ts).
@@ -431,10 +467,16 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // more than enough" (2026-09-23).
     gpu, fixedScale: () => deskQuality, targetMs: 33, target: 8,
     onFrame: () => { drawThreeOverlay(); cfg.onFrame?.(); },
-    onFps: (fps, scale) => {
+    // NEW PICTURES A SECOND, MEASURED ON THIS TURN (turn-meter.ts; critic 2026-10-17, fps measurement): nothing shown
+    // until a turn of half a second, and taken away when the size, the quality or the scene changes.
+    onFps: (r, scale) => {
       if (!fpsEl) return;
-      fpsEl.textContent = `${fps.toFixed(0)} fps`;
-      fpsEl.title = `While the view moves: ${fps.toFixed(0)} frames a second. Moving and still, the view is drawn at ${Math.round(scale * 100)}% resolution (Picture quality, in the 3D view's settings).`;
+      if (!r) { fpsEl.textContent = ""; fpsEl.title = FPS_TITLE; return; }
+      fpsEl.textContent = `${r.perSecond.toFixed(0)} fps`;
+      fpsEl.title = `The last turn of the view: ${r.perSecond.toFixed(0)} new pictures a second (${r.pictures} in ${r.seconds.toFixed(1)} s). ` +
+        `A movement of the mouse showed after about ${r.followMs.toFixed(0)} ms (1 in 10 after more than ${r.followWorstMs.toFixed(0)} ms); ` +
+        `the longest wait between two pictures was ${r.longestGapMs.toFixed(0)} ms. ` +
+        `Drawn at ${Math.round(scale * 100)}% across and down (Picture quality, in the 3D view's settings).`;
     },
   });
   let meshes: SceneMeshData[] = [];
@@ -442,7 +484,20 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // afterwards. Without it a volume renders wherever the default camera happened to point -- which
   // is what "not centered" looks like. Declared before rebuild3d, which sets it.
   let fittedOnce = false;
-  const rebuild3d = () => {
+  /** Which segmentations the 3D view's volumes draw (their own fields and surfaces stand down), and which of them a
+   *  volume rendering colors (not the solid look). A series counts its whole family (Volume3D.colorizedSegs). */
+  const colorizedSets = () => {
+    const colorized = new Set<string>(), vrColored = new Set<string>();
+    for (const v of vol3d.values()) {
+      for (const id of [v.colorizedSeg, ...(v.colorizedSegs ?? [])]) if (id) { colorized.add(id); vrColored.add(id); }
+      for (const id of v.drawsSegs ?? []) colorized.add(id);     // the solid look's merged segmentations
+    }
+    return { colorized, vrColored };
+  };
+  /** What the segmentations are told about, as one key: the union, and the part a volume rendering colors. */
+  const colorizedKeyOf = (c: { colorized: Set<string>; vrColored: Set<string> }) => `${[...c.colorized].sort().join("|")}#${[...c.vrColored].sort().join("|")}`;
+  const rebuild3d = () => { count("3D view compositions"); gpuScoped(gpu.device, "composing the 3D view", rebuild3d0); };
+  const rebuild3d0 = () => {
     // The view's own lighting, re-asserted. livescene pushes a field's shade from its presentation
     // preset on every re-colorize, so without this the panel's choice is reverted the next time
     // anything is rebuilt -- and at startup the scene may not exist yet when the default is chosen.
@@ -462,12 +517,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // other. The segmentation's 2D slice overlay is untouched: that is a separate path.
     // Suppression is now per segmentation, not global: with two volumes rendered at once, one may
     // be colorized by its own segmentation while the other's segmentation still has to draw itself.
-    const colorized = new Set<string>();
-    const vrColored = new Set<string>();                          // by a volume rendering alone, not the solid look
-    for (const v of vol3d.values()) {
-      if (v.colorizedSeg) { colorized.add(v.colorizedSeg); vrColored.add(v.colorizedSeg); }
-      for (const id of v.drawsSegs ?? []) colorized.add(id);     // the solid look's merged segmentations
-    }
+    const { colorized, vrColored } = colorizedSets();
     syncSceneBox();
     const dup = (k: string) => k.startsWith("seg:") && colorized.has(k.slice(4));
     const kept = [...fields3d.entries()].filter(([k]) => !dup(k));
@@ -487,7 +537,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // Announce a CHANGE only, and off this call stack: a listener responds by adding or removing a
     // field, which re-enters rebuild3d. Deferring breaks that re-entrancy, and notifying on change
     // rather than on every rebuild keeps a camera nudge from triggering a re-bake.
-    const colorizedKey = [...colorized].sort().join("|");
+    // Both sets count: a segmentation moving from the solid group to a volume rendering's colored field leaves the union
+    // the same, and the solid group still has to hear it and stand down (critic 2026-10-16, cine step 2, finding 1: the
+    // heart drawn twice after Colored was chosen, the rendering turned back on, or a family shown again while paused).
+    const colorizedKey = colorizedKeyOf({ colorized, vrColored });
     if (colorizedKey !== colorizedLast) {
       colorizedLast = colorizedKey;
       colorizedSegs = colorized;
@@ -498,7 +551,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // An EMPTY 3D view still renders a frame, exactly as an empty slice cell does below. Clearing
     // the canvas instead left the view a black hole until the first volume appeared, so Slicer's
     // background only showed up once something was rendered: build([]) paints just the gradient.
-    nothingIn3D = fs.length === 0 && !meshes.some((m) => m.visible !== false);
+    // A SLICE SHOWN AS A PLANE IN 3D IS SOMETHING SHOWN: with only the planes switched on (an MR, no volume rendering)
+    // the view said "nothing shown" and drew nothing (2026-10-19, the after-load mockup).
+    nothingIn3D = fs.length === 0 && !meshes.some((m) => m.visible !== false) && slicePlanesIn3D === 0;
     if (nothingIn3D) {
       if (!scene) scene = new SceneRenderer(gpu, srgb);
       scene.build([]);
@@ -508,6 +563,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // Emptying the view arms the fit again, so the NEXT dataset is centered rather than inheriting
       // the camera that was framing the last one.
       fittedOnce = false;
+      a3d.clearFps();               // the last turn's speed was another scene's
       if (threeVisible) a3d.refresh();
       return;
     }
@@ -906,6 +962,18 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     return !!sa && sa === sb;
   };
   const bgField = (c: SliceCell): ImageField | null => c.layers?.background?.field ?? (c.layers?.backgroundSuppressed ? null : volumeField);
+  /** THE VOXEL OF WHAT IS SHOWN, for every size, step and tolerance the views use (render/scene-scale.ts; Ron,
+   *  2026-10-20: "did you forget about scales? from astrophysics to electron microscope"): the finest of the slice
+   *  views' volumes and the scene's images and segmentations; with no grid at all, a 256th of what the 3D view holds.
+   *  A fixed number of mm is right at one scale and wrong at every other. */
+  const sceneVox = (): number => {
+    const v = finest(...[...cells.values()].map((c) => bgField(c)?.sampleStep()), sceneVoxel(live.nodes.values()));
+    if (v !== undefined) return v;
+    const b = sceneBounds();
+    return voxelOrUnit(b ? voxelFromExtent(Math.hypot(b[1][0] - b[0][0], b[1][1] - b[0][1], b[1][2] - b[0][2])) : undefined);
+  };
+  /** The voxel of one slice view: its background volume's (the grid it declares), else the scene's. */
+  const cellVox = (c: SliceCell): number => { const s = bgField(c)?.sampleStep(); return s !== undefined && Number.isFinite(s) && s > 0 ? s : sceneVox(); };
   /** Push a cell's layer stack (or the legacy shared volume) into its renderer. */
   const applyLayers = (c: SliceCell) => {
     const L = c.layers, sr = c.slice, bg = bgField(c);
@@ -986,8 +1054,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         } else if (it.kind === "polyline") {
           g.strokeStyle = rgba(it.color, 0.9); g.lineWidth = (it.widthPx ?? 2) * dpr; g.beginPath();
           const pts = it.points.map(proj);
-          for (let i = 0; i + 1 < pts.length; i++) { if (Math.abs(pts[i].d) <= SLAB_MM && Math.abs(pts[i + 1].d) <= SLAB_MM) { g.moveTo(pts[i].x, pts[i].y); g.lineTo(pts[i + 1].x, pts[i + 1].y); } }
-          if (it.closed && pts.length > 2) { const a = pts[pts.length - 1], b = pts[0]; if (Math.abs(a.d) <= SLAB_MM && Math.abs(b.d) <= SLAB_MM) { g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); } }
+          for (let i = 0; i + 1 < pts.length; i++) { if (Math.abs(pts[i].d) <= slab && Math.abs(pts[i + 1].d) <= slab) { g.moveTo(pts[i].x, pts[i].y); g.lineTo(pts[i + 1].x, pts[i + 1].y); } }
+          if (it.closed && pts.length > 2) { const a = pts[pts.length - 1], b = pts[0]; if (Math.abs(a.d) <= slab && Math.abs(b.d) <= slab) { g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); } }
           g.stroke();
         } else if (it.kind === "text") {
           const p = proj(it.ras); g.fillStyle = rgba(it.color); g.fillText(it.text, p.x, p.y);
@@ -1031,12 +1099,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     if (chrome?.rulerType) {
       const f = c.slice.mirrorFrame(c.orientKey, aspect);          // mm across the view width
       const mmPerPx = f.fovX / (ov.width / dpr);
-      const steps = [1, 2, 5, 10, 20, 50, 100, 200]; const targetPx = (ov.width / dpr) * 0.25;
-      const mm = steps.reduce((best, sMm) => Math.abs(sMm / mmPerPx - targetPx) < Math.abs(best / mmPerPx - targetPx) ? sMm : best, steps[0]);
+      // A 1-2-5 length at any scale, a quarter of the view (it was 1 to 200 mm: a microscope's view got a 1 mm bar).
+      const ruler = rulerLength(mmPerPx, (ov.width / dpr) * 0.25), mm = ruler.mm;
       const px = (mm / mmPerPx) * dpr, x0 = ov.width / 2 - px / 2, y = ov.height - 14 * dpr;
       g.strokeStyle = VIEW_INK; g.lineWidth = (chrome.rulerType === 2 ? 3 : 1.5) * dpr; g.beginPath();
       g.moveTo(x0, y); g.lineTo(x0 + px, y); g.moveTo(x0, y - 5 * dpr); g.lineTo(x0, y + 5 * dpr); g.moveTo(x0 + px, y - 5 * dpr); g.lineTo(x0 + px, y + 5 * dpr); g.stroke();
-      g.fillStyle = VIEW_INK; g.font = `${10 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "bottom"; g.fillText(mm >= 10 ? `${mm / 10} cm` : `${mm} mm`, x0 + px / 2, y - 3 * dpr);
+      g.fillStyle = VIEW_INK; g.font = `${10 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "bottom"; g.fillText(ruler.text, x0 + px / 2, y - 3 * dpr);
     }
     {   // corner annotations: background/foreground names (top-left), offset + W/L (bottom-left)
       const L = c.layers; const bgName = L?.background ? imageName(L.background.field) : (volumeField ? "volume" : "");
@@ -1048,7 +1116,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       g.textBaseline = "bottom";
       // A color background (fields.ts ImageFieldOpts.rgb24) has no window/level: it is drawn as its colors.
       const wl = L?.background?.field?.rgb ? "color" : L?.background ? `W:${L.background.win.toFixed(0)} L:${L.background.lev.toFixed(0)}` : legacyWL ? `W:${legacyWL.win.toFixed(0)} L:${legacyWL.lev.toFixed(0)}` : "";
-      g.fillText(`${c.plane.orient === "axial" ? "S" : c.plane.orient === "coronal" ? "A" : "R"}: ${c.plane.posMm.toFixed(1)} mm  ${wl}`, 6 * dpr, ov.height - 6 * dpr);
+      g.fillText(`${c.plane.orient === "axial" ? "S" : c.plane.orient === "coronal" ? "A" : "R"}: ${lengthText(c.plane.posMm, 1, cellVox(c))}  ${wl}`, 6 * dpr, ov.height - 6 * dpr);
       // The probe readout used to be drawn here, bottom right. Ron: "Probe location should be changed
       // to a box at the bottom of the module space." It could only ever show one line in a corner,
       // and with two segmentations there is more than one thing to say -- so it moved to a panel
@@ -1066,6 +1134,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         g.stroke(); g.lineCap = "butt"; g.lineJoin = "miter";
       }
       if (brushCursor?.cell === c) { const q = proj(brushCursor.ras); g.strokeStyle = col; g.lineWidth = 1.5 * dpr; g.beginPath(); g.arc(q.x, q.y, rPx, 0, Math.PI * 2); g.stroke(); }
+    }
+    // ── Draw: the outline being drawn, its corners, and a dashed line from the last corner to the cursor and back ──
+    if (drawPoly?.cell === c && drawOn() && drawPoly.points.length) {
+      const col = cssToken("--sl-brush-add", "rgb(255,255,80)");
+      const pts = drawPoly.points.map(proj);
+      g.strokeStyle = withAlpha(col, 0.95); g.lineWidth = 1.5 * dpr; g.beginPath();
+      pts.forEach((q, i) => { if (i === 0) g.moveTo(q.x, q.y); else g.lineTo(q.x, q.y); });
+      g.stroke();
+      const tail = drawPoly.hover ? proj(drawPoly.hover) : null;
+      g.setLineDash([4 * dpr, 4 * dpr]); g.strokeStyle = withAlpha(col, 0.6); g.beginPath();
+      g.moveTo(pts[pts.length - 1].x, pts[pts.length - 1].y); if (tail) g.lineTo(tail.x, tail.y); g.lineTo(pts[0].x, pts[0].y);
+      g.stroke(); g.setLineDash([]);
+      if (pts.length < 60) { g.fillStyle = withAlpha(col, 0.95); for (const q of pts) { g.beginPath(); g.arc(q.x, q.y, 2.5 * dpr, 0, Math.PI * 2); g.fill(); } }
     }
     const ch = stateNode("crosshair");
     if (ch && (ch.mode as number) && ch.crosshairRAS) {           // full-view cross lines (Slicer's crosshair modes)
@@ -1090,6 +1171,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   const paintSlice = (c: SliceCell) => {
     if (c.el.style.display === "none") return;
+    if (drawPoly?.cell === c) drawStillHolds();   // a slice moved under an outline in progress clears it (Draw, below)
     if (!bgField(c) || !c.plane) {
       clearCanvas(c.ctx); drawOverlay(c);
       if (c.layers?.emptyReason) drawSuppressedNote(c, c.layers.emptyReason);
@@ -1121,9 +1203,18 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // 2026-09-24, A13). Ron asked for Steve's speedups from the start ("down the road, we will have to deal with
   // heavier loads"). WITHOUT Steve's moving mode (idleGapMs 0): every draw is at full resolution, so a still
   // change never shows soft-then-sharp, which Ron rejected in 3D on 2026-09-20.
+  // The slice views' own time on the card, beside "sent to done", which includes waiting behind the 3D picture.
+  const sliceClock = new PassClock(gpu.device);
   const sched = mountSliceScheduler({
     listCells: () => [...cells.keys()],
-    drawSlice: (cell) => { const c = cells.get(cell); if (c) paintSlice(c); },
+    drawSlice: (cell) => {
+      const c = cells.get(cell); if (!c) return;
+      const t0 = performance.now();
+      c.slice.clock = sliceClock; sliceClock.begin();
+      gpuScoped(gpu.device, `the ${cell} slice view`, () => paintSlice(c));
+      sliceClock.end("slice view, the card's own time");
+      void gpu.device.queue.onSubmittedWorkDone().then(() => notePicture("slice view, sent to done", performance.now() - t0));
+    },
     drawOverlay: (cell) => { const c = cells.get(cell); if (c) drawOverlay(c); },
     idleGapMs: 0,
     // A HIDDEN WINDOW GETS NO SCREEN REFRESH (requestAnimationFrame stops), so marked views would wait until it is
@@ -1254,6 +1345,21 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       if (vol) vol3d.set(imageId, vol); else if (!vol3d.delete(imageId)) return;
       rebuild3d();
     },
+    // A SERIES STEPPED (render/series-field.ts): the same fields, one reading another frame's textures. The bind group
+    // is rebuilt and the uniforms re-sent; the view is not re-composed and nothing compiles (CINE-RETHINK.md, step 1).
+    rebind3d() {
+      count("series steps rebound");
+      // Only when what the volumes draw is unchanged: otherwise the full rebuild, which tells the segmentations
+      // (critic 2026-10-16, cine step 1, finding 2).
+      // (The glasses' failure of 2026-10-16 was the 3D canvas past the card's largest texture, not the rebind -- the
+      // instrumented run placed it; sizeCanvas caps it. The glasses rebind too.)
+      // The SAME key rebuild3d0 announces with (colorizedKeyOf): compared with only half of it, every step of a playing
+      // series fell back to the full rebuild (Ron's log, 2026-10-17: "8 series steps rebound, 8 3D view compositions" in
+      // every 2 s -- since the key grew a second half on 2026-10-16).
+      if (!scene || colorizedKeyOf(colorizedSets()) !== colorizedLast) { rebuild3d(); return; }
+      gpuScoped(gpu.device, "a series step (rebind)", () => { scene!.refreshBindings(); scene!.syncUniforms(); });
+      a3d.refresh();
+    },
     // One rebuild for a frame step: the leaving frame and the arriving one change places without
     // an empty view in between (which would throw every resident surface off the GPU).
     swapVolume3D(prevId, imageId, vol) {
@@ -1291,7 +1397,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
 
   const markupsDM = new MarkupsDisplayableManager();
-  const segDM = new SegmentationDisplayableManager(gpu.device, 1.5);   // named, so the save can ask it for surfaces
+  const segDM = new SegmentationDisplayableManager(gpu.device, 1.5);   // named, so the surface export can read its labels
   const vrDM = new VolumeRenderingDisplayableManager(gpu.device);      // named, so the preset picker can ask it for LUTs
   const volDM = new VolumeLayersDisplayableManager(gpu.device);        // named, so the memory report can ask what it keeps
   const moduleRegistry = new ModuleRegistryDisplayableManager();   // S11: union of every peer's `module` nodes
@@ -1425,11 +1531,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // own field when a volume is colorizing it -- otherwise the two draw the same voxels twice -- and
     // this counted the dropped one anyway. A field's AABB is the whole labelmap; the box is meant to
     // be around what you can see. Same predicate as rebuild3d, so the two cannot drift.
-    const colorized = new Set<string>();
-    for (const v of vol3d.values()) {
-      if (v.colorizedSeg) colorized.add(v.colorizedSeg);
-      for (const id of v.drawsSegs ?? []) colorized.add(id);     // the solid look's merged segmentations
-    }
+    const { colorized } = colorizedSets();
     for (const v of vol3d.values()) field(v.field);
     // Widgets are not content: a crop box or the scene box itself must not set the scene's size.
     const widget = (k: string) => k === SCENE_BOX_KEY || k.startsWith("roi:") || k.startsWith("roiHandles:");
@@ -1473,7 +1575,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const half: Vec3 = [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2];
     // A hair thinner than the crop box's bars (roi-widget: diagonal x 0.012 x 0.12), so the two read
     // as reference and control when both are up.
-    const bar = Math.max(0.4, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.001);
+    const bar = RoiBoxField.frameBarHalf(lo, hi, Math.min(...[...vol3d.values()].map((v) => v.field.voxel?.() ?? Infinity)));   // at any scale (scene-scale.ts)
     if (sceneBox && Math.abs(sceneBox.bar - bar) < sceneBox.bar * 0.25) {
       sceneBox.field.setBox(center, half);
       scene?.syncUniforms();
@@ -1490,11 +1592,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   /** Center and radius of what the 3D view draws. One source of truth: `sceneBounds`. */
   const volumeCenterRadius = (): { center: Vec3; radius: number } => {
     const b = sceneBounds();
-    if (!b) return { center: camera.focalPoint, radius: Math.max(1, camera.distance / 2.6) };
+    // Never smaller than one voxel of the scene (it was 1 mm: a whole microscope stack inside that).
+    if (!b) return { center: camera.focalPoint, radius: Math.max(sceneVox(), camera.distance / 2.6) };
     const [L, H] = b;
     return {
       center: [(L[0] + H[0]) / 2, (L[1] + H[1]) / 2, (L[2] + H[2]) / 2],
-      radius: Math.max(1, Math.hypot(H[0] - L[0], H[1] - L[1], H[2] - L[2]) / 2),
+      radius: boxRadius(L, H, sceneVox()),
     };
   };
   const VIEW_DIRS: Record<string, { dir: Vec3; up: Vec3 }> = {
@@ -1733,8 +1836,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // Said where a person looks, not only in the status line (Ron, 2026-09-20: "With data no
       // message. Where is the data saved to?").
       const folder = r.path.replace(/\/[^/]*$/, "");
-      cfg.onNotify?.({ title: `Picture saved — ${out.width}×${out.height}`, body: `${name}\nin ${folder.replace(/^\/Users\/[^/]+\/Library\/Mobile Documents\/com~apple~CloudDocs/, "iCloud Drive")}${note}`,
-        actions: [{ label: "Show in Finder", primary: true, onClick: () => { void fetch(`/_picture/${encodeURIComponent(name)}?reveal=1`); } }] });
+      cfg.onNotify?.({ title: `Picture saved — ${out.width}×${out.height}`, body: `${r.path.split("/").pop() ?? name}\nin ${folder.replace(/^\/Users\/[^/]+\/Library\/Mobile Documents\/com~apple~CloudDocs/, "iCloud Drive")}${note}`,
+        // The name the server wrote, which is "<name> 2" when one of that name was there already (pictures.ts).
+        actions: [{ label: "Show in Finder", primary: true, onClick: () => { void fetch(`/_picture/${encodeURIComponent(r.path!.split("/").pop() ?? name)}?reveal=1`); } }] });
     } else cfg.onNotify?.({ title: "The picture was not saved", body: r.error ?? "unknown reason" });
     return { ...r, note };
   };
@@ -1764,7 +1868,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     vrBtn.title = "Show the 3D view in your VR / AR glasses, in 3D, following your head. Esc to come back";
     bar.appendChild(vrBtn);
     fpsEl = document.createElement("span"); fpsEl.className = "sl-3d-fps";
-    fpsEl.title = "Frames a second while the view moves; shown after the first turn of the view";
+    fpsEl.title = FPS_TITLE;
     bar.appendChild(fpsEl);
 
     // ── the 3D view panel: what Ron asked the corner to become ──
@@ -1818,7 +1922,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // "Surfaces" puts it back. Ron, 2026-09-20: "named optional look. Not the default." What is
     // shown, not how it is lit or drawn: the lighting and the drawing look stay the person's.
     const lookRow = document.createElement("div"); lookRow.className = "sl-3d-panel-row";
-    lookRow.innerHTML = `<label title="How the anatomy looks. One button goes through Illustration (an atlas illustration: matte colors, thin dark outlines), Realistic (a realistic model: shading and highlights) and Colorized volume (the anatomy see-through over the scan); the other shows the vessel networks inside their organs. Click a pressed button to switch it off. What is shown in 3D (the scan, the anatomy, surface models) is chosen in Scene › In 3D.">Look</label>`;
+    lookRow.innerHTML = `<label title="How the anatomy looks. One button goes through Illustration (an atlas illustration: matte colors, thin dark outlines), Realistic (a realistic model: shading and highlights) and Colorized volume (the anatomy see-through over the scan); the other shows the vessel networks inside their organs. Click a pressed button to switch it off. What is shown in 3D (the scan, the anatomy) is chosen in Scene › In 3D.">Look</label>`;
     const lookDeps = { setVolumeRendering: (id: string, on: boolean) => setVolumeRenderingOn(live, id, on), applyVrPreset: (id: string, preset: string) => { applyVrPreset(live, id, preset); } };
     // ONE BUTTON, THREE STATES, sized for its longest label so nothing jumps (Ron, 2026-09-20: "a
     // single button, sized properly so there is no jumping, to toggle between surface and
@@ -1846,13 +1950,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       glassBtn.setAttribute("aria-pressed", String(cur !== "Realistic"));
       vesselsBtn.setAttribute("aria-pressed", String(currentLook() === "Vessels in context"));
     };
-    // THE COLORIZED LOOK IS ASKED ABOUT WHEN IT WOULD COST THE WINDOW.
-    //
-    // It builds a second copy of the volume and of the labelmap on top of everything resident. Ron,
-    // 2026-09-22, with a 768x768x709 CT and four whole-body segmentations: he pressed it and the
-    // page was ended a minute later ("The window was reset"). The numbers are measurable before the
-    // click, so the window says what it is about to cost instead of disappearing.
-    const HEAVY_MB = 3000;
+    // NO COST NOTICE ANY MORE (critic 2026-10-16, general audit, finding 4). It warned of a second copy of the volume and
+    // the labels (Ron's window was ended on 2026-09-22 by the colorize field this look built then); the look now builds
+    // none -- measured, the card stays where it was -- so every number it gave was wrong. The memory it guarded is watched
+    // by the memory check and the card's ledger after every load.
     const glass = () => {
       const said = applyLook(live, "Glass over bone", lookDeps);
       cfg.onStatus?.(said); paintLook(); a3d.refresh();
@@ -1861,18 +1962,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const cur = shown();
       if (cur === "Illustration") { setDrawing(false); cfg.onStatus?.("Realistic: shading and highlights, no outlines"); paintLook(); a3d.refresh(); return; }
       if (cur !== "Realistic") { const said = applyLook(live, "Surfaces", lookDeps); setDrawing(true); cfg.onStatus?.(said && "Illustration"); paintLook(); a3d.refresh(); return; }
-      const cost = colorizeCostMB(live);
-      const gb = (mb: number) => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
-      if (cost.total < HEAVY_MB || !cfg.onNotify) { glass(); return; }
-      cfg.onNotify({
-        title: "This will need about " + gb(cost.total),
-        body: `<p>The colorized volume is a second copy of the volume and of the labels (${gb(cost.colorizeMB)}), on top of the volume itself (${gb(cost.volumeMB)}) and one labelmap for each of the ${cost.segmentations} segmentations on screen (${gb(cost.labelmapsMB)}).</p>` +
-          `<p>The window is ended by the system somewhere above 4 GB, and everything only in the window is lost. Hiding a segmentation you do not need, in Segmentations, takes ${gb(Math.round(cost.labelmapsMB / Math.max(1, cost.segmentations)))} off it each time.</p>`,
-        actions: [
-          { label: "Show it anyway", primary: true, onClick: () => glass() },
-          { label: "Not now", onClick: () => {} },
-        ],
-      });
+      glass();
     });
     const vesselsBtn = document.createElement("button");
     vesselsBtn.className = "sl-3d-look-toggle";
@@ -1928,14 +2018,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const qualRow = document.createElement("div"); qualRow.className = "sl-3d-panel-row";
     qualRow.innerHTML = `<label title="How much detail the 3D view has. More detail is slower when you turn the view; the choice holds the whole time, so the picture never changes while you look.">Picture quality</label>`;
     const qualSel = document.createElement("select");
-    qualSel.innerHTML = `<option value="1">Best</option><option value="0.7">Balanced</option><option value="0.5">Fastest</option>`;
-    qualSel.title = "Best: the most detail. Balanced and Fastest: less detail, smoother when you turn the view. The frames a second show in the view's bar.";
+    qualSel.innerHTML = qualityOptions;
+    qualSel.title = "Best: the most detail. Balanced and Fastest: less detail, smoother when you turn the view. The same setting holds in the glasses. The frames a second show in the view's bar.";
     qualSel.value = String(deskQuality);
-    qualSel.addEventListener("change", () => {
-      deskQuality = Number(qualSel.value) || 1;
-      try { localStorage.setItem("sl-3d-quality", qualSel.value); } catch { /* not remembered */ }
-      a3d.refresh();
-    });
+    qualSel.addEventListener("change", () => setPictureQuality(Number(qualSel.value) || 1));
+    qualityWatchers.push(() => { qualSel.value = String(deskQuality); a3d.refresh(); });
     qualRow.appendChild(qualSel);
     panel.appendChild(qualRow);
 
@@ -2119,10 +2206,27 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         const mm = Math.hypot(p[0] - used[0], p[1] - used[1], p[2] - used[2]) * 1000;
         return deg < 0.1 && mm < 0.3;
       };
+      // THE HEAD'S JITTER FILTERED (Ron, 2026-10-16: "yes go ahead"; render/one-euro.ts): held still, the sensor still
+      // reported moves of 3-6 pixels at the eye's resolution -- seven pictures a second for nothing, the picture
+      // shimmering by those pixels. The 1€ filter smooths the pose strongly when the head is nearly still and hardly at
+      // all when it turns; the dead zone below then sees a still head as still. A new reference (Start, Recenter, the
+      // mouse letting go) starts the filter afresh, so it never pulls the view toward where the head was before.
+      const rotF = oneEuro(HEAD_ROTATION), posF = oneEuro(HEAD_POSITION);
+      let lastQ: number[] | null = null;
+      const smooth = (raw: number[], tMs: number): number[] => {
+        let q = raw.slice(3, 7);
+        if (lastQ && q[0] * lastQ[0] + q[1] * lastQ[1] + q[2] * lastQ[2] + q[3] * lastQ[3] < 0) q = q.map((v) => -v);   // the same turn
+        const qf = rotF.filter(q, tMs / 1000), l = Math.hypot(qf[0], qf[1], qf[2], qf[3]) || 1;
+        lastQ = qf.map((v) => v / l);
+        return [...posF.filter(raw.slice(0, 3), tMs / 1000), ...lastQ, ...raw.slice(7)];
+      };
+      const freshFilter = () => { rotF.reset(); posF.reset(); lastQ = null; };
       const apply = () => {
-        const p = pending; pending = null; if (!p) return;
+        const raw = pending; pending = null; if (!raw) return;
         if (cam3d.action !== "none") { mouseHeld = true; return; }
         if (mouseHeld) { mouseHeld = false; H0inv = null; }
+        if (!H0inv) freshFilter();
+        const p = smooth(raw, pendingT);
         if (H0inv && still(p)) return;
         used = p; appliedPoseT = pendingT;
         if (!H0inv) capture(p);
@@ -2203,12 +2307,15 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // the two and flickered. Now the resolution chosen here holds while you look; Faster trades sharpness for speed.
       const qrow = document.createElement("div"); qrow.className = "sl-3d-panel-row";
       // "PICTURE QUALITY", not "Sharpness" (Ron, 2026-10-14: is that the appropriate term?): the gaming word for this trade.
-      qrow.innerHTML = `<label title="How much detail the pictures in the glasses have. More detail is slower; the choice holds the whole time, so the picture never changes while you look.">Picture quality</label>`;
+      qrow.innerHTML = `<label title="How much detail the pictures in the glasses have -- the same setting as Picture quality at the top of this panel. More detail is slower; the choice holds the whole time, so the picture never changes while you look.">Picture quality</label>`;
       const sharp = document.createElement("select");
-      sharp.innerHTML = `<option value="1">Best</option><option value="0.7">Balanced</option><option value="0.5">Fastest</option>`;
+      sharp.innerHTML = qualityOptions;
       sharp.title = "Best: the most detail. Balanced and Fastest: less detail, smoother when you turn your head.";
-      try { const v = localStorage.getItem("sl-glasses-sharpness"); if (v && ["1", "0.7", "0.5"].includes(v)) sharp.value = v; } catch { /* not remembered */ }
-      sharp.addEventListener("change", () => { stereoKey = ""; try { localStorage.setItem("sl-glasses-sharpness", sharp.value); } catch { /* not remembered */ } });
+      // The one Picture quality (setPictureQuality): this select shows it and changes it, and a change anywhere redraws the
+      // glasses' pictures at the new resolution.
+      sharp.value = String(deskQuality);
+      sharp.addEventListener("change", () => setPictureQuality(Number(sharp.value) || 1));   // (until 2026-10-15 evening it wrote back the value it had: Ron "I can not change the one under advanced")
+      qualityWatchers.push(() => { sharp.value = String(deskQuality); stereoKey = ""; });
       qrow.append(sharp); adv.appendChild(qrow);
       let sbsOn = false;
       /** The glasses' own 3D mode (one picture per eye) or 2D, through Albula's server (desktop/headset.ts). */
@@ -2256,9 +2363,22 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           return;
         }
         if (k === "Escape") { e.preventDefault(); if (inGlassesWindow) void endFromGlasses(); else if (vrOn) void stopVR(); else stopStereo(); return; }
-        // R: THE VIEW FROM THE FRONT, fitted, as the 3D bar's A (Ron, 2026-10-13: "R did not reset the view to anterior");
-        // where the head looks now counts as straight ahead.
-        if (k === "r" || k === "R") { e.preventDefault(); resetCamera3D("A"); H0inv = null; used = null; return; }
+        // R: THE VIEW FROM THE FRONT, as the 3D bar's A (Ron, 2026-10-13: "R did not reset the view to anterior"), AND THE
+        // WHOLE ANATOMY IN VIEW AGAIN (Ron, 2026-10-14: "when I zoom in, it might be necessary to reset not only the viewing
+        // direction but also the zoom factor"): zoom and pan undone, centered and fitted. Where the head looks now counts
+        // as straight ahead.
+        if (k === "r" || k === "R") {
+          e.preventDefault(); resetCamera3D("A");
+          // Fitted to what each EYE sees -- the glasses' field of view and a 16:9 picture -- not to the desk's 3D view.
+          const { center, radius } = volumeCenterRadius();
+          const dir = [camera.position[0] - camera.focalPoint[0], camera.position[1] - camera.focalPoint[1], camera.position[2] - camera.focalPoint[2]];
+          const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+          const dist = fitDistance(radius, Number(fov.value) || camera.viewAngle, 1920 / 1080);
+          camera.focalPoint = [...center] as Vec3;
+          camera.position = [center[0] + dir[0] / len * dist, center[1] + dir[1] / len * dist, center[2] + dir[2] / len * dist];
+          camera.orthogonalizeViewUp(); a3d.draw(); pushCamera(); sync.flush();
+          H0inv = null; used = null; return;
+        }
         if (k === "?" || k === "/") { e.preventDefault(); toggleKeys(); return; }
         if (k === "-" || k === "_") { e.preventDefault(); ipd.value = String(Math.max(0, Number(ipd.value) - 5)); ipd.dispatchEvent(new Event("input")); return; }
         if (k === "=" || k === "+") { e.preventDefault(); ipd.value = String(Math.min(150, Number(ipd.value) + 5)); ipd.dispatchEvent(new Event("input")); return; }
@@ -2278,6 +2398,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // SPEED (Ron, 2026-10-13: "more is better"). The two pictures are drawn only when something changed -- a still
       // view costs nothing -- at the one resolution Sharpness sets (no adapting: it flickered, see Sharpness).
       let stereoKey = "", stereoDrawnAt = 0;
+      // WHAT THE LAST PICTURE WAS DRAWN FROM, to tell a real move from the head's tremor (render-audit 2026-10-15,
+      // finding 3: with the head held still the card drew both eyes again and again, ~90% busy), and whether the scene
+      // changed since (every content change already tells the 3D view through a3d.refresh; the glasses listen to it
+      // instead of drawing twice a second on a timer).
+      let stereoCam: { pos: number[]; foc: number[]; up: number[] } | null = null, stereoContentDirty = true;
+      { const refresh0 = a3d.refresh; a3d.refresh = () => { stereoContentDirty = true; refresh0(); }; }
       // WHERE THE TIME GOES (Ron, 2026-10-13: "can you instrument the pipeline so we know where time is lost"). Per eye, the
       // card's own clock for each stage (SceneRenderer.onStageTimes); per picture, the page's time to set up and send both
       // eyes, how long after that the card finished, and the time from one picture to the next. Summarized every 2 seconds
@@ -2293,7 +2419,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         const line = `stereo time: ${sTime.pageMs.length} pictures · per eye on the card (${st.length} measured${st.length ? "" : `; ${clock}`}): surfaces ${f(m("surfacesMs"))} ms, ` +
           `ray march ${f(m("marchMs"))} ms, between ${f(m("gapMs"))} ms, composite ${f(m("compositeMs"))} ms, all ${f(m("totalMs"))} ms · ` +
           `per picture: the page ${f(median(sTime.pageMs))} ms to set up both eyes, the card done ${f(median(sTime.cardDoneMs))} ms later (its time for both eyes), ` +
-          `${f(median(sTime.betweenMs))} ms from one picture to the next · resolution ${Math.round((Number(sharp.value) || 1) * 100)}% · ` +
+          `${f(median(sTime.betweenMs))} ms from one picture to the next · resolution ${Math.round((deskQuality) * 100)}% · ` +
           `the head pose drawn was ${f(median(sTime.poseAtSendMs))} ms old when the picture was sent and ${f(median(sTime.poseAtDoneMs))} ms old when it was finished (from its arrival in Albula; the glasses' own processing and display come on top)`;
         sTime.stages = []; sTime.pageMs = []; sTime.cardDoneMs = []; sTime.betweenMs = []; sTime.poseAtSendMs = []; sTime.poseAtDoneMs = [];
         return line;
@@ -2302,31 +2428,57 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const frameStereo = () => {
         if (!stereo) return;
         stereo.raf = requestAnimationFrame(frameStereo);
+        gpuScoped(gpu.device, "the glasses' pictures", frameStereo0);
+      };
+      const frameStereo0 = () => {
+        if (!stereo) return;
         const sc = scene; if (!sc || nothingIn3D) return;
         const dop = nrm([camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]]);
         const right = nrm(crs(dop, camera.viewUp as Vec3));
         const half = Number(ipd.value) / 2, va = Number(fov.value);
         const sizeKey = stereo.eyes.map((e) => `${e.canvas.clientWidth}x${e.canvas.clientHeight}`).join(",");
-        const key = `${camera.position.join(",")};${camera.focalPoint.join(",")};${camera.viewUp.join(",")};${ipd.value};${fov.value};${sizeKey}`;
+        // The settings that make a different picture whatever the head does; the camera is compared below, to a pixel.
+        const key = `${ipd.value};${fov.value};${sizeKey};${deskQuality}`;
         pointerTick();
         // ONE PICTURE ON THE CARD AT A TIME (2026-10-13, the timing lines: each picture was finished 200-580 ms after it
         // was sent while new ones went every 65-500 ms -- two to four always waiting, so the glasses showed the head where
         // it had been a third of a second before). A new picture is sent only when the last one is done, from the newest
         // head position, as the 3D view here paces itself (accum-loop.ts, "GPU-paced: no backlog").
         if (sTime.waiting) return;
-        // Nothing moved: the pictures stay as they are -- but twice a second they are drawn again (the same picture, at the
-        // same resolution), so a change in the scene itself, a segment hidden on the desk's screen, reaches the glasses.
+        // NOTHING MOVED BY A PIXEL AND NOTHING CHANGED: the pictures stay as they are and the card rests. A move counts when
+        // the view turns by more than half a pixel's angle at the eye's resolution, or the camera or the point looked at
+        // shifts by more than half a pixel at the distance looked at -- the head sensor's tremor is far below that.
         const now = performance.now();
-        if (key === stereoKey && now - stereoDrawnAt < 500) return;
-        stereoKey = key; stereoDrawnAt = now;
-        const s = Number(sharp.value) || 1;
+        const eyeH = Math.max(1, stereo.eyes[0].canvas.clientHeight * stereoDpr * deskQuality), pxAngle = (va * Math.PI / 180) / eyeH;
+        const dist = Math.hypot(camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]);
+        const pxMm = 2 * dist * Math.tan((va * Math.PI / 180) / 2) / eyeH;
+        const ang = (a: number[], b: number[]) => { const na = Math.hypot(a[0], a[1], a[2]) || 1, nb = Math.hypot(b[0], b[1], b[2]) || 1; return Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (na * nb)))); };
+        const off = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        const last = stereoCam;
+        // How far the view moved since the last picture, in the eye's pixels (the largest of the four measures).
+        const movedPx = !last ? Infinity : Math.max(off(camera.position, last.pos) / pxMm, off(camera.focalPoint, last.foc) / pxMm,
+          ang([camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]], [last.foc[0] - last.pos[0], last.foc[1] - last.pos[1], last.foc[2] - last.pos[2]]) / pxAngle,
+          ang(camera.viewUp as number[], last.up) / pxAngle);
+        const moved = movedPx > 0.5;
+        if (key === stereoKey && !moved && !stereoContentDirty) return;
+        // WHY THIS PICTURE (2026-10-15 evening, Ron's test: the glasses drew 10-25 pictures a second with the mouse still and
+        // nothing said why): counted per reason in the "stereo memory" line, with the head's moves in pixels.
+        if (key !== stereoKey) sCount.settings++;
+        else if (stereoContentDirty) sCount.content++;
+        else { sCount.head++; if (Number.isFinite(movedPx)) sCount.headPx.push(movedPx); }
+        stereoKey = key; stereoDrawnAt = now; stereoContentDirty = false;
+        stereoCam = { pos: [...camera.position], foc: [...camera.focalPoint], up: [...(camera.viewUp as number[])] };
+        const s = deskQuality;
         sCount.frames++; sCount.scaleSum += s;
         sc.onStageTimes = stageSink;
         if (sTime.lastDrawn) sTime.betweenMs.push(now - sTime.lastDrawn);
         sTime.lastDrawn = now;
         const tPage = performance.now();
         stereo.eyes.forEach((e, i) => {
-          const w = Math.max(16, Math.round(e.canvas.clientWidth * stereoDpr)), h = Math.max(16, Math.round(e.canvas.clientHeight * stereoDpr));
+          // Capped at the card's largest texture, as every other view is (sizeCanvas; critic 2026-10-16, general audit, 14).
+          const w0 = Math.max(16, Math.round(e.canvas.clientWidth * stereoDpr)), h0 = Math.max(16, Math.round(e.canvas.clientHeight * stereoDpr));
+          const kCap = Math.min(1, maxPx / w0, maxPx / h0);
+          const w = Math.max(16, Math.floor(w0 * kCap)), h = Math.max(16, Math.floor(h0 * kCap));
           if (e.canvas.width !== w || e.canvas.height !== h) { e.canvas.width = w; e.canvas.height = h; }
           const k = i === 0 ? -half : half;
           const off: Vec3 = [right[0] * k, right[1] * k, right[2] * k];
@@ -2357,6 +2509,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         if (poseT) sTime.poseAtSendMs.push(Date.now() - poseT);
         void gpu.device.queue.onSubmittedWorkDone().then(() => {
           sTime.cardDoneMs.push(performance.now() - tSent);
+          notePicture("glasses (both eyes)", performance.now() - tSent);
           if (poseT) sTime.poseAtDoneMs.push(Date.now() - poseT);
         }).finally(() => { sTime.waiting = false; });
       };
@@ -2368,13 +2521,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       // Every 2 seconds: the page's footprint (desktop/macmenu.ts pageFootprintMB) into the session log with what happened
       // since, so the cause shows; and past 4 GB above where it started the stereo view ends itself instead of crashing.
       let memWatch: ReturnType<typeof setInterval> | undefined;
-      const sCount = { frames: 0, moves: 0, scaleSum: 0 };
+      const pxSummary = (v: number[]) => { const a = [...v].sort((x, y) => x - y); const q = (f: number) => a[Math.min(a.length - 1, Math.floor(f * a.length))].toFixed(1); return `median ${q(0.5)}, largest ${a[a.length - 1].toFixed(1)}`; };
+      const sCount = { frames: 0, moves: 0, scaleSum: 0, head: 0, content: 0, settings: 0, headPx: [] as number[] };
       const MEM_GROWTH_LIMIT_MB = 4096;
       const watchMemory = (where: string) => {
         const read = (globalThis as unknown as { albulaPageMemory?: () => Promise<number> }).albulaPageMemory;
         if (!read) return;
         let start = -1, posesWas = n, busy = false;
-        sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0;
+        sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0; sCount.head = 0; sCount.content = 0; sCount.settings = 0; sCount.headPx = [];
         memWatch = setInterval(async () => {
           if (busy || !stereo) return;
           busy = true;
@@ -2382,8 +2536,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             const mb = await read(); if (mb < 0) return;
             if (start < 0) start = mb;
             const line = `stereo memory (${where}): ${mb} MB, ${mb - start >= 0 ? "+" : ""}${mb - start} since it started · ` +
-              `last 2 s: ${sCount.frames} pictures drawn${sCount.frames ? ` at ${Math.round(100 * sCount.scaleSum / sCount.frames)}% resolution` : ""}, ${sCount.moves} pointer moves, ${n - posesWas} head poses · keys panel ${toggleKeysShown() ? "shown" : "hidden"}`;
-            sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0; posesWas = n;
+              `last 2 s: ${sCount.frames} pictures drawn${sCount.frames ? ` at ${Math.round(100 * sCount.scaleSum / sCount.frames)}% resolution` : ""}, ${sCount.moves} pointer moves, ${n - posesWas} head poses · keys panel ${toggleKeysShown() ? "shown" : "hidden"} · ` +
+              `drawn because: the head moved ${sCount.head}${sCount.headPx.length ? ` (by ${pxSummary(sCount.headPx)} px)` : ""}, the content changed ${sCount.content}, a setting changed ${sCount.settings}`;
+            sCount.frames = 0; sCount.moves = 0; sCount.scaleSum = 0; sCount.head = 0; sCount.content = 0; sCount.settings = 0; sCount.headPx = []; posesWas = n;
             void fetch("/_log", { method: "POST", body: line, keepalive: true }).catch(() => {});
             void fetch("/_log", { method: "POST", body: timeLine(), keepalive: true }).catch(() => {});
             if (mb - start > MEM_GROWTH_LIMIT_MB) {
@@ -2487,7 +2642,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           const k = document.createElement("div");
           k.style.cssText = "position:absolute;z-index:1;pointer-events:none;padding:8px 12px;border-radius:8px;background:rgba(0,0,0,.62);" +
             "color:#fff;font:500 13px/1.55 system-ui;white-space:nowrap;box-shadow:0 0 0 1px rgba(255,255,255,.25)";
-          k.innerHTML = "<b>Esc</b> back to the desk<br><b>R</b> straight ahead again<br><b>scroll</b> zoom<br><b>drag</b> or <b>arrows</b> turn<br>" +
+          k.innerHTML = "<b>Esc</b> back to the desk<br><b>R</b> from the front, all in view<br><b>scroll</b> zoom<br><b>drag</b> or <b>arrows</b> turn<br>" +
             "<b>Shift</b> + drag or arrows: move<br><b>−</b> <b>+</b> less or more depth<br><span style=\"opacity:.7\">drag this box to move it · <b>?</b> hides it</span>";
           h.appendChild(k); return k;
         });
@@ -2513,7 +2668,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         el.addEventListener("wheel", (e) => {
           e.preventDefault();
           const f = camera.focalPoint as Vec3, d0 = camera.distance, k = Math.exp(Math.max(-0.5, Math.min(0.5, e.deltaY * (e.ctrlKey ? 0.01 : 0.002))));
-          const back = nrm([camera.position[0] - f[0], camera.position[1] - f[1], camera.position[2] - f[2]]), d = Math.max(20, d0 * k);
+          const back = nrm([camera.position[0] - f[0], camera.position[1] - f[1], camera.position[2] - f[2]]), d = Math.max(voxels(STEREO_NEAREST_VOXELS, sceneVox()), d0 * k);   // 20 voxels nearest, 20 mm on a 1 mm grid
           camera.position = [f[0] + back[0] * d, f[1] + back[1] * d, f[2] + back[2] * d];
           H0inv = null; used = null;
         }, { passive: false });
@@ -2683,6 +2838,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             const at = JSON.parse(await nat.albulaWindowAcrossGlasses!(screen)) as { x: number; y: number; w: number; h: number } | null;
             await wait(100);
             glog(`screens after ${await screensJson()} · glasses at ${JSON.stringify(at)} in the page · page now ${innerWidth}x${innerHeight}`);
+            glog(`canvases now: ${canvasCensus()}`);
             await wait(500);
             if (!at) { await nat.albulaGlassesBack?.(); await giveUp(); vrSay("the window could not be put across the glasses"); notify("The glasses view could not open", "The window could not be put across the glasses. Press VR/AR to try again."); return; }
             // Held in place while across the glasses: a moved window took the two pictures with it (Ron, 2026-10-13).
@@ -2696,7 +2852,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             // the rendering on the xdr is not correct. The torso is squeezed left right").
             a3d.refresh();
             await wait(400);
-            vrOn = true; spanOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view";
+            vrOn = true; spanOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view"; showStrip(true);
             startStereo(true, at);
             setTimeout(() => {
               const el = document.querySelector<HTMLElement>("body > div[style*='z-index:20000'], body > div[style*='z-index: 20000']");
@@ -2711,12 +2867,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             await pushScene(true);
             await nat.albulaGlassesOpen!(screen);
             scenePush = setInterval(() => void pushScene(), 700);              // what changes here appears there
-            vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view";
+            vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "End the glasses view"; showStrip(true);
             vrSay(`the 3D view is in the glasses (${st.headset.name}); the controls stay here. Esc in the glasses, or VR/AR here, ends it`);
             return;
           }
           if (screen) { await nat.albulaHeadsetWindowTo!(screen); await wait(1200); }   // one window (no app): this one goes there
-          vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "Back to the laptop";
+          vrOn = true; vrBtn.setAttribute("aria-pressed", "true"); vgo.textContent = "Back to the laptop"; showStrip(true);
           startStereo(true);
           rc.click();
           vrSay(`in the glasses (${st.headset.name}) — Esc to come back`);
@@ -2724,7 +2880,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       };
       const stopVR = async () => {
         if (!vrOn) return;
-        vrOn = false; vrBtn.setAttribute("aria-pressed", "false"); vgo.textContent = "View in the glasses";
+        vrOn = false; vrBtn.setAttribute("aria-pressed", "false"); vgo.textContent = "View in the glasses"; showStrip(false);
         if (spanOn) {   // one window across both screens: its own size and place back, the glasses back, 2D
           spanOn = false;
           stopStereo();
@@ -2776,6 +2932,55 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         startStereo(true);
         rc.click();
       };
+      // THE GLASSES, CONTROLLED FROM THE DESK'S SCREEN (Ron, 2026-10-15, after the glasses test: "Where do I set things? in
+      // the xdr or in the glasses", "For resetting the glasses view, I have to move the pointer to the glass display", and
+      // he had to start the heart's player before putting them on; mockup glasses-strip-2026-10-15.html, his "yes" to it
+      // with Play/Pause). One strip across the top of the 3D view on the desk's screen, shown only while the glasses view
+      // is on: Picture quality (the one value), Reset view (what R does), Recenter, Play/Pause when a sequence is loaded,
+      // and Stop (what Esc does), the strip's one yellow button, at its right end.
+      const strip = document.createElement("div"); strip.className = "sl-glasses-strip"; strip.hidden = true;
+      const stripLabel = document.createElement("b"); stripLabel.textContent = "In the glasses";
+      const stripQual = document.createElement("select");
+      stripQual.innerHTML = qualityOptions;
+      stripQual.title = "How much detail the pictures in the glasses (and the 3D view here) have. Best: the most detail. Balanced and Fastest: less detail, more pictures a second when you turn your head.";
+      stripQual.value = String(deskQuality);
+      stripQual.addEventListener("change", () => { setPictureQuality(Number(stripQual.value) || 0.7); stripQual.blur(); });
+      qualityWatchers.push(() => { stripQual.value = String(deskQuality); });
+      const qualLab = document.createElement("label"); qualLab.textContent = "Picture quality "; qualLab.appendChild(stripQual);
+      const stripBtn = (text: string, title: string, act: () => void) => {
+        const b = document.createElement("button"); b.type = "button"; b.textContent = text; b.title = title;
+        b.addEventListener("click", () => { act(); b.blur(); }); return b;
+      };
+      const stripReset = stripBtn("Reset view (R)", "The whole anatomy in view again, from the front; where you look now counts as straight ahead (R)",
+        () => keysInStereo(new KeyboardEvent("keydown", { key: "r", cancelable: true })));
+      const stripRecenter = stripBtn("Recenter", "Where you look now becomes straight ahead; the view stays as it is", () => rc.click());
+      // Play / Pause: the top bar's own player (render/demos/sequence-toolbar.ts), so there is one player and one state.
+      const transportPlay = () => document.querySelector<HTMLElement>(".sl-transport-play");
+      const playing = () => { for (const n2 of live.nodes.values()) if (n2.type === "sequenceBrowser" && n2.playbackActive === true) return true; return false; };
+      const stripPlay = stripBtn("Play", "Play or pause the frames (the beating heart, a series in time)",
+        () => { transportPlay()?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true })); setTimeout(paintStrip, 50); });
+      const stripHint = document.createElement("span"); stripHint.className = "sl-glasses-strip-hint";
+      stripHint.textContent = "arrows turn · Shift+arrows move · − + depth · scroll zooms";
+      const stripStop = stripBtn("Stop (Esc)", "End the glasses view; everything goes back to this screen (Esc)", () => { void stopVR(); });
+      stripStop.className = "sl-glasses-strip-stop";
+      strip.append(stripLabel, qualLab, stripReset, stripRecenter, stripPlay, stripHint, stripStop);
+      three.el.appendChild(strip);
+      let stripTick: ReturnType<typeof setInterval> | undefined;
+      function paintStrip() {
+        const tp = transportPlay();
+        stripPlay.hidden = !tp || tp.closest("[hidden]") !== null;
+        const on = playing();
+        stripPlay.textContent = on ? "Pause" : "Play";
+        stripPlay.setAttribute("aria-pressed", String(on));
+      }
+      const showStrip = (on: boolean) => {
+        strip.hidden = !on;
+        clearInterval(stripTick); stripTick = undefined;
+        if (on) { stripQual.value = String(deskQuality); paintStrip(); stripTick = setInterval(paintStrip, 500); }
+      };
+      /** For the browser pane and the critic: the strip shown or hidden without glasses plugged in (its buttons that need
+       *  the glasses view -- Reset view, Recenter, Stop -- do nothing then). */
+      (globalThis as unknown as { __glassesStrip?: (on: boolean) => void }).__glassesStrip = (on: boolean) => showStrip(on);
       vrBtn.addEventListener("click", () => { if (vrOn) void stopVR(); else void startVR(); });
       vgo.addEventListener("click", () => { if (vrOn) void stopVR(); else void startVR(); });
       // THE MAKER'S SOFTWARE (Ron, 2026-10-12: "we will provide directions for downloading, permission request later").
@@ -2833,19 +3038,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // bigger than the meshes, this says by how much and which contributor did it.
     const boxInfo = document.createElement("div");
     boxInfo.className = "sl-3d-panel-row sl-3d-boxinfo";
-    const mm = (v: number) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(1));
+    const mm = (v: number) => lengthText(v, Math.abs(v) >= 100 ? 0 : 1, sceneVox());
     // ONE LINE PER AXIS, the full width of the panel (Ron, 2026-09-25: "the text is all pushed to the right" -- it sat
     // in the 4-character number column of the sliders and wrapped into a stack). Surface models get a line only when
     // there are some: since the firewall they are the exception.
     const span = (b: [Vec3, Vec3] | null) =>
-      b ? `R ${mm(b[0][0])} to ${mm(b[1][0])} mm<br>A ${mm(b[0][1])} to ${mm(b[1][1])} mm<br>S ${mm(b[0][2])} to ${mm(b[1][2])} mm` : "nothing in the view";
+      b ? `R ${mm(b[0][0])} to ${mm(b[1][0])}<br>A ${mm(b[0][1])} to ${mm(b[1][1])}<br>S ${mm(b[0][2])} to ${mm(b[1][2])}` : "nothing in the view";
     const refreshBoxInfo = () => {
       const all = sceneBounds();
       const same = all && meshBounds &&
         [0, 1, 2].every((i) => Math.abs(all[0][i] - meshBounds![0][i]) < 0.5 && Math.abs(all[1][i] - meshBounds![1][i]) < 0.5);
-      boxInfo.innerHTML = `<label title="The region the 3D view's box is drawn around, in millimeters: R right, A anterior, S superior. When surface models are shown and they set a different size, both are listed.">Box</label>` +
+      boxInfo.innerHTML = `<label title="The region the 3D view's box is drawn around, in millimeters: R right, A anterior, S superior. When models (model files loaded into the scene) are shown and they set a different size, both are listed.">Box</label>` +
         `<span class="sl-3d-boxnum">${span(all)}` +
-        (meshBounds ? (same ? "<br>the same as the surface models" : `<br>Surface models alone:<br>${span(meshBounds)}`) : "") +
+        (meshBounds ? (same ? "<br>the same as the models" : `<br>Models alone:<br>${span(meshBounds)}`) : "") +
         `</span>`;
     };
     adv.addEventListener("toggle", () => { if (adv.open) refreshBoxInfo(); });
@@ -2939,8 +3144,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     if (!scene || stereoActive) return null;
       const u = x / Math.max(1, three.canvas.clientWidth), v = y / Math.max(1, three.canvas.clientHeight);
       let ras: Vec3 | null = null;
-      // The finest voxel spacing on screen: the march step below, and the nudge just after.
-      const vox = Math.max(0.2, Math.min(...[...cells.values()].map((c) => bgField(c)?.sampleStep() ?? 1), 1));
+      // The finest voxel spacing on screen: the march step below, and the nudge just after. The voxel itself, at any
+      // scale -- it was held to 0.2-1 mm, which at a microscope's 1 nm voxels nudged the probe a million voxels deep.
+      // (Grids coarser than 1 mm now march a voxel a step, not 1 mm: still "at or below the finest voxel".)
+      const vox = sceneVox();
 
       // THE SURFACE ON SCREEN FIRST, when there is one.
       //
@@ -2958,7 +3165,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         // on either side by rounding, and half the time names the neighbor. Stepping along the view
         // direction moves into the solid, which is the structure whose surface is being looked at.
         // Since 2026-09-18 the surface hit is the DRAWING COPY, which may sit up to DRAW_ERROR_VOXELS
-        // outside the full mesh (critic, finding 6), so the step covers that too.
+        // outside the full mesh (critic, finding 6), so the step covers that too. (Since 2026-10-21 no segmentation
+        // has surface models on screen -- they are an export only -- so a mesh hit is a model file's; the extra step
+        // is a fraction of a voxel and harmless there. Critic 2026-10-21, surfaces export, finding 11.)
         const rr = scene.worldRay(u, v);
         const step = vox * (0.5 + DRAW_ERROR_VOXELS);
         ras = rr
@@ -3085,8 +3294,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return c.slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
   /** Nearest markup control point to a cell pixel within `px`, among in-plane points. */
   /** "ON THIS SLICE": within half a slice step of the volume shown (half a voxel along the slice's normal), and never
-   *  less than SLAB_MM -- a pin on a 5 mm series is then on the slice the wheel reaches (critic round 2, finding 11). */
-  const slabMm = (c: SliceCell) => Math.max(SLAB_MM, (sliceOffsetRange(c.name)?.step ?? 0) / 2);
+   *  less than 1.5 voxels of it (ON_SLICE_VOXELS: 1.5 mm on a 1 mm grid, as the fixed 1.5 mm it was) -- a pin on a
+   *  5 mm series is then on the slice the wheel reaches (critic round 2, finding 11), and a pin in a microscope's
+   *  stack is on one of its slices, not on all of them. */
+  const slabMm = (c: SliceCell) => onSliceDistance(cellVox(c), sliceOffsetRange(c.name)?.step ?? 0);
   const pickMarkup = (c: SliceCell, u: number, v: number, w: number, h: number, px = 12) => {
     applyPlane(c);
     const off = planeOffset01(c), aspect = w / h;
@@ -3140,7 +3351,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
    *
    * The candidates are the plane's own nine (roi-widget's sliceHandles), the same ones the overlay
    * draws there -- so what is grabbable and what is visible are one list and cannot disagree. It
-   * used to offer all fifteen 3D handles and keep whichever happened to fall within SLAB_MM of the
+   * used to offer all fifteen 3D handles and keep whichever happened to fall within the slab (slabMm) of the
    * plane, which is how the views came to show handles that could not be grabbed. Ron: "2D control
    * handles should be usable in the slice that is visible, otherwise they are not functional."
    *
@@ -3152,11 +3363,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const pl = cellPlane(c);
     if (!pl) return null;
     let best: { roi: string; meta: HandleMeta; world: Vec3 } | null = null, bestD = px * dpr;
+    const slab = slabMm(c);
     for (const { id, widget } of markupsDM.cropWidgets()) {
       if (live.nodes.get(id)?.visible === false || live.nodes.get(id)?.locked) continue;
       for (const hd of widget.sliceHandles(pl.point, pl.normal)) {
         const r = c.slice.rasToView(c.orientKey, off, hd.world, aspect);
-        if (Math.abs(r.distMm) > SLAB_MM) continue;
+        if (Math.abs(r.distMm) > slab) continue;
         const d = Math.hypot((r.u - u) * w, (r.v - v) * h);
         if (d < bestD) { bestD = d; best = { roi: id, meta: hd.data, world: hd.world }; }
       }
@@ -3241,11 +3453,82 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const e = ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase();
     return e === "paint" ? "add" : e === "erase" ? "remove" : null;
   };
+  /** The voxel of the segmentation the Segment Editor is editing (its own grid), else the scene's. */
+  const editedSegVox = (): number => {
+    const se = stateNode("segmentEditor");
+    const segId = ((se?.refs as Record<string, string[]> | undefined)?.segmentation ?? [])[0];
+    const seg = segId ? live.nodes.get(segId) as { ijkToRAS?: unknown } | undefined : undefined;
+    return voxelOrUnit(nodeVoxel(seg), sceneVox());
+  };
+  /** The brush the panel set; when it set none, 5 voxels of the segmentation's own grid (5 mm on a 1 mm grid) -- the
+   *  panel counts the brush in voxels too (seg-editor-panel.ts), and a fixed 5 mm painted a microscope's whole stack. */
   const brushDiameterMm = (): number => {
     const P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
     const abs = parseFloat(P.BrushAbsoluteDiameter ?? "");
-    return Number.isFinite(abs) && abs > 0 ? abs : 5;
+    return Number.isFinite(abs) && abs > 0 ? abs : voxels(BRUSH_DEFAULT_VOXELS, editedSegVox());
   };
+  // DRAW (Slicer's Draw effect; Ron, 2026-10-20: "draw a polygon to capture each cingulum bundle"): a click adds a
+  // corner, a drag traces; a double-click, Enter or a right-click fills the outline on that slice into the structure
+  // being edited (logic/fill-polygon.ts); Backspace takes the last corner back, Esc drops the outline.
+  const drawOn = () => ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase() === "draw";
+  // AN OUTLINE BELONGS TO ONE SLICE OF ONE VIEW, drawn into one segmentation (critic 2026-10-20, finding 2: corners
+  // kept across a wheel step were filled into the first corner's slice, where nobody was looking). It keeps the plane,
+  // the segmentation and the scan it was started on; when any of them changes, or the tool does, or the scene is
+  // replaced, the outline is cleared and the status line says why. The fill uses the plane it was drawn on.
+  let drawPoly: { cell: SliceCell; points: Vec3[]; hover?: Vec3; plane: DrawPlane; segId?: string; bgId?: string } | null = null;
+  const editedSegId = (): string | undefined => ((stateNode("segmentEditor")?.refs as Record<string, string[]> | undefined)?.segmentation ?? [])[0];
+  const dropDraw = (why: string) => {
+    const d = drawPoly; if (!d) return;
+    drawPoly = null; drawOverlay(d.cell);
+    if (d.points.length) cfg.onStatus?.(`Draw: the outline was cleared because ${why}`);
+  };
+  /** True while the outline in progress still belongs where it was started; else it is dropped (and false). */
+  const drawStillHolds = (): boolean => {
+    const d = drawPoly; if (!d) return false;
+    const c = d.cell;
+    if (!drawOn()) { dropDraw("another tool was chosen"); return false; }
+    if (editedSegId() !== d.segId || (d.segId && !live.nodes.has(d.segId))) { dropDraw("another segmentation is being edited"); return false; }
+    if (!c.plane || c.bgId !== d.bgId) { dropDraw("another scan is shown in that view"); return false; }
+    // A hundredth of a voxel: a wheel step moves a whole slice; a round trip through the slice node moves nothing.
+    const change = planeChange(d.plane, drawPlaneOf(c.plane), voxels(0.01, Math.min(editedSegVox(), cellVox(c))));
+    if (change) { dropDraw(change === "moved" ? "the slice moved; draw it again on this slice" : "the view turned to another orientation"); return false; }
+    return true;
+  };
+  live.subscribe((ch) => {
+    if (!drawPoly) return;
+    if (ch.kind === "reset") dropDraw("a new scene was loaded");
+    else if (ch.type === "segmentEditor" || ch.type === "segmentation" || ch.type === "sliceComposite") drawStillHolds();
+  });
+  const addDrawPoint = (c: SliceCell, ras: Vec3) => {
+    if (drawPoly && drawPoly.cell === c) drawStillHolds();   // a moved slice starts a new outline here
+    if (!drawPoly || drawPoly.cell !== c) {
+      const was = drawPoly?.cell;
+      drawPoly = { cell: c, points: [], plane: drawPlaneOf(c.plane!), segId: editedSegId(), bgId: c.bgId };
+      if (was && was !== c) drawOverlay(was);
+    }
+    const last = drawPoly.points[drawPoly.points.length - 1];
+    // A tenth of a voxel of the segmentation being edited (0.1 mm on a 1 mm grid), not 0.1 mm: at a microscope's scale
+    // that kept one point of the whole outline.
+    if (!last || Math.hypot(ras[0] - last[0], ras[1] - last[1], ras[2] - last[2]) > voxels(DRAW_SPACING_VOXELS, editedSegVox())) drawPoly.points.push(ras);
+    drawOverlay(c);
+  };
+  const cancelDraw = () => { const was = drawPoly?.cell; drawPoly = null; if (was) drawOverlay(was); };
+  const applyDraw = () => {
+    const d = drawPoly; if (!d || !drawStillHolds()) return;
+    drawPoly = null; drawOverlay(d.cell);
+    if (d.points.length < 3) { cfg.onStatus?.("Draw: click at least three points around the region, then double-click"); return; }
+    const local = localSegForEditor();
+    if (!local || !cfg.onNativeDraw) { cfg.onStatus?.("Draw works on a segmentation made or loaded in this window"); return; }
+    cfg.onNativeDraw(local.segId, local.segment, d.points, d.plane.normal);
+  };
+  addEventListener("keydown", (e) => {
+    if (!drawPoly || !drawOn()) return;
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+    if (e.key === "Enter") { e.preventDefault(); applyDraw(); }
+    else if (e.key === "Escape") { e.preventDefault(); cancelDraw(); }
+    else if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); drawPoly.points.pop(); drawOverlay(drawPoly.cell); }
+  });
   let brushStroke: { cell: SliceCell; points: Vec3[]; seq: number; lastSent: number; lastPt: Vec3 } | null = null;
   let strokeSeq = 0;
   let brushCursor: { cell: SliceCell; ras: Vec3 } | null = null;
@@ -3394,6 +3677,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         onZoom: () => branch(c),
         onLeftGrab: (u, v, w, h) => {
           if (clickOutlineOn() && !pressIsControlClick()) { cfg.onClickOutline?.(cellRas(c, u, v), shiftHeld ? -1 : 1); return true; }   // Click to outline
+          if (drawOn() && !pressIsControlClick()) { addDrawPoint(c, cellRas(c, u, v)); return true; }   // Draw: a corner
           if (brushEffect()) {                                          // Segment Editor Paint/Erase: stroke in this cell
             brushStroke = { cell: c, points: [cellRas(c, u, v)], seq: 0, lastSent: 0, lastPt: cellRas(c, u, v) };
             sendStroke();                                               // the initial dab paints immediately
@@ -3420,6 +3704,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           return false;   // anything else is window/level, Slicer's default 2D mouse mode
         },
         onLeftDrag: (u, v) => {
+          if (drawPoly && drawPoly.cell === c && drawOn()) { addDrawPoint(c, cellRas(c, u, v)); return; }   // Draw: a drag traces
           if (brushStroke) {
             const ras = cellRas(c, u, v); brushStroke.points.push(ras); brushCursor = { cell: c, ras };
             const now = performance.now();
@@ -3453,6 +3738,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
           if (shiftHeld) { live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras }); jumpLocal(ras); }
           if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; drawOverlay(c); }
+          else if (drawOn()) { c.canvas.style.cursor = "crosshair"; if (drawPoly?.cell === c) { drawPoly.hover = ras; drawOverlay(c); } }
           else {
             const overMarkup = pickMarkup(c, u, v, w, h);
             const overLines = overMarkup ? [] : pickIntersection(c, u, v, w, h);
@@ -3468,7 +3754,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         },
       },
     });
-    attachDoubleClick(c.canvas, () => toggleMaximize(c.name));
+    attachDoubleClick(c.canvas, () => { if (drawOn()) { applyDraw(); return; } toggleMaximize(c.name); });
     const lbl = c.el.querySelector(".lv-cell-label") as HTMLElement | null; if (lbl) lbl.style.display = "none";
     // slice controller bar (orientation + offset slider + fit) over this cell, node/peer-agnostic via the adapter
     (c as SliceCell & { controller?: SliceController }).controller = mountSliceController(c.el, c.name, {
@@ -3526,6 +3812,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const inter = live.nodes.get(INTERACTION_ID);
       if (inter?.mode === "place") { endPlace(); cfg.onStatus?.("Placing ended"); return; }
       if (clickOutlineOn()) { cfg.onClickOutline?.(null, 1); return; }   // a right-click ends Click to outline
+      if (drawOn() && drawPoly) { applyDraw(); return; }                 // a right-click fills the outline being drawn
       void viewMenu(c.name, ras, cx, cy);
     }));
   }
@@ -3558,6 +3845,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // is loaded -- so the 3D cell showed its bare CSS background (near-black) instead of Slicer's.
     // Build the empty scene once so the very first frame paints the gradient.
     if (threeVisible) { if (!scene) rebuild3d(); else a3d.refresh(); }
+    afterLayout?.();
   };
   const setCells = (rects: ViewCellRect[]) => { lastRects = rects; if (maximizedCell && !rects.some((r) => r.name === maximizedCell)) maximizedCell = null; applyCells(); };
   /** Double-click a cell to maximize/restore (reuses the MPR demos' behaviour, systematized here). */
@@ -3744,9 +4032,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const sliceTexSize = (c: SliceCell): { w: number; h: number } => {
     const bg = bgField(c); if (!bg) return { w: 512, h: 512 };
     const { uvec, vvec } = c.slice.patientFrame();
-    const mm = Math.max(bg.sampleStep(), 0.05);
+    // One texel per voxel of the volume, at any scale (a 0.05 mm floor here made a microscope's slice 16 x 16).
+    const mm = cellVox(c);
     const cap = 2048;                                 // a huge FOV must not allocate without bound
-    const n = (v: Vec3) => Math.max(16, Math.min(cap, Math.ceil(Math.hypot(v[0], v[1], v[2]) / mm)));
+    const n = (v: Vec3) => texelsAcross(Math.hypot(v[0], v[1], v[2]), mm, 16, cap);
     return { w: n(uvec), h: n(vvec) };
   };
   /** Render a cell's composite into its 3D texture and re-point the quad at the frame it used. */
@@ -3768,13 +4057,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     drawExtraOverlays(c.slice, view3, e.w, e.h);
     sliceQuads.set(cell, { id: sliceFieldKey(cell), tex: e.tex, opacity: 1, ...frame });
     scene?.setSliceQuads([...sliceQuads.values()]);
+    if (slicePlanesIn3D !== sliceQuads.size) { const was = slicePlanesIn3D; slicePlanesIn3D = sliceQuads.size; if (!was && nothingIn3D) rebuild3d(); }
   };
   /** Toggle a cell's slice in the 3D view. */
   const setSliceIn3D = (cell: string, on: boolean) => {
     const c = cells.get(cell); if (!c) return;
     if (!on) {
       const e = sliceIn3D.get(cell);
-      if (e) { sliceIn3D.delete(cell); sliceQuads.delete(cell); scene?.setSliceQuads([...sliceQuads.values()]); e.tex.destroy(); a3d.refresh(); }
+      if (e) { sliceIn3D.delete(cell); sliceQuads.delete(cell); scene?.setSliceQuads([...sliceQuads.values()]); e.tex.destroy(); slicePlanesIn3D = sliceQuads.size; if (!slicePlanesIn3D) rebuild3d(); a3d.refresh(); }
       // Off is written too: only "on" was, so a view turned off still said visibleIn3D and a saved scene put it back.
       const node = live.nodes.get(nativeSliceId(cell)); if (node?.visibleIn3D) live.write({ op: "patch", id: node.id, path: "#/visibleIn3D", value: false });
       return;
@@ -3917,8 +4207,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const o = plane.origin[0] * plane.n[0] + plane.origin[1] * plane.n[1] + plane.origin[2] * plane.n[2];
     const reach = view === "short-axis" ? axes.reach.shortAxis : view === "four-chamber" ? axes.reach.fourChamber : axes.reach.twoChamber;
     const margin = 3;
-    const step = bgField(c)?.sampleStep() ?? 1;
-    return { min: o - reach - margin, max: o + reach + margin, step: step || 1 };
+    return { min: o - reach - margin, max: o + reach + margin, step: cellVox(c) };   // the volume's own step
   };
   /**
    * THE HEART'S PLANES BY DEFAULT. When a segmentation of the chambers arrives, the three slice
@@ -3966,13 +4255,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // pan/zoom live per anatomical slot; an oblique plane borrows the slot of its nearest axis (as the heart's do)
     const an = [Math.abs(plane.n[0]), Math.abs(plane.n[1]), Math.abs(plane.n[2])];
     if (c) c.orientKey = an[2] >= an[0] && an[2] >= an[1] ? "axial" : an[1] >= an[0] ? "coronal" : "sagittal";
-    const fov = lineFieldOfView(ax, view);
+    const fov = lineFieldOfView(ax, view, sceneVoxelOf(live.nodes.values()));   // its floors are voxels of the scene
     live.write({ op: "patch", id, path: "#/sliceToRAS", value: planeToSliceToRAS(plane) });
     live.write({ op: "patch", id, path: "#/orientation", value: lineOrientation(markupId, view) });
     live.write({ op: "patch", id, path: "#/offset", value: plane.origin[0] * plane.n[0] + plane.origin[1] * plane.n[1] + plane.origin[2] * plane.n[2] });
     live.write({ op: "patch", id, path: "#/fieldOfView", value: [fov, fov, 1] });
     if (c) c.branched = false;
-    if (!quiet) cfg.onStatus?.(`${cell}: ${LINE_VIEWS.find((v) => v.id === view)?.label ?? view} “${String(live.nodes.get(markupId)?.name ?? "line")}” — ${ax.length.toFixed(0)} mm between its points`);
+    if (!quiet) cfg.onStatus?.(`${cell}: ${LINE_VIEWS.find((v) => v.id === view)?.label ?? view} “${String(live.nodes.get(markupId)?.name ?? "line")}” — ${lengthText(ax.length, 0, sceneVox())} between its points`);
     renderSlices();
     refreshSlicesIn3D();
     return true;
@@ -3983,13 +4272,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     let any = false;
     for (const c of cells.values()) { const v = wanted[c.name]; if (v && lineReformat(c.name, markupId, v, true)) any = true; }
     const ax = lineAxesOf(markupId);
-    if (any && ax) cfg.onStatus?.(`Slices aligned to “${String(live.nodes.get(markupId)?.name ?? "line")}”: red across it, yellow and green along it — ${ax.length.toFixed(0)} mm between its points`);
+    if (any && ax) cfg.onStatus?.(`Slices aligned to “${String(live.nodes.get(markupId)?.name ?? "line")}”: red across it, yellow and green along it — ${lengthText(ax.length, 0, sceneVox())} between its points`);
     return any;
   };
   const lineRangeFor = (c: SliceCell): { min: number; max: number } | null => {
     const lo = parseLineOrientation(live.nodes.get(nativeSliceId(c.name))?.orientation as string | undefined);
     if (!lo) return null;
-    const ax = lineAxesOf(lo.markupId); return ax ? lineRange(ax, lo.view) : null;
+    const ax = lineAxesOf(lo.markupId); return ax ? lineRange(ax, lo.view, sceneVoxelOf(live.nodes.values())) : null;
   };
   // THE SLICES FOLLOW THE POINTS: a line that moves re-orients every view set to it.
   const lineSeen = new Map<string, string>();
@@ -4026,7 +4315,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const heart = cardiacRange(c);
     if (heart) return heart;
     const alongLine = lineRangeFor(c);
-    if (alongLine) return { ...alongLine, step: bgField(c)?.sampleStep() ?? 1 };
+    if (alongLine) return { ...alongLine, step: cellVox(c) };
     // The extent of the box ALONG THE NORMAL: all eight corners projected, not the two extreme
     // ones -- for an oblique plane (the heart's short axis) the minimum corner's projection is
     // not the minimum, the range collapsed, and the slider sat at its end with the slice outside it.
@@ -4037,12 +4326,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     }
     // step = the spacing along the normal (Slicer's GetSliceOffsetRangeResolution): the voxel size of the
     // volume axis most parallel to the slice normal (so a 1.3mm sagittal steps 1.3mm, a 1mm axial steps 1mm).
-    let step = (bg as { stepMm?: number }).stepMm ?? 1;
+    // The volume's declared grid; no spacing is invented for data that declares one (cellVox: the scene's voxel
+    // only for a degenerate grid).
+    let step = cellVox(c);
     const comp = [...live.nodes.values()].find((nd) => nd.type === "sliceComposite" && nd.layoutName === c.name);
     const imgId = ((comp?.refs as Record<string, string[]> | undefined)?.background ?? [])[0];
     const m = imgId ? (live.nodes.get(imgId)?.ijkToRAS as number[] | undefined) : undefined;
-    if (m) { let bestDot = 0; for (let ax = 0; ax < 3; ax++) { const dx = m[ax], dy = m[4 + ax], dz = m[8 + ax]; const sp = Math.hypot(dx, dy, dz) || 1; const dot = Math.abs((dx * n[0] + dy * n[1] + dz * n[2]) / sp); if (dot > bestDot) { bestDot = dot; step = sp; } } }
-    return { min: Math.min(a, b), max: Math.max(a, b), step: step || 1 };
+    if (m) { let bestDot = 0; for (let ax = 0; ax < 3; ax++) { const dx = m[ax], dy = m[4 + ax], dz = m[8 + ax]; const sp = Math.hypot(dx, dy, dz); if (!(sp > 0)) continue; const dot = Math.abs((dx * n[0] + dy * n[1] + dz * n[2]) / sp); if (dot > bestDot) { bestDot = dot; step = sp; } } }
+    return { min: Math.min(a, b), max: Math.max(a, b), step };
   };
   /**
    * Fit this slice view to its volume — "Fit to the image" in the view's gear panel (slice-controller.ts).
@@ -4083,7 +4374,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   /** Frame the 3D view on a RAS box, keeping the view direction (fitCamera3D with a given box). */
   const fitCameraTo = (lo: Vec3, hi: Vec3): void => {
     const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
-    const radius = Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2);
+    const radius = boxRadius(lo, hi, sceneVox());   // at least one voxel, not 1 mm
     let dx = camera.position[0] - camera.focalPoint[0], dy = camera.position[1] - camera.focalPoint[1], dz = camera.position[2] - camera.focalPoint[2];
     const len = Math.hypot(dx, dy, dz);
     if (len < 1e-6) { dx = 0; dy = 1; dz = 0; } else { dx /= len; dy /= len; dz /= len; }
@@ -4226,7 +4517,6 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const cardsBehind = new Set<string>();
   let occlKey = "", occlRunning = false, occlAgain = false, occlAt = 0;
   const cross3 = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-  const finestVoxel = () => Math.max(0.2, Math.min(...[...cells.values()].map((c) => bgField(c)?.sampleStep() ?? 1), 1));
   const behindSlicePlane = (origin: Vec3, dir: Vec3, tPin: number, tol: number): boolean => {
     for (const [cell, q] of sliceQuads) {
       const n = cross3(q.uvec, q.vvec); const nl = Math.hypot(n[0], n[1], n[2]); if (!nl) continue;
@@ -4252,7 +4542,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       do {
         occlAgain = false;
         const l = cardList(); if (!l || !scene) { cardsBehind.clear(); break; }
-        const tol = 2 * finestVoxel();
+        const tol = 2 * sceneVox();   // two voxels of what is shown, at any scale
         const W = three.canvas.clientWidth, H = three.canvas.clientHeight;
         for (const c of cardsOf(l)) {
           const q = camera.worldToDisplay(c.position, three.canvas.width, three.canvas.height);
@@ -4286,7 +4576,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     cardsView ??= mountNameCards({
       host: three.el,
       occluded: (id) => cardsBehind.has(id),
-      project: (p) => { const q = camera.worldToDisplay(p, three.canvas.width, three.canvas.height); return q.depth > 0 ? { x: q.x / dpr, y: q.y / dpr } : null; },
+      // By the canvas's own scale, not the screen's: a capped canvas (sizeCanvas) is less than dpr pixels per point.
+      project: (p) => { const q = camera.worldToDisplay(p, three.canvas.width, three.canvas.height); const k = three.canvas.clientWidth / (three.canvas.width || 1); return q.depth > 0 ? { x: q.x * k, y: q.y * k } : null; },
       structure: cardStructure,
       onEdit: (_l, id) => editCard(id),
       onRemove: (_l, id) => removeCard(id),
@@ -4394,6 +4685,169 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // STANDALONE, THE WINDOW OWNS ITS CAMERA AND ITS 3D VIEW AS NODES (SCENE-DESIGN §4, step 1 of
   // the order of work). Connected, the peer's nodes arrive and take over as they always did.
   if (cfg.connect === false) { ensureCameraNode(); syncView3dNode(); }
+
+  // ── A BANNER ACROSS THE TOP OF THE 3D VIEW, and A RECTANGLE DRAWN IN ANY VIEW (SDK 14, 2026-10-16) ──────────────────
+  // Ron, seeding tracts in the Diffusion module: "How do I know that something is happening? A progress bar immediately
+  // when I click … Somewhere were I am likely to be looking", "Perhaps the progress bar at the top of the 3d viewer?";
+  // and on stray tubes: "draw a rectangle to identify the culprits. have an undo option" (mockup
+  // diffusion-shown-list-2026-10-16.html). Both are the core's, for any module: a banner says what is going on in the
+  // 3D view, with a progress bar and buttons; a rectangle tells the caller which points lie inside it, as seen in the view
+  // it was drawn in.
+  /** Every drawing surface on the page, its size and its CSS size (for the session log: which one failed). */
+  const canvasCensus = () => [...document.querySelectorAll("canvas")].map((c, i) => `${c.closest("[data-cell]")?.getAttribute("data-cell") ?? c.parentElement?.className?.toString().slice(0, 20) ?? "?"}#${i} ${c.width}x${c.height} (css ${c.clientWidth}x${c.clientHeight})`).join("; ") + ` · max texture ${gpu.device.limits.maxTextureDimension2D}`;
+  (globalThis as unknown as { __canvasCensus?: () => string }).__canvasCensus = canvasCensus;
+  const banners = document.createElement("div"); banners.className = "sl-view-banners";
+  three.el.appendChild(banners);
+  // THE GLASSES STRIP STACKS WITH THE BANNERS (critic 2026-10-16, shown-list finding: a banner covered its Stop and
+  // Reset view): the strip becomes the stack's first item.
+  { const gs = three.el.querySelector<HTMLElement>(".sl-glasses-strip:not(.sl-view-banner)"); if (gs) banners.prepend(gs); }
+  /** Where the banners go: the 3D view when it is shown, else the first slice view shown (a layout without 3D still says
+   *  what is going on; critic, finding 11). */
+  const placeBanners = () => {
+    const host = threeVisible ? three.el : [...cells.values()].find((c) => c.el.offsetParent !== null)?.el ?? three.el;
+    if (banners.parentElement !== host) host.appendChild(banners);
+  };
+  type BannerOpts = { title: string; hint?: string; progress?: number | null; actions?: { label: string; primary?: boolean; title?: string; onClick: () => void }[] };
+  const viewBanner = (opts: BannerOpts) => {
+    const el = document.createElement("div"); el.className = "sl-glasses-strip sl-view-banner";
+    let cur = opts;
+    // UPDATED IN PLACE, not rebuilt: a progress tick every 200 ms replaced the Stop button under the pointer, and half of
+    // the real clicks on it were lost; the moving bar restarted at every tick too (critic 2026-10-17, working banner,
+    // findings 1 and 11). The buttons are made again only when the set of actions changes.
+    const b = document.createElement("b");
+    const bar = document.createElement("span"); bar.className = "sl-view-bar";
+    const fill = document.createElement("i"); bar.append(fill);
+    const hint = document.createElement("span"); hint.className = "sl-glasses-strip-hint";
+    const acts = document.createElement("span"); acts.style.cssText = "display:contents";
+    el.append(b, bar, hint, acts);
+    let actsKey = "";
+    const paint = () => {
+      if (b.textContent !== cur.title) b.textContent = cur.title;
+      bar.style.display = cur.progress === undefined ? "none" : "";
+      bar.classList.toggle("sl-indeterminate", cur.progress === null);
+      const w = typeof cur.progress === "number" ? `${Math.round(Math.max(0, Math.min(1, cur.progress)) * 100)}%` : "";
+      if (fill.style.width !== w) fill.style.width = w;
+      hint.style.display = cur.hint ? "" : "none";
+      if (hint.textContent !== (cur.hint ?? "")) hint.textContent = cur.hint ?? "";
+      const key = JSON.stringify((cur.actions ?? []).map((a) => [a.label, a.title, a.primary]));
+      if (key !== actsKey) {
+        actsKey = key;
+        acts.replaceChildren(...(cur.actions ?? []).map((a) => {
+          const btn = document.createElement("button"); btn.type = "button"; btn.textContent = a.label; if (a.title) btn.title = a.title;
+          if (a.primary) btn.className = "sl-glasses-strip-stop";
+          // The current action's handler, looked up at the click, so an update need not replace the button.
+          btn.addEventListener("click", () => { (cur.actions ?? []).find((x) => x.label === a.label)?.onClick(); btn.blur(); });
+          return btn;
+        }));
+      }
+    };
+    paint(); placeBanners(); banners.append(el);
+    return { update: (o: Partial<BannerOpts>) => { cur = { ...cur, ...o }; paint(); }, close: () => el.remove() };
+  };
+  // A LAYOUT CHANGED: the banners go with it to the view they belong on (critic 2026-10-17, finding 5: switched to a
+  // layout without the 3D view, a banner already showing stayed in the hidden view).
+  afterLayout = () => placeBanners();
+  // THE ONE "WORKING" BANNER (render/working.ts): every piece of work in the application that may take more than a moment
+  // says so here, at the top of the 3D view.
+  setWorkBannerHost((o) => viewBanner(o));
+  /** Where a point falls in the 3D view, as fractions of its width and height (null: behind the camera). */
+  const project3d = (ras: number[]): { u: number; v: number } | null => {
+    const p = camera.position, f0 = camera.focalPoint, up = camera.viewUp as number[];
+    const f = [f0[0] - p[0], f0[1] - p[1], f0[2] - p[2]], fl = Math.hypot(f[0], f[1], f[2]) || 1; f[0] /= fl; f[1] /= fl; f[2] /= fl;
+    let r = [f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0]]; const rl = Math.hypot(r[0], r[1], r[2]) || 1; r = r.map((x) => x / rl);
+    const u = [r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]];
+    const d = [ras[0] - p[0], ras[1] - p[1], ras[2] - p[2]];
+    const z = d[0] * f[0] + d[1] * f[1] + d[2] * f[2];
+    const aspect = (three.canvas.clientWidth || 1) / (three.canvas.clientHeight || 1);
+    const x = d[0] * r[0] + d[1] * r[1] + d[2] * r[2], y = d[0] * u[0] + d[1] * u[1] + d[2] * u[2];
+    let nx: number, ny: number;
+    if (camera.parallelProjection) { const ps = camera.parallelScale || 1; nx = x / (ps * aspect); ny = y / ps; }
+    else { if (z <= 1e-6) return null; const t = Math.tan((camera.viewAngle * Math.PI) / 360); nx = x / (z * t * aspect); ny = y / (z * t); }
+    return { u: (nx + 1) / 2, v: (1 - ny) / 2 };
+  };
+  /** One rectangle, dragged in the 3D view or a slice view; Escape gives null. In a slice view a point counts only near
+   *  the slice's plane (what the view shows of it). */
+  type PickResult = { view: string; inside: (ras: number[]) => boolean; insideSegment: (a: number[], b: number[]) => boolean };
+  type PickOpts = { signal?: AbortSignal; onDrag?: (p: PickResult | null) => void };
+  let pickCancel: (() => void) | null = null;
+  const pickRectangle = (opts: PickOpts = {}): Promise<PickResult | null> => new Promise((resolve) => {
+    // ONE PICK AT A TIME (critic 2026-10-16, shown-list finding 18): a new one ends the one before.
+    pickCancel?.();
+    // project: where a point falls (0..1) as the view shows it; dist: its distance from a slice view's plane (mm), signed.
+    const targets: { name: string; el: HTMLElement; canvas: HTMLCanvasElement; project: (ras: number[]) => { u: number; v: number } | null; dist?: (ras: number[]) => number; slab?: number }[] = [];
+    // NOT THE 3D VIEW WHILE THE GLASSES SHOW IT: the glasses draw from the moving head, the desk's view stands still
+    // (critic, finding 8 -- the 2026-10-13 probe fault).
+    if (threeVisible && !stereoActive) targets.push({ name: "3D", el: three.el, canvas: three.canvas, project: project3d });
+    for (const c of cells.values()) {
+      if (!c.plane || !bgField(c) || c.el.offsetParent === null) continue;
+      const view = (ras: number[]) => { const aspect = (c.canvas.width || 1) / (c.canvas.height || 1); return c.slice.rasToView(c.orientKey, planeOffset01(c), ras as Vec3, aspect); };
+      targets.push({ name: c.name, el: c.el, canvas: c.canvas, slab: slabMm(c), dist: (ras) => view(ras).distMm,
+        project: (ras) => { const q = view(ras); return Math.abs(q.distMm) <= slabMm(c) ? { u: q.u, v: q.v } : null; } });
+    }
+    const covers: HTMLElement[] = [];
+    let done = false;
+    const finish = (r: PickResult | null) => {
+      if (done) return; done = true;
+      if (pickCancel === cancelThis) pickCancel = null;
+      for (const cv of covers) cv.remove();
+      removeEventListener("keydown", onKey, true);
+      resolve(r);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(null); } };
+    const cancelThis = () => finish(null);
+    pickCancel = cancelThis;
+    addEventListener("keydown", onKey, true);
+    // ENDED BY THE CALLER (its Done), not by a made-up Escape that also ends whatever else listens for one (finding 12).
+    if (opts.signal) { if (opts.signal.aborted) { finish(null); return; } opts.signal.addEventListener("abort", () => finish(null), { once: true }); }
+    /** The answer for a rectangle u0..u1, v0..v1 in one view. A line's piece counts in a slice view where it CROSSES the
+     *  plane inside the rectangle -- the dot the view draws -- not where it merely passes near (finding 6). */
+    const answer = (t: typeof targets[number], u0: number, u1: number, v0: number, v1: number): PickResult => {
+      const inRect = (pr: { u: number; v: number } | null) => !!pr && pr.u >= u0 && pr.u <= u1 && pr.v >= v0 && pr.v <= v1;
+      const inside = (ras: number[]) => inRect(t.project(ras));
+      const insideSegment = (a: number[], b: number[]) => {
+        if (!t.dist) return inside(a) || inside(b);
+        const da = t.dist(a), db = t.dist(b);
+        if (Math.abs(da) <= 1e-6) return inside(a);
+        if (da * db > 0) return false;                          // both on one side: it does not cross here
+        const k = da / (da - db), x = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+        return inside(x);
+      };
+      return { view: t.name, inside, insideSegment };
+    };
+    for (const t of targets) {
+      const cover = document.createElement("div");
+      cover.style.cssText = "position:absolute;inset:0;z-index:7;cursor:crosshair;touch-action:none";
+      const box = document.createElement("div");
+      box.style.cssText = "position:absolute;border:2px dashed var(--sl-accent);background:var(--sl-accent-wash);pointer-events:none;display:none";
+      cover.append(box);
+      let start: { x: number; y: number } | null = null;
+      const at = (e: PointerEvent) => { const r = t.canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, w: r.width, h: r.height, ox: r.left - cover.getBoundingClientRect().left, oy: r.top - cover.getBoundingClientRect().top }; };
+      cover.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); start = at(e); cover.setPointerCapture(e.pointerId); });
+      let dragTimer = 0;
+      cover.addEventListener("pointermove", (e) => {
+        if (!start) return;
+        const q = at(e), x0 = Math.min(start.x, q.x), y0 = Math.min(start.y, q.y);
+        box.style.display = "block"; box.style.left = `${x0 + q.ox}px`; box.style.top = `${y0 + q.oy}px`;
+        box.style.width = `${Math.abs(q.x - start.x)}px`; box.style.height = `${Math.abs(q.y - start.y)}px`;
+        // WHAT IT WOULD TAKE, while dragging (finding 6: no preview), at most ten times a second.
+        if (opts.onDrag && performance.now() - dragTimer > 100) {
+          dragTimer = performance.now();
+          const s0 = start;
+          opts.onDrag(answer(t, Math.min(s0.x, q.x) / q.w, Math.max(s0.x, q.x) / q.w, Math.min(s0.y, q.y) / q.h, Math.max(s0.y, q.y) / q.h));
+        }
+      });
+      cover.addEventListener("pointerup", (e) => {
+        if (!start) return;
+        const q = at(e), s0 = start; start = null;
+        const u0 = Math.min(s0.x, q.x) / q.w, u1 = Math.max(s0.x, q.x) / q.w, v0 = Math.min(s0.y, q.y) / q.h, v1 = Math.max(s0.y, q.y) / q.h;
+        if (u1 - u0 < 0.005 || v1 - v0 < 0.005) { box.style.display = "none"; opts.onDrag?.(null); return; }   // a click, not a rectangle
+        finish(answer(t, u0, u1, v0, v1));
+      });
+      t.el.append(cover); covers.push(cover);
+    }
+    if (!targets.length) finish(null);
+  });
+  Object.assign(globalThis, { __viewBanner: viewBanner, __pickRectangle: pickRectangle });
   Object.assign(globalThis, {
     __peers: peers, __modules: () => [...moduleRegistry.modules.values()],
     // local (not node) slice-plane offsets per cell — the truth of a native jump/scroll (a peer-owned view
@@ -4461,7 +4915,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
      * the LUT the volume is actually using is put back from the manager at the end.
      */
     /** What the 3D field of a volume is lit with right now -- for checking that a lighting change arrived. */
-    __vrFieldShade: (imageId: string) => { const f = vol3d.get(imageId)?.field as unknown as { shade?: number[] } | undefined; return f?.shade ?? null; },
+    __vrFieldShade: (imageId: string) => { const f = (vol3d.get(imageId)?.field ?? vrDM.fieldFor(imageId)) as unknown as { shade?: number[] } | undefined; return f?.shade ?? null; },
     /**
      * A PICTURE OF THE 3D VIEW AS A FILE, at any size, with the camera as it is on screen. Rendered
      * off screen by SceneRenderer.renderToRGBA (the same frame the view draws, without the chrome),
@@ -4476,10 +4930,31 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     /** The 3D view as a converged PNG data URL, nothing written anywhere -- for the test browser and the
      *  critic, which must not put files into the person's Downloads. */
     __picture3d: async (w = 800, h = 600) => (await render3dTo(w, h))?.toDataURL("image/png") ?? null,
+    /** The 3D view's renderer, for measuring on the card (SceneRenderer.timePass) from a test or a diagnosis. */
+    __scene3d: () => scene,
+    /** ONE FRAME, NO JITTER, at w x h with the view's camera, as RGBA bytes: the same scene gives the same bytes, so a change
+     *  to the renderer that must not change the picture can be checked byte for byte (2026-10-16, the solid look's speed). */
+    __picture3dExact: async (w: number, h: number): Promise<Uint8Array | null> => {
+      const sc = scene; if (!sc || nothingIn3D) return null;
+      sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h, camera.parallelProjection ? camera.parallelScale : undefined);
+      sc.resetNoise();
+      const rgba = await sc.renderToRGBA(w, h);
+      sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, three.canvas.width, three.canvas.height, camera.parallelProjection ? camera.parallelScale : undefined);
+      return rgba;
+    },
+    /** The 3D picture's parts timed alone at w x h with the view's camera (SceneRenderer.timeParts). */
+    __time3d: async (w: number, h: number, iters = 15) => {
+      const sc = scene; if (!sc || nothingIn3D) return null;
+      sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h, camera.parallelProjection ? camera.parallelScale : undefined);
+      const r = await sc.timeParts(w, h, iters);
+      sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, three.canvas.width, three.canvas.height, camera.parallelProjection ? camera.parallelScale : undefined);
+      return r;
+    },
     __savePicture: (nameOrOpts: string | Partial<typeof pictureOpts> & { name?: string; width?: number; height?: number } = {}, width?: number, height?: number) =>
       typeof nameOrOpts === "string" ? savePicture({ name: nameOrOpts, only3d: true, width: width ?? 1600, height: height ?? width ?? 1600 }) : savePicture(nameOrOpts),
     __renderVrPresetThumbnails: (imageId: string): VrPresetItem[] => {
-      const v = vol3d.get(imageId);
+      // A frame of a series that plays is drawn through its series' field: its own field, from the manager.
+      const v = vol3d.get(imageId) ?? (vrDM.fieldFor(imageId) ? { field: vrDM.fieldFor(imageId)! } : undefined);
       // TWO FIELD CLASSES DRAW A VOLUME. A plain volume is an ImageField with setLUT; a volume being
       // colorized by its segmentation is a ColorizeField with setCtLUT for the CT half of it. The
       // first version knew only the first, so with Colorize on -- Ron's normal case -- it found no
@@ -4515,13 +4990,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       }
       return items;
     },
-    // The extracted surfaces, for the DICOM Surface Segmentation save. Null unless the segmentation was
-    // given surface models in Generate Surface Models (the firewall), and until they are built.
-    __segmentationSurfaces: (id: string) => segDM.surfacesOf(id),
-    // THE ONLY WAY IN to surface models (Generate Surface Models; the firewall in livescene.ts).
-    __generateSurfaces: (id: string) => segDM.generateSurfaces(id, live),
-    __removeSurfaces: (id: string) => segDM.removeSurfaces(id, live),
-    __surfaceState: (id: string) => segDM.surfaceState(id, live),
+    // A SEGMENTATION'S LABELS, read back from the card, for the surface export (render/surface-export.ts; Ron,
+    // 2026-10-21, option B: surface models are made on demand when saving, and nothing is kept). The caller owns them.
+    __segmentationLabels: (id: string, opts?: { pad?: boolean }) => segDM.readLabelmap(id, opts),
     // WHICH SURFACES ARE DRAWN, per segmentation: the memory report counts what is HELD, and a held
     // surface of a colored segmentation is not drawn (Ron, 2026-09-23: "Please double check that they
     // are not present").
@@ -4543,27 +5014,28 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const g = globalThis as unknown as { __memoryReport?: () => { rows: { what: string; mb: number }[]; totalMB: number } };
       const r = g.__memoryReport?.();
       if (!r) return "";
-      // Surfaces are the one thing legitimately held: they ARE the drawing. Everything else over a
-      // hundred megabytes is a copy of something that is already on the GPU.
-      const held = r.rows.filter((x) => !/^surfaces of/.test(x.what) && !/the store\)$/.test(x.what) && !/the decode cache\)$/.test(x.what) && x.mb >= 100);
+      // Everything over a hundred megabytes is a copy of something that is already on the GPU, except the store's
+      // chunks and the decode cache, which are named below. (Surfaces were the third exception until 2026-10-21; the
+      // page no longer holds any: render/surface-export.ts makes them for a save and lets them go.)
+      // ON THE CARD IS NOT IN THE PAGE (critic 2026-10-16, general audit, finding 3: the colored fields' textures, rows
+      // marked "(GPU)", were called "a copy of data that is already on the GPU" -- 665 MB on the heart while the page's heap
+      // was 440 MB). They belong to the ledger line below; this line is the page's own memory.
+      const page = r.rows.filter((x) => !/\(GPU\)$/.test(x.what));
+      const pageMB = page.reduce((n, x) => n + x.mb, 0);
+      const held = page.filter((x) => !/the store\)$/.test(x.what) && !/the decode cache\)$/.test(x.what) && x.mb >= 100);
       // AND IT SAYS WHAT THE REST IS. "all of it drawn" was read as an all-clear on a page that was
       // holding 867 MB of chunks and 445 MB of decoded segmentations the report could not see
       // (critic, 2026-09-22, finding 2). Now that it can see them, the line names them rather than
       // calling everything that is not a copy "drawn".
-      const part = (re: RegExp) => r.rows.filter((x) => re.test(x.what)).reduce((n, x) => n + x.mb, 0);
-      // HELD IS NOT DRAWN. This said "surfaces being drawn" for surfaces that were only held while the
-      // solid look drew the anatomy (Ron's load of 2026-09-24 02:28) -- the kind of claim Ron will not
-      // take on trust any more. What is drawn is counted from what the view composes.
-      const drawnSurf = [...meshGroups.entries()].filter(([k]) => k.startsWith("seg:"))
-        .reduce((n, [, l]) => n + l.filter((m) => (m as { visible?: boolean }).visible !== false).length, 0);
+      const part = (re: RegExp) => page.filter((x) => re.test(x.what)).reduce((n, x) => n + x.mb, 0);
       const where = [
-        [part(/^surfaces of/), `surface models held (${drawnSurf} structures of them drawn)`],
         [part(/the store\)$/), "chunks in the store"],
-        [part(/the decode cache\)$/), "segmentations kept decoded"],
+        // The decoded segmentations ARE a page copy of labels on the card, kept so a second load is free; bounded, and said so.
+        [part(/the decode cache\)$/), "segmentations kept decoded (a copy of labels on the card, at most 512 MB)"],
       ].filter(([mb]) => (mb as number) > 0).map(([mb, what]) => `${mb} MB ${what}`).join(", ");
       const line = held.length
-        ? `memory check: holding ${r.totalMB} MB (${where}), and ${held.reduce((n, x) => n + x.mb, 0)} MB of it is a copy of data that is already on the GPU — ${held.map((x) => `${x.what} (${x.mb} MB)`).join("; ")}`
-        : `memory check: holding ${r.totalMB} MB: ${where || "nothing"}, and no copy of anything that is already on the GPU`;
+        ? `memory check: the page holds ${pageMB} MB (${where}), and ${held.reduce((n, x) => n + x.mb, 0)} MB of it is a copy of data that is already on the GPU — ${held.map((x) => `${x.what} (${x.mb} MB)`).join("; ")}`
+        : `memory check: the page holds ${pageMB} MB: ${where || "nothing"}, and no other copy of anything that is already on the GPU`;
       void fetch("/_log", { method: "POST", body: line, keepalive: true }).catch(() => {});
       // AND WHAT IS ON THE GRAPHICS CARD, which the line above cannot see (render/gpu-ledger.ts): on
       // 2026-09-23 the page's process held 12 GB, 10 GB of it graphics, while this check said 1.3 GB.
@@ -4573,7 +5045,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     },
     __memoryReport: () => {
       const blobs = (globalThis as unknown as { __blobStoreBytes?: () => number }).__blobStoreBytes?.() ?? 0;
-      const rows = [...segDM.memoryReport(), ...vrDM.memoryReport(), ...volDM.memoryReport(), ...decodedCacheReport(),
+      const rows = [...vrDM.memoryReport(), ...volDM.memoryReport(), ...decodedCacheReport(),
         // THE BLOB STORE, which holds every volume and labelmap of the session as compressed chunks.
         // It was missing, and it was the largest holder on the page the report called "438 MB, all
         // of it drawn" (critic, 2026-09-22). The chunks ARE the data the application draws from, so
@@ -4586,13 +5058,6 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const total = rows.reduce((n, r) => n + r.mb, 0);
       return { rows: rows.sort((a, b) => b.mb - a.mb), totalMB: total, jsHeapMB: heap ? Math.round(heap.usedJSHeapSize / 1048576) : undefined };
     },
-    // Ask for the surfaces regardless of what the 3D view is showing -- ONLY for a segmentation given
-    // surface models (segDM.ensureSurfaces refuses the rest: the firewall, 2026-09-24).
-    // THE LIVE SCENE, not the renderer: in this file `scene` is the SceneRenderer, and passing it here
-    // was silent until the firewall read the segmentation's node from it -- then every segmentation
-    // load from the DICOM browser failed with "undefined is not an object (evaluating
-    // 'scene.nodes.get')" (Ron, 2026-09-24 03:10).
-    __ensureSurfaces: (id: string) => segDM.ensureSurfaces(id, live),
     // The data probe, for the readout box in the sidebar (and for tests to assert against).
     __onProbe: (fn: (p: ProbeReading | null) => void) => { probeListeners.add(fn); fn(probe); return () => { probeListeners.delete(fn); }; },
     __probe: () => probe,

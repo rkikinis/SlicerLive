@@ -75,7 +75,18 @@ export interface Field {
   bindEntries(slot: number, base: number): GPUBindGroupEntry[];
   aabb(): [Vec3, Vec3];
   sampleStep(): number;                  // preferred ray-march step (mm); scene uses the min
+  /** The finest voxel of the field's own grid, in the scene's units, when it has a grid (a volume, a segmentation).
+   *  What the renderer sizes scale-dependent looks by (scene-scale.ts; Ron, 2026-10-20: "from astrophysics to electron
+   *  microscope"). Glyphs, widgets and procedural fields have none and leave it out. */
+  voxel?(): number | undefined;
 }
+
+/**
+ * A SEGMENT'S MARCH STEP: half its voxel, at every scale (slicer_wgpu's SegmentField.sample_step_mm). Its floor of
+ * 0.1 mm is gone: it bound only on grids finer than 0.2 mm, so it never touched a clinical scan, and on an electron
+ * microscope's 1 nm voxels it was a step of 100,000 voxels -- the segment vanished from 3D.
+ */
+export function segmentSampleStep(voxel: number): number { return 0.5 * voxel; }
 
 export interface ImageFieldOpts {
   clim: [number, number];
@@ -116,7 +127,7 @@ export const COLOR_MAP_REFUSAL = "is a color map (made from its scan, and made a
 /** Pack 0..255 red, green, blue into one sample (see ImageFieldOpts.rgb24). */
 export function packRGB24(r: number, g: number, b: number): number { return (r & 255) + 256 * (g & 255) + 65536 * (b & 255); }
 
-function uploadRGB24Texture(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
+function uploadRGB24Texture(dev: GPUDevice, data: VolumeSamples, dims: Vec3): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
   const n = dims[0] * dims[1] * dims[2], px = new Uint8Array(n * 4);
   for (let i = 0; i < n; i++) { const v = data[i] | 0; px[4 * i] = v & 255; px[4 * i + 1] = (v >> 8) & 255; px[4 * i + 2] = (v >> 16) & 255; px[4 * i + 3] = 255; }
   const tex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });
@@ -124,6 +135,10 @@ function uploadRGB24Texture(dev: GPUDevice, data: Float32Array | Uint8Array | Ui
   for (let z = 0; z < dims[2]; z++) dev.queue.writeTexture({ texture: tex, origin: [0, 0, z] }, px.subarray(z * slice, (z + 1) * slice), { bytesPerRow: dims[0] * 4, rowsPerImage: dims[1] }, [dims[0], dims[1], 1]);
   return { tex, format: "rgba8unorm", normScale: 1 };
 }
+
+/** A volume's samples as stored (render-audit 2026-10-15, finding 1: a 16-bit CT used to be widened to a 1.7 GB 32-bit
+ *  copy only to be narrowed again to 16-bit half floats for the card; now it goes as stored and is converted slab by slab). */
+export type VolumeSamples = Float32Array | Float64Array | Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array;
 
 /** A volume texture shared between fields, reference-counted; see ImageFieldOpts.textureKey. */
 interface SharedVolumeTexture { tex: GPUTexture; format: GPUTextureFormat; normScale: number; refs: number }
@@ -139,11 +154,14 @@ const F16 = (globalThis as unknown as { Float16Array?: { from(a: ArrayLike<numbe
  * for r8unorm (its samples return v/255). uint16 has no filterable core format (r16uint is not
  * linearly sampled), so it promotes to f32 -- or to f16 when asked.
  */
-function uploadVolumeTexture(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, halfFloat: boolean): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
+function uploadVolumeTexture(dev: GPUDevice, data: VolumeSamples, dims: Vec3, halfFloat: boolean): { tex: GPUTexture; format: GPUTextureFormat; normScale: number } {
   let src: ArrayBufferView = data, fmt: GPUTextureFormat = "r32float", bpe = 4, normScale = 1;
+  // CONVERTED SLAB BY SLAB, never whole (render-audit 2026-10-15, finding 1: the whole-volume half-float copy was 836 MB
+  // of the 4 GB load peak): `convert` makes one slab's samples in the texture's format; null keeps them as they are.
+  let convert: ((a: VolumeSamples) => ArrayBufferView) | null = null;
   if (data instanceof Uint8Array) { fmt = "r8unorm"; bpe = 1; normScale = 255; }
-  else if (halfFloat && F16) { src = F16.from(data); fmt = "r16float"; bpe = 2; }
-  else if (data instanceof Uint16Array) { src = Float32Array.from(data); }
+  else if (halfFloat && F16) { fmt = "r16float"; bpe = 2; convert = (a) => F16.from(a); }
+  else if (!(data instanceof Float32Array)) convert = (a) => Float32Array.from(a);
   // COPY_SRC so the data probe can read ONE texel back. Ron: "The probe should show all gray scale
   // values ... at the probe location." A CPU copy of the volume for that question would be the
   // whole volume again; copyTextureToBuffer of a 1x1x1 region is a padded row. Nothing else about
@@ -159,6 +177,14 @@ function uploadVolumeTexture(dev: GPUDevice, data: Float32Array | Uint8Array | U
   // EACH SLAB FROM ITS OWN SMALL BUFFER, at offset 0 (Steve's 8c42972, authored 2026-08-22): wgpu mishandles
   // data offsets past ~2 GB (32-bit overflow), so a volume over 2 GB uploaded with a running offset came out
   // mostly empty. Below 2 GB the running offset is kept -- no copy, no extra time.
+  if (convert) {
+    const perSlice = dims[0] * dims[1];
+    for (let z = 0; z < dims[2]; z += slab) {
+      const depth = Math.min(slab, dims[2] - z);
+      dev.queue.writeTexture({ texture: tex, origin: { x: 0, y: 0, z } }, convert(data.subarray(z * perSlice, (z + depth) * perSlice) as VolumeSamples), { offset: 0, bytesPerRow, rowsPerImage }, [dims[0], dims[1], depth]);
+    }
+    return { tex, format: fmt, normScale };
+  }
   const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
   const big = u8.byteLength > 2 ** 31 - 1;
   for (let z = 0; z < dims[2]; z += slab) {
@@ -196,7 +222,7 @@ export class ImageField implements Field {
   private dims: Vec3;
   /** A color volume (ImageFieldOpts.rgb24): the slice views draw its samples as color, not through window/level. */
   readonly rgb: boolean;
-  constructor(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
+  constructor(dev: GPUDevice, data: VolumeSamples, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
     this.dims = dims;
     this.rgb = !!opts.rgb24;
     const center = opts.center ?? [0, 0, 0];
@@ -247,6 +273,7 @@ export class ImageField implements Field {
   uniformFloats() { return 28; }        // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  voxel(): number { return this.stepMm; }
   /** The 3D scalar texture (e.g. to share with a SliceRenderer for MPR); `textureFormat()` says which. */
   volumeTexture(): GPUTexture { return this.volTex; }
   /** Give the textures back. A field is not reusable after this; the caller drops it. A shared
@@ -323,7 +350,9 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let lo = u_material.img${s}_clim.x; let hi = u_material.img${s}_clim.y;
   let tf = textureSampleLevel(t_lut_img${s}, s_lin, vec2<f32>(clamp((val - lo) / max(hi - lo, 1e-6), 0.0, 1.0), 0.5), 0.0);
   let step = u_material.scene.x;
-  let unit = max(u_material.img${s}_params.x, 1e-3);
+  // The opacity unit's floor guards a zero only, so it is a thousandth of the step, not a length: 1e-3 mm was a unit of
+  // a thousand voxels on an electron microscope's grid (scene-scale.ts).
+  let unit = max(u_material.img${s}_params.x, 1e-3 * step);
   let opacity = clamp(1.0 - pow(1.0 - clamp(tf.a, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
   let h = step * 2.0;   // wider central difference -> smoother normals (less shading aliasing on coarse volumes)
@@ -433,8 +462,7 @@ export class SegmentField implements Field {
     this.shade = opts.shade ?? [0.20, 0.85, 0.30, 32];
     // iso-shell band: 1 voxel-worth of thickness (slicer_wgpu SegmentField.band_mm = min spacing)
     this.bandMm = opts.bandMm ?? voxelMm;
-    // slicer_wgpu SegmentField.sample_step_mm = max(0.5*voxel, 0.1)
-    this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
+    this.stepMm = opts.sampleStepMm ?? segmentSampleStep(voxelMm);
     this.clippable = opts.clippable ?? true;
     this.voxelMm = voxelMm;
     this.mode = opts.mode ?? "iso";
@@ -452,6 +480,7 @@ export class SegmentField implements Field {
   uniformFloats() { return 36; }        // mat4(16) + color(4) + shade(4) + params(4) + bmin(4) + bmax(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  voxel(): number { return this.voxelMm; }
   setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
 
   /** Empty-space skip for "sdf" mode: the texture .a is a TRUE distance-to-surface (mm), so the ray can
@@ -502,12 +531,13 @@ fn skip_seg${s}(wp : vec3<f32>) -> f32 {
 fn v_seg${s}(wp : vec3<f32>) -> f32 {   // signed distance (mm)
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
-  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1e3; }   // far outside → culled
+  // Far outside -> culled: a million voxels away, not 1000 mm, which at a parsec's voxels lay inside the shell's band.
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1e6 * u_material.seg${s}_params.y; }
   return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;
 }
 fn vgrad_seg${s}(wp : vec3<f32>) -> f32 {   // signed distance for the NORMAL finite-difference
   // A gradient tap that steps just outside the (padded) SDF texture must read BACKGROUND, not the
-  // out-of-volume cull sentinel (1e3) — a huge sentinel would fabricate an enormous fake gradient that
+  // out-of-volume cull sentinel (a million voxels) — a huge sentinel would fabricate an enormous fake gradient that
   // points out through the volume face and unlights the surface (black speckle at the seg/boundary
   // interface). Clamp to the texture edge: with the padded grid that edge IS background, so the normal
   // near a cap stays correct. This is the "artificial background boundary sample" for the normal.
@@ -606,8 +636,10 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
   let sdf = v_seg${s}(wp);
-  let band = max(u_material.seg${s}_params.x, 1e-3);
-  let step = max(u_material.scene.x, 1e-3);
+  // Zero guards only, relative: a thousandth of the field's voxel and the scene's step (scene_step), never 1e-3 mm,
+  // which was a shell a thousand voxels thick on an electron microscope's grid.
+  let band = max(u_material.seg${s}_params.x, 1e-3 * u_material.seg${s}_params.y);
+  let step = scene_step();
 ${this.attrTex ? `  let at = attr_seg${s}(wp);        // (opacity, shading mode)
   let seg_op = at.x;
   if (seg_op <= 0.0) { return vec4<f32>(0.0); }
@@ -641,14 +673,14 @@ ${this.attrTex ? `  let at = attr_seg${s}(wp);        // (opacity, shading mode)
     // correctly scaled by the actual step distance.
     const alphaWGSL = this.mode === "surface"
       ? /* wgsl */ `
-  let step = max(u_material.scene.x, 1e-3);
+  let step = scene_step();
   let op = clamp(op0 * glen * step, 0.0, 1.0);
   if (op <= 0.0) { return vec4<f32>(0.0); }`
       : /* wgsl */ `
   // Local first-order signed distance to the v=0.5 isosurface (mm), then a
   // 1-voxel opacity band around it: crisp opaque shell, sub-voxel anti-aliased.
   let d_mm = abs((v - 0.5) / glen);
-  let band = max(u_material.seg${s}_params.x, 1e-3);
+  let band = max(u_material.seg${s}_params.x, 1e-3 * u_material.seg${s}_params.y);   // a zero guard, relative
   let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
   let op = clamp(a * op0, 0.0, 1.0);`;
@@ -677,13 +709,16 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let v = v_seg${s}(wp);
   // Skip deep interior / exterior: |grad| ~ 0 there so no shell to emit.
   if (v <= 0.02 || v >= 0.98) { return vec4<f32>(0.0); }
-  let h = max(u_material.scene.x, 1e-3);
+  let h = scene_step();
   let g = vec3<f32>(
     v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
     v_seg${s}(wp + vec3<f32>(0,h,0)) - v_seg${s}(wp - vec3<f32>(0,h,0)),
     v_seg${s}(wp + vec3<f32>(0,0,h)) - v_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
   let glen = length(g);
-  if (glen < 1e-5) { return vec4<f32>(0.0); }${alphaWGSL}
+  // No gradient, no shell. The cut-off is per mm on grids of 0.25 to 5 mm, as it always was, and per voxel outside them
+  // (scene-scale.ts tuned(1 mm, voxel, 0.2, 4)): a parsec's grid, whose gradient per mm is 1e-19, is not taken for flat.
+  let vox = u_material.seg${s}_params.y;
+  if (glen * clamp(1.0, 0.2 * vox, 4.0 * vox) < 1e-5) { return vec4<f32>(0.0); }${alphaWGSL}
   // Phong from the same gradient, normal flipped to face the camera.
   var n = g / glen;
   if (dot(n, -rd) < 0.0) { n = -n; }
@@ -767,6 +802,7 @@ export class RGBAVolumeField implements Field {
   uniformFloats() { return 24; }        // mat4(16) + params(4) + shade(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  voxel(): number { return this.stepMm; }
   /** Swap the baked texture in place (e.g. after re-baking an updated mask). The
    *  geometry is unchanged; the caller refreshes the SceneRenderer bind group. */
   setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
@@ -796,7 +832,7 @@ fn sample_field_rgba${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
   let c = textureSampleLevel(t_rgba${s}, s_lin, tex, 0.0);
   let step = u_material.scene.x;
-  let unit = max(u_material.rgba${s}_params.x, 1e-3);
+  let unit = max(u_material.rgba${s}_params.x, 1e-3 * step);   // a zero guard, relative (see the image field's)
   let opacity = clamp(1.0 - pow(1.0 - clamp(c.a, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
   let h = step * 2.0;   // wider central difference -> smoother normals (less shading aliasing on coarse volumes)

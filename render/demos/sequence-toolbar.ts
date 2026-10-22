@@ -67,7 +67,11 @@ export function mountSequenceToolbar(shell: AppShell, opts: { live: LiveScene; p
   };
 
   const build = () => {
-    const browsers = sequenceBrowsers(live);
+    // A SEQUENCE CAN ASK NOT TO BE OFFERED (Ron, 2026-10-15, on a diffusion scan's 102 volumes in the top bar: "probably
+    // hide with the ability to bring it up under advanced"): `transport: "hidden"` on its browser. Core does not decide
+    // which series those are; the module that knows them sets it, and offers the way back.
+    const browsers = sequenceBrowsers(live).filter((b) => b.transport !== "hidden");
+    if (browsers.length && !browsers.some((b) => b.id === player.current)) player.current = browsers[0].id;
     const key = browsers.map((b) => b.id).join(",") + "|" + player.current;
     if (key === builtFor) { update(); return; }
     builtFor = key;
@@ -97,7 +101,7 @@ export function mountSequenceToolbar(shell: AppShell, opts: { live: LiveScene; p
       <input class="sl-transport-scrub" type="range" min="0" max="${Math.max(0, frames.length - 1)}" step="1" value="0" title="Which frame is shown; drag to scrub">
       <span class="sl-transport-label"></span>
       <span class="sl-transport-where"></span>
-      <input class="sl-transport-rate" type="range" min="1" max="30" step="1" value="10" title="Frames per second when playing">
+      <input class="sl-transport-rate" type="range" min="1" max="30" step="1" value="4" title="Frames per second when playing">
       <span class="sl-transport-fps"></span>
       <button class="sl-tool sl-transport-rt" title="${rtTitle}"${schedule ? "" : " disabled"}>real time</button>`;
     q<HTMLSelectElement>(".sl-transport-pick")?.addEventListener("change", (e) => { player.current = (e.target as HTMLSelectElement).value; });

@@ -210,3 +210,26 @@ Deno.test("degenerateAxis names an axis only when it is nearly along the view di
   assertEquals(degenerateAxis(I, d(11)), -1);
   assertEquals(FADE_DEG, 10);
 });
+
+// NO FIXED LENGTH (Ron, 2026-10-20: "did you forget about scales? from astrophysics to electron microscope"): the smallest
+// box is one voxel of the volume shown, at an electron microscope's 1 nm (1e-6 mm) and an astronomer's parsec
+// (3.086e19 mm) alike.
+for (const [what, voxel] of [["electron microscopy, 1 nm voxels", 1e-6], ["clinical CT, 0.7 mm voxels", 0.7], ["astrophysics, 1 parsec voxels", 3.086e19]] as const) {
+  Deno.test(`the smallest box is one voxel: ${what}`, () => {
+    const extent = 256 * voxel;
+    const w = createRoiWidget([0, 0, 0], [extent, extent, extent], { coverage: 0.5 });
+    w.setMinHalf(voxel / 2);
+    const box0 = w.snapshot();
+    const fx = w.handleList().find((h) => h.data.kind === "face" && h.data.axis === 0 && h.data.sign === 1)!;
+    w.applyDrag(fx.data, box0, [-10 * extent, 0, 0]);
+    const side = 2 * w.snapshot().half[0];
+    assert(Math.abs(side - voxel) <= voxel * 1e-6, `${what}: the smallest side is ${side}, not one voxel (${voxel})`);
+  });
+}
+Deno.test("without a voxel size the smallest box is a thousandth of the box it started as, not a length", () => {
+  const w = createRoiWidget([0, 0, 0], [1e-3, 1e-3, 1e-3], { coverage: 0.5 });   // a micrometer-sized volume
+  const box0 = w.snapshot();
+  const fx = w.handleList().find((h) => h.data.kind === "face" && h.data.axis === 0 && h.data.sign === 1)!;
+  w.applyDrag(fx.data, box0, [-1, 0, 0]);
+  assert(2 * w.snapshot().half[0] < 1e-5, `the box stopped at ${2 * w.snapshot().half[0]}`);
+});

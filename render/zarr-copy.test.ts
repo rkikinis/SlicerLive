@@ -15,7 +15,7 @@ const { handleDbRequest } = await import("../desktop/db-serve.ts");
 const { resolveSettingsPath, writeSettings } = await import("../desktop/settings-file.ts");
 const { writeDucknCopy } = await import("../desktop/duckn-copy.ts");
 const { auditDatabase, removeDucknCopy } = await import("../desktop/db-index.ts");
-const { loadSequenceFromCopy, setCopyWorkerFactory, copyMadeByOtherCode } = await import("./zarr-copy.ts");
+const { loadSequenceFromCopy, readCopyPieces, setCopyWorkerFactory, copyMadeByOtherCode } = await import("./zarr-copy.ts");
 
 const folder = await Deno.makeTempDir({ prefix: "slicerlive-folder-" });
 const gallery = `${folder}/src/live`;
@@ -50,6 +50,23 @@ const sameVolume = async (s: typeof A, got: Awaited<ReturnType<typeof loadSequen
 
 Deno.test({ name: "a series read from its copy is the volume the DICOM load makes", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   await sameVolume(A, await loadSequenceFromCopy(base, A.series.seriesInstanceUID));
+} });
+
+Deno.test({ name: "one volume's pieces alone: the same pieces, under the same names, as the whole read gives (the store's read-back)", sanitizeOps: false, sanitizeResources: false, fn: async () => {
+  const whole = await loadSequenceFromCopy(base, A.series.seriesInstanceUID);
+  assert(!("missing" in whole));
+  const want = whole.frames[0].prebuilt!.blobs;
+  const got = await readCopyPieces(base, A.series.seriesInstanceUID, { label: whole.labels[0] });
+  assert(!("missing" in got), `fell back: ${"missing" in got ? got.missing : ""}`);
+  assertEquals([...got.keys()].sort(), [...want.keys()].sort());
+  for (const [h, bytes] of got) assertEquals(bytes, want.get(h));
+  assertEquals([...(await readCopyPieces(base, A.series.seriesInstanceUID) as Map<string, Uint8Array>).keys()].sort(), [...want.keys()].sort());
+  const none = await readCopyPieces(base, A.series.seriesInstanceUID, { label: "no such frame" });
+  assert("missing" in none);
+  // By a piece's name: the volume that holds it, whatever its label (six diffusion volumes are all "b 0").
+  const anyHash = [...want.keys()][1];
+  assertEquals([...(await readCopyPieces(base, A.series.seriesInstanceUID, { hash: anyHash }) as Map<string, Uint8Array>).keys()].sort(), [...want.keys()].sort());
+  assert("missing" in await readCopyPieces(base, A.series.seriesInstanceUID, { hash: "sha256:none" }));
 } });
 
 Deno.test({ name: "two reads at once both finish, each with its own volume (finding 1)", sanitizeOps: false, sanitizeResources: false, fn: async () => {

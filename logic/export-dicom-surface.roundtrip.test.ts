@@ -168,9 +168,10 @@ Deno.test("a surface whose name matches no segment is dropped, not guessed at", 
 
 // ── AND THE DECISIONS THE LOAD PATH MAKES with what it finds ──
 //
-// `meshesFromStoredSeries` is what the application calls when a segmentation is first shown in 3D:
-// it is handed whatever series a provenance edge pointed at and decides whether those really are
-// this segmentation's surfaces. Every rejection below is a way to draw the WRONG geometry, which is
+// `meshesFromStoredSeries` is what the application called when a segmentation was first shown in 3D
+// (until 2026-10-21, when surface models stopped being drawn; the reader stays for DICOM parity): it is
+// handed whatever series a provenance edge pointed at and decides whether those really are this
+// segmentation's surfaces. Every rejection below is a way to draw the WRONG geometry, which is
 // worse than the 15 s of extraction that rejecting it costs.
 const SEGMENTS = [{ labelValue: 1, name: "Left thing" }, { labelValue: 2, name: "Right thing" }];
 

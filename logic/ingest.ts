@@ -6,7 +6,7 @@
 // dropped on the page renders through exactly the same code path as a volume streamed from Slicer, and a
 // session can cache the chunks like any other blob. Pure TS (no DOM); the panel is render/demos/load-panel.ts.
 import type { ZarrDesc } from "../render/zarr.ts";
-import { cacheDecodedVolume, rememberRange } from "../render/zarr.ts";
+import { cacheDecodedVolume, cacheDecodedVolumeNative, rememberRange, type ZarrVolumeNative } from "../render/zarr.ts";
 import { getBlobFetch, setBlobFetch, setLocalChunk } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
 import type { LiveScene } from "../render/livescene.ts";
@@ -230,8 +230,8 @@ export class LocalBlobStore {
    * two copies of the same voxels, in a window whose ceiling is about 4 GB (2026-09-22).
    *
    * Anything that wants the voxels again — the colorized volume, statistics, a crop, an edit, a
-   * re-save — gets them through `onMiss` below, which reads the series from the DICOM database
-   * again: 2.1 s measured, against 864 MB held all session.
+   * re-save — gets them through `onMiss` below: since 2026-10-15 that volume's own pieces from its
+   * duckn working copy (0.6-0.8 s for C3N-01524's CT), the DICOM files only as the fallback.
    */
   release(hashes: Iterable<string>): number {
     let freed = 0;
@@ -322,18 +322,21 @@ export async function volumeNodes(vol: Volume, opts: { name?: string; labelmap?:
   // sequence this made a 559 MB float copy each that was dropped at once (critic, 2026-09-19,
   // finding 4). Their range is remembered instead, which is all a frame needs when its texture
   // is built later from the stored chunks.
+  // AS STORED, NOT WIDENED (render-audit 2026-10-15, finding 1): the views take a volume's samples in its own dtype and
+  // convert slab by slab for the card (render/fields.ts), so the 32-bit copy made here -- 1.7 GB for a whole-body CT, the
+  // largest part of a 4 GB load peak -- is gone; the array in hand is cached as it is, and its range remembered.
+  rememberRange(desc, [wl.range[0], wl.range[1]]);
   if (opts.place !== false) {
-    timedSync("volume · ingest: floating-point copy for the decode cache", () => cacheDecodedVolume(desc, {
-      data: vol.data instanceof Float32Array ? vol.data : Float32Array.from(vol.data),
-      dims: vol.dims,
-      range: [wl.range[0], wl.range[1]],
-    }));
-  } else rememberRange(desc, [wl.range[0], wl.range[1]]);
+    if (vol.data instanceof Float32Array) cacheDecodedVolume(desc, { data: vol.data, dims: vol.dims, range: [wl.range[0], wl.range[1]] });
+    else cacheDecodedVolumeNative(desc, { data: vol.data, dtype: vol.dtype, dims: vol.dims, range: [wl.range[0], wl.range[1]] } as ZarrVolumeNative);
+  }
   const name = opts.name ?? vol.name ?? "Volume";
   const image: MrsonNode = {
     type: "image", id: imageId, name, frame: "RAS", dims: vol.dims, comps: 1, ijkToRAS: vol.ijkToRAS, zarr: desc,
     labelmap: !!opts.labelmap, refs: { display: [displayId] }, source: { mrmlClass: opts.labelmap ? "vtkMRMLLabelMapVolumeNode" : "vtkMRMLScalarVolumeNode" },
-    origin: { local: true, dtype: vol.dtype, ...(vol.meta ?? {}) },
+    // `fromCopy`: its pieces came from a current duckn working copy, so they can be given back and fetched again in about a
+    // second (render/demos/slicer-app.ts trimStore); a volume read any other way keeps them.
+    origin: { local: true, dtype: vol.dtype, ...(vol.meta ?? {}), ...(pre ? { fromCopy: true } : {}) },
   };
   const display: MrsonNode = opts.labelmap
     ? { type: "labelMapDisplay", id: displayId, name: `${name} display`, frame: "RAS", visible: true, interpolate: false, refs: {}, source: { mrmlClass: "vtkMRMLLabelMapVolumeDisplayNode" }, origin: { local: true } }

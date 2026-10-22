@@ -4,7 +4,7 @@
 // right, which is why the absence of the record was easy to miss.
 //
 //   deno test -A --no-check logic/readers/geometry-source.test.ts
-import { assertEquals } from "jsr:@std/assert@1";
+import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
 import { parseNifti } from "./nifti.ts";
 import { makeNifti } from "./synthetic.ts";
 import { reconstructSeries } from "./dicom-series.ts";
@@ -78,6 +78,57 @@ Deno.test("nifti: xyzt_units gives the spatial and temporal units", async () => 
   assertEquals(both.geometry?.timeUnit, "ms");
   // A file that says nothing says nothing — not "mm".
   assertEquals((await parseNifti(withUnits(base, 0))).geometry?.spaceUnit, undefined);
+});
+
+// THE UNIT IS HONORED, not only recorded (Ron, 2026-10-20: "did you forget about scales? from astrophysics to electron
+// microscope"): the scene is in mm, so a file in micrometers or meters is converted -- spacing and position alike.
+Deno.test("nifti: a file in micrometers or meters lands in the scene's mm", async () => {
+  const base = makeNifti({ sform: [0.5, 0, 0, 10, 0, 0.5, 0, -20, 0, 0, 2, 30] });
+  const um = await parseNifti(withUnits(base, 3));                 // NIFTI_UNITS_MICRON
+  assertEquals(um.geometry?.spaceUnit, "um", "the file's own unit stays on the record");
+  [5e-4, 0, 0, 0.01, 0, 5e-4, 0, -0.02, 0, 0, 2e-3, 0.03].forEach((x, i) => assertAlmostEquals(um.ijkToRAS[i], x, 1e-12));
+  const m = await parseNifti(withUnits(base, 1));                  // NIFTI_UNITS_METER
+  [500, 0, 0, 1e4, 0, 500, 0, -2e4, 0, 0, 2000, 3e4].forEach((x, i) => assertAlmostEquals(m.ijkToRAS[i], x, 1e-6));
+  // mm, and a file that says nothing (taken as mm), are as they were.
+  for (const u of [2, 0]) assertEquals((await parseNifti(withUnits(base, u))).ijkToRAS.slice(0, 4), [0.5, 0, 0, 10]);
+  // The qform, and the pixdim-only map, are scaled the same way.
+  const q = await parseNifti(withUnits(makeNifti({ qform: { b: 0, c: 0, d: 0, qfac: 1, off: [1, 2, 3] }, pixdim: [1, 4, 4, 4] }), 3));
+  [4e-3, 0, 0, 1e-3].forEach((x, i) => assertAlmostEquals(q.ijkToRAS[i], x, 1e-12));
+  const p = await parseNifti(withUnits(makeNifti({ pixdim: [1, 4, 4, 4] }), 1));
+  assertEquals(p.ijkToRAS[0], 4000);
+});
+
+for (const [what, v, unit, code, inUnit] of [
+  ["1 nm", 1e-6, "um", 3, 1e-3], ["0.7 mm", 0.7, "mm", 2, 0.7], ["1 parsec", 3.086e19, "m", 1, 3.086e16],
+] as const) {
+  Deno.test(`nifti: ${what} voxels written in ${unit} read as ${v} mm`, async () => {
+    const vol = await parseNifti(withUnits(makeNifti({ sform: [inUnit, 0, 0, 0, 0, inUnit, 0, 0, 0, 0, inUnit, 0] }), code));
+    assert(Math.abs(vol.ijkToRAS[0] - v) <= v * 1e-6, `${vol.ijkToRAS[0]} mm`);
+  });
+}
+
+// "Absent means unknown": a spacing of 0 is read as 1 (the reference library's rule) and SAID to be a guess.
+Deno.test("nifti: a spacing the file left at 0 is read as 1 and recorded as not declared", async () => {
+  const p = await parseNifti(makeNifti({ pixdim: [1, 0, 1.5, 3] }));
+  assertEquals(p.ijkToRAS[0], 1);
+  assertEquals(p.ijkToRAS[5], 1.5);
+  assertEquals(p.geometry?.spacingNotDeclared, [0]);
+  const q = await parseNifti(makeNifti({ qform: { b: 0, c: 0, d: 0, qfac: 1, off: [0, 0, 0] }, pixdim: [1, 0.5, 0.5, 0] }));
+  assertEquals(q.ijkToRAS[10], 1, "not a flat axis");
+  assertEquals(q.geometry?.origin, "assumed");
+  assertEquals(q.geometry?.spacingNotDeclared, [2]);
+  // Declared: nothing on the record.
+  assertEquals((await parseNifti(makeNifti({ pixdim: [1, 1.5, 1.5, 3] }))).geometry?.spacingNotDeclared, undefined);
+  assertEquals((await parseNifti(makeNifti({ qform: { b: 0, c: 0, d: 0, qfac: 1, off: [0, 0, 0] }, pixdim: [1, 2, 2, 2] }))).geometry?.origin, "acquired");
+});
+
+// The sform/qform agreement holds at any scale: within a share of a voxel, not a fixed 1e-4 mm.
+Deno.test("nifti: sform and qform agree on a micrometer grid, and disagree by a voxel", async () => {
+  const s = 1e-5;                                                   // 10 nm voxels, written in mm
+  const same = await parseNifti(makeNifti({ sform: [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0], qform: { b: 0, c: 0, d: 0, qfac: 1, off: [0, 0, 0] }, pixdim: [1, s, s, s] }));
+  assertEquals(same.geometry?.qformAgreesWithSform, true);
+  const off = await parseNifti(makeNifti({ sform: [s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0], qform: { b: 0, c: 0, d: 0, qfac: 1, off: [s, 0, 0] }, pixdim: [1, s, s, s] }));
+  assertEquals(off.geometry?.qformAgreesWithSform, false, "a whole voxel apart");
 });
 
 // --- DICOM: through-plane spacing is derived, not stated -----------------------------------------

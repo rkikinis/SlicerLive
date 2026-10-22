@@ -419,6 +419,12 @@ export async function volumeToDicomSeries(
   for (const k of ["PatientName", "PatientID", "PatientBirthDate", "PatientSex", "StudyDate", "StudyTime", "ReferringPhysicianName", "StudyID", "AccessionNumber", "PositionReferenceIndicator", "Manufacturer", "AcquisitionNumber"]) {
     if (!(k in base)) base[k] = "";
   }
+  // WHAT THE KIND OF IMAGE REQUIRES, present and empty when nothing says it (dciodvfy on CTHead.nrrd written as a CT,
+  // 2026-10-21): Laterality (General Series, Type 2C), PatientPosition (Type 2C for CT and MR) and, for a CT, the kVp
+  // (CT Image, Type 2). A file does not say them; empty is the standard's "unknown".
+  for (const k of ["Laterality", ...(modality === "CT" || modality === "MR" ? ["PatientPosition"] : []), ...(modality === "CT" ? ["KVP"] : [])]) {
+    if (!(k in base)) base[k] = "";
+  }
   // The Clinical Trial Subject module, when the source carries one (a public dataset's attribution): its Type 2 too.
   if (base.ClinicalTrialSponsorName !== undefined || base.ClinicalTrialProtocolID !== undefined) {
     for (const k of ["ClinicalTrialProtocolName", "ClinicalTrialSiteID", "ClinicalTrialSiteName"]) if (!(k in base)) base[k] = "";
@@ -448,7 +454,8 @@ export async function volumeToDicomSeries(
     // kind of quiet untruth that makes an archive untrustworthy. The source's values from the third on stay: the CT
     // Image module requires value 3 (AXIAL or LOCALIZER), and a crop of an axial image is still axial (dciodvfy on a
     // public TCGA-UCEC crop, 2026-09-28: "A value is required for value 3 in CT Images").
-    ImageType: ["DERIVED", "SECONDARY", ...imageTypeFrom3(template.ImageType)],
+    // A CT with no source to say it (a file's volume) is AXIAL: its slices are cross sections, not a localizer.
+    ImageType: ["DERIVED", "SECONDARY", ...(imageTypeFrom3(template.ImageType).length || modality !== "CT" ? imageTypeFrom3(template.ImageType) : ["AXIAL"])],
     Rows: ny,
     Columns: nx,
     BitsAllocated: 16,

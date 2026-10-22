@@ -2,6 +2,7 @@
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
 import { fitFovToVolume, offsetRangeResolution, reformatSliceToRAS } from "./slice-logic.ts";
 import { fixture } from "../harness/fixtures.ts";
+import { SCALES } from "../render/scale-fixtures.ts";
 
 interface Startup { volume: { dims: number[]; ijkToRAS: number[]; rasLo: number[]; rasHi: number[] }; slices: Record<string, { fieldOfView: number[]; dimensions: number[] }> }
 const ORIENT: Record<string, "axial" | "coronal" | "sagittal"> = { axial: "axial", coronal: "coronal", sagittal: "sagittal" };
@@ -56,3 +57,15 @@ Deno.test("reformatSliceToRAS: canonical planes with the current centre", () => 
   assertEquals(normal(reformatSliceToRAS("sagittal", c)), [1, 0, 0]);
   assertEquals(normal(reformatSliceToRAS("coronal", c)), [0, 1, 0]);
 });
+
+// At three scales (1 nm, 0.7 mm, 1 parsec voxels): the step is the grid's own; only a grid with no usable spacing
+// borrows one from the box (a 256th of it), never a fixed 1 mm.
+for (const [what, v] of SCALES) {
+  Deno.test(`offsetRangeResolution steps the grid's own spacing: ${what}`, () => {
+    const lo: [number, number, number] = [0, 0, 0], hi: [number, number, number] = [100 * v, 100 * v, 50 * v];
+    const grid = [v, 0, 0, 0, 0, v, 0, 0, 0, 0, 2 * v, 0, 0, 0, 0, 1];
+    assertAlmostEquals(offsetRangeResolution("axial", grid, lo, hi).step, 2 * v, v * 1e-12);
+    // no grid at all (it was 1 mm: a million voxels at 1 nm, nothing at 1 parsec)
+    assertAlmostEquals(offsetRangeResolution("axial", [], lo, hi).step, 150 * v / 256, v * 1e-12);
+  });
+}

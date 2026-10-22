@@ -130,6 +130,13 @@ export function spaceFlip(space: string): [number, number, number] | null | unde
   return SPACES[space.trim().toLowerCase()]?.flip;
 }
 
+/** A NRRD `space units` name in millimeters (the scene's unit). Names as files write them. */
+const NRRD_UNIT_TO_MM: Record<string, number> = {
+  "": 1, mm: 1, millimeter: 1, millimeters: 1, m: 1000, meter: 1000, meters: 1000, cm: 10, centimeter: 10,
+  um: 1e-3, "µm": 1e-3, "μm": 1e-3, micron: 1e-3, microns: 1e-3, micrometer: 1e-3, micrometers: 1e-3, nm: 1e-6, nanometer: 1e-6,
+  km: 1e6, au: 1.495978707e14, pc: 3.0856775814913673e19, parsec: 3.0856775814913673e19, kpc: 3.0856775814913673e22,
+};
+
 /**
  * ijk→world from `space directions`, `space origin`, `space` and `space units`.
  *
@@ -152,15 +159,19 @@ export function geometry(f: Record<string, string>): Pick<Nrrd, "ijkToRAS" | "sp
   }
   const flip = known.flip ?? [1, 1, 1];
 
-  // `space units` is per axis and is routinely something other than millimeters. Carried, not applied:
-  // rescaling here would hide the unit from the caller, which is the mistake this is fixing.
+  // `space units` is per world axis and is routinely something other than millimeters. CARRIED AND APPLIED (2026-10-20):
+  // the units stay on the record, and the geometry is converted to the scene's mm -- carried only, as it was, nothing
+  // downstream converted, so a microscope's NRRD in micrometers loaded 1000 times too large beside a CT (the scale sweep,
+  // scale-sweep-2026-10-20.md; NIfTI had the same fault). A unit not in the table is left as it is.
   const spaceUnits = (f["space units"] ?? "").match(/"([^"]*)"/g)?.map((q) => q.slice(1, -1)) ?? [];
+  const toMm = [0, 1, 2].map((a) => NRRD_UNIT_TO_MM[(spaceUnits[a] ?? "").trim().toLowerCase()] ?? 1);
 
   const c = dir.length === 3 ? dir : [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  const row = (r: number) => flip[r] * toMm[r];
   const ijkToRAS = [
-    flip[0] * c[0][0], flip[0] * c[1][0], flip[0] * c[2][0], flip[0] * org[0],
-    flip[1] * c[0][1], flip[1] * c[1][1], flip[1] * c[2][1], flip[1] * org[1],
-    flip[2] * c[0][2], flip[2] * c[1][2], flip[2] * c[2][2], flip[2] * org[2],
+    row(0) * c[0][0], row(0) * c[1][0], row(0) * c[2][0], row(0) * org[0],
+    row(1) * c[0][1], row(1) * c[1][1], row(1) * c[2][1], row(1) * org[1],
+    row(2) * c[0][2], row(2) * c[1][2], row(2) * c[2][2], row(2) * org[2],
     0, 0, 0, 1,
   ];
   return { ijkToRAS, space, spaceUnits, anatomical: known.flip !== null };

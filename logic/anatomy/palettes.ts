@@ -17,6 +17,12 @@
 // had before adopting Mikes scheme"). The spine is the vertebral column as TA2 has it -- every vertebra, the sacrum, the
 // coccyx -- and the intervertebral discs; v3 leaves them out of v2's table, so v1's rules color them, and keeps v2's
 // finishes for everything. A variant for a picture, not a successor: it is not the default (`forPictures`).
+//
+// v4 is v2 with FreeSurfer's cerebrospinal fluid in light blue (Ron, 2026-10-20: "I would prefer light blue for the
+// csf"): FreeSurfer's CSF is 60/60/60, a dark gray that cannot be seen on Albula's dark background; Slicer's own anatomy
+// table gives CSF this blue (GenericAnatomyColors, CSF_space 85/188/255). The FreeSurfer table (freesurfer.json) keeps
+// FreeSurfer's own colors, so v1-v3 give the gray they always gave, and Settings can choose them back (critic
+// 2026-10-20, finding 11: the blue had been written into the FreeSurfer table, every version at once).
 import v2 from "./palette-v2.json" with { type: "json" };
 
 export interface PaletteVersion { version: number; name: string; date: string; forPictures?: boolean }
@@ -24,7 +30,8 @@ export interface PaletteVersion { version: number; name: string; date: string; f
 export const PALETTES: readonly PaletteVersion[] = [
   { version: 1, name: "Albula's first colors (catalog, oxygenation, separated)", date: "2026-09-24" },
   { version: v2.version, name: v2.name, date: v2.date },
-  { version: 3, name: "v2 with the spine in v1's colors (for a picture)", date: "2026-09-26", forPictures: true },
+  { version: 3, name: "v2 with the spine in v1's colors (for a picture; back to the newest at the next start)", date: "2026-09-26", forPictures: true },
+  { version: 4, name: "v2 with the cerebrospinal fluid in light blue", date: "2026-10-20" },
 ];
 
 /** The newest scheme meant for everyday use: the default. A variant for pictures is never it. */
@@ -35,9 +42,13 @@ const SPINE = /^(vertebra|vertebrae)(_|$)|^(sacrum|coccyx|intervertebral_discs?)
 const withoutSpine = <T>(t: Record<string, T>): Record<string, T> =>
   Object.fromEntries(Object.entries(t).filter(([k]) => !SPINE.test(k)));
 
+/** v4's changes to v2, by the structure's key (FreeSurfer's own name for a FreeSurfer structure). */
+const V4_CHANGES: Record<string, number[]> = { CSF: [85, 188, 255] };
+
 const TABLES: Record<number, Record<string, number[]>> = {
   [v2.version]: v2.colors as Record<string, number[]>,
   3: withoutSpine(v2.colors as Record<string, number[]>),
+  4: { ...(v2.colors as Record<string, number[]>), ...V4_CHANGES },
 };
 
 let current = LATEST_PALETTE;
@@ -47,9 +58,28 @@ export function paletteVersion(): number { return current; }
 export function setPaletteVersion(v: number): void {
   const was = current;
   current = PALETTES.some((p) => p.version === v) ? v : LATEST_PALETTE;
-  // Panels that show the scheme ("Use the current colors") redraw when it changes (Ron, 2026-09-26, choosing v3 in
+  // Panels that show the scheme ("Use Albula's colors") redraw when it changes (Ron, 2026-09-26, choosing v3 in
   // Settings: "Nothing happens" -- the Segmentations panel kept its old view until something else redrew it).
   if (current !== was) globalThis.dispatchEvent?.(new Event("sl-palette-changed"));
+}
+
+/**
+ * THE SCHEME AT START: a version made for a picture is temporary (Ron, 2026-09-26: "temporarily the spine in the colors
+ * that we …"), so a setting left on one returns to the newest regular version at the next start (Ron, 2026-10-20, left
+ * on v3 when v4 brought the light-blue CSF: "programmatically change to v4"). `moved` says the setting is to be written.
+ * A VERSION THIS BUILD DOES NOT KNOW (a newer build's, critic 2026-10-20, section 11) is not one for a picture: this
+ * build draws with its newest and leaves the setting as it is, for the build that wrote it (`unknown`).
+ */
+export function schemeAtStart(saved: number): { version: number; moved: boolean; unknown?: true } {
+  const p = PALETTES.find((x) => x.version === saved);
+  if (!p) return { version: LATEST_PALETTE, moved: false, unknown: true };
+  return p.forPictures ? { version: LATEST_PALETTE, moved: true } : { version: saved, moved: false };
+}
+
+/** Run `fn` with colors taken from version `v`, without telling the panels (a comparison, not a change of scheme). */
+export function atPaletteVersion<T>(v: number, fn: () => T): T {
+  const was = current; current = v;
+  try { return fn(); } finally { current = was; }
 }
 
 /** The same structure under the names the tables use: our catalog says vertebra_T5 / clavicle_left where
@@ -84,6 +114,7 @@ export interface Finish { name: string; roughness: number; ior: number; coat: nu
 const FINISHES: Record<number, { finish: Record<string, string>; finishes: Record<string, Record<string, number>> }> = {
   [v2.version]: { finish: v2.finish as Record<string, string>, finishes: v2.finishes as Record<string, Record<string, number>> },
   3: { finish: v2.finish as Record<string, string>, finishes: v2.finishes as Record<string, Record<string, number>> },
+  4: { finish: v2.finish as Record<string, string>, finishes: v2.finishes as Record<string, Record<string, number>> },
 };
 export function paletteFinish(key: string | undefined, version = current): Finish | undefined {
   if (!key) return undefined;

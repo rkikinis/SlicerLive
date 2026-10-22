@@ -6,7 +6,7 @@
 // node PER VOLUME, so several volumes can be rendered at once. Plain DOM, theme.css. RAS/geometry-free.
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
-import { currentFrames } from "../../logic/sequences.ts";
+import { currentFrames, measurementSeries } from "../../logic/sequences.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { MrsonNode } from "../mrson.ts";
 import { CT_VR_PRESETS, type CtVrPreset } from "../ct-vr-presets.ts";
@@ -158,7 +158,7 @@ export function setVolumeRenderingOn(live: LiveScene, imageId: string, on: boole
   });
 }
 /**
- * THE 3D LOOK OF ONE VOLUME, as the Scene module sets it (render/look3d.ts has the four and what they
+ * THE 3D LOOK OF ONE VOLUME, as the Scene module sets it (render/look3d.ts has the three and what they
  * mean). Written as the state the rest of the application already reads: the look on the image node,
  * the volume rendering on or off, the colored volume's flags. So a module that switches the volume
  * rendering itself still works, and the Scene module reads back what is on.
@@ -478,6 +478,10 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
     const own = startingPreset(imageId);
     if (own) applyPresetObject(imageId, own);
     else applyPreset(imageId, DEFAULT_VR_PRESET);
+    // AND SWITCHED ON. The preset for a scan that is not CT (an MR's ramp from its own window) set the colors and said
+    // "volume rendering on" without turning it on -- since 2026-09-06 every MR loaded with nothing in 3D (Ron,
+    // 2026-10-19, demoing a diffusion case: "I loaded everything but nothing shows").
+    setVolumeRendering(imageId, true);
     // ...and the app's own specular over the preset's ambient/diffuse. The four terms are
     // [ambient, diffuse, specular, power]; the sliders in this panel edit the same vector, so this
     // is a starting point, not a lock.
@@ -496,6 +500,13 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
       // A MAP COMPUTED FROM A SCAN (FA, Color FA: `autoVolumeRendering: false` on its node) does not take the 3D view
       // over from the scan it came from; it can still be switched on by hand in Scene.
       if ((n as { autoVolumeRendering?: boolean }).autoVolumeRendering === false) continue;
+      // A SERIES OF MEASUREMENTS, NOT OF MOMENTS (a diffusion scan: its frames are b-values and directions) is not one
+      // volume to look at in 3D, and must not take the 3D view from the anatomy loaded with it: the diffusion scans came
+      // after the T1 and left the 3D view empty (Ron, 2026-10-19). It can be switched on by hand in Scenes. Only those an
+      // extension tells apart (logic/sequences.ts measurementSeries; critic 2026-10-20, finding 16: every modality was
+      // skipped).
+      const seqOf = n.sequence ? live.nodes.get(n.sequence as string) : undefined;
+      if (seqOf && measurementSeries(seqOf as { indexType?: unknown; items?: unknown }, n)) continue;
       // A sequence's frames arrive hidden, one after another; enabling each would build five
       // renderings and leave the last one on while the slices show the first. Only the frame the
       // browser has on screen is enabled -- when the browser arrives, below.
@@ -743,39 +754,39 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
     const hasSegs = segsOfActive().length > 0;
     // TWO SECTIONS, on Ron's instruction: "a small section for nontechnical users and an advanced
     // section for the pro." The face, since 2026-10-14 (the module review's proposal 2, Ron: "yes"; "keep both"):
-    // the volume, Show in 3D, the preset and the shift. Colors, opacity, the colorize switch and the three light presets
+    // the volume, the preset, the shift and Show in 3D (the mockup's order). Colors, opacity, the colorize switch and the three light presets
     // moved into Advanced with the sliders and the curve they belong to (before: "turn colorize on/off ... and the three
     // light presets" on the face). Nothing was removed; it was sorted.
     root.innerHTML = `
       <h2>Volume Rendering</h2>
       <div class="sl-row"><label>Volume</label><select class="sl-vr-active">${volOpts}</select></div>
-      <div class="sl-row"><label>Show in 3D</label><button class="sl-tool sl-vr-on" aria-pressed="${vr?.visible ? "true" : "false"}" title="Shows or hides this volume's rendering in 3D. Scenes › In 3D chooses the same for each volume, among Off, Volume, Solid (and Surfaces once surface models are generated).">${vr?.visible ? "on" : "off"}</button></div>
       <div class="sl-row"><label>Preset</label><select class="sl-vr-preset-sel" title="How the volume is drawn in 3D: which values show, in which colors">${
         (CT_VR_PRESETS.some((p) => p.name === tf?.preset) ? "" : `<option value="" selected disabled>${escapeHtml(presetLabel)}</option>`) +
         CT_VR_PRESETS.map((p) => `<option value="${escapeHtml(p.name)}"${p.name === tf?.preset ? " selected" : ""}>${escapeHtml(p.label)}</option>`).join("")
       }</select><button class="sl-vr-preset-btn" title="Every preset as a picture of this volume, in a window of its own; click one to use it">Review presets…</button></div>
       <div class="sl-row"><label>Shift</label><input class="sl-vr-shift" type="range" min="-500" max="500" step="1" value="0" title="Slide the whole transfer function, colors and opacity together"><span class="sl-vr-shiftv">0</span></div>
+      <div class="sl-row"><label>Show in 3D</label><button class="sl-tool sl-vr-on" aria-pressed="${vr?.visible ? "true" : "false"}" title="Shows or hides this volume's rendering in 3D. Scenes › In 3D chooses the same for each volume, among Off, Volume and Solid.">${vr?.visible ? "on" : "off"}</button></div>
       <details class="sl-advanced"${advancedOpen ? " open" : ""}><summary>Advanced</summary>
       <h3>Colors and opacity</h3>
       <div class="sl-row"><label>Colors</label><input class="sl-vr-cshift" type="range" min="-500" max="500" step="1" value="0" title="Slide the color scale alone; the opacity points stay"><span class="sl-vr-cshiftv">0</span></div>
       <div class="sl-row"><label>Opacity</label><input class="sl-vr-gain" type="range" min="0" max="3" step="0.05" value="1" title="Push the whole opacity curve up or down; a point at zero stays at zero"><span class="sl-vr-gainv">×1.00</span></div>
-      <h3 title="One volume, not two: labeled voxels are tinted by their segment, and the rest of the body is drawn by the CT transfer function at the unlabeled-body opacity. That faint body is the whole backdrop.">Colorized volume</h3>
+      <h3 title="The scan and one segmentation as a single picture: the structures in their colors, the rest of the body faint around them.">Colorized volume</h3>
       <div class="sl-row"><label>Show it</label>${hasSegs
         ? `<button class="sl-tool sl-vr-clz" aria-pressed="${colorizeOn() ? "true" : "false"}" title="Colorized volume: the scan rendered see-through and tinted by its segmentation, as Slicer's Colorize Volume does. For the anatomy drawn solid, choose Solid in Scene.">${colorizeOn() ? "on" : "off"}</button>` +
           (segsOfActive().length > 1
-            ? ` <span class="sl-hint">with</span> <select class="sl-vr-clz-with" title="Which segmentation tints the volume. One at a time; the others are drawn as surfaces on top.">${segsOfActive().map((sg) =>
+            ? ` <span class="sl-hint">with</span> <select class="sl-vr-clz-with" title="Which segmentation tints the volume. One at a time; the others stay drawn solid.">${segsOfActive().map((sg) =>
                 `<option value="${sg.id}"${sg.id === colorizeWith() ? " selected" : ""}>${escapeHtml((sg.name as string) ?? sg.id)} (${((sg.segments as unknown[] | undefined) ?? []).length})</option>`).join("")}</select>`
             : "")
         : `<span class="sl-hint">no segmentation on this volume</span>`}</div>
       ${segsOfActive().length ? `
       <div class="sl-row"><label>Unlabeled body</label><input class="sl-clz-ctx" type="range" min="0" max="1" step="0.01"
-        value="${colorizeParam("contextOpacity", presentationParams(DEFAULT_PRESENTATION).contextOpacity as number)}" title="Opacity of the unlabeled body — the same control the colorize viewer calls Unlabeled body. At 1 the skin alone hides everything behind it."><span class="sl-clz-ctxv">${colorizeParam("contextOpacity", presentationParams(DEFAULT_PRESENTATION).contextOpacity as number).toFixed(2)}</span></div>
+        value="${colorizeParam("contextOpacity", presentationParams(DEFAULT_PRESENTATION).contextOpacity as number)}" title="How much of the body outside the structures shows: none at 0; at 1 the skin hides everything behind it."><span class="sl-clz-ctxv">${colorizeParam("contextOpacity", presentationParams(DEFAULT_PRESENTATION).contextOpacity as number).toFixed(2)}</span></div>
       <div class="sl-row"><label>Segment opacity</label><input class="sl-clz-seg" type="range" min="0" max="1" step="0.01"
-        value="${colorizeParam("segmentOpacity", 1)}" title="Scales every segment together. A first step towards per-group control, not a substitute: the colorize page reads well because bones are at 100% and muscle at 5%, which one slider cannot express."><span class="sl-clz-segv">${colorizeParam("segmentOpacity", 1).toFixed(2)}</span></div>
+        value="${colorizeParam("segmentOpacity", 1)}" title="How see-through the structures are, all together: hidden at 0, as set in Segmentations at 1."><span class="sl-clz-segv">${colorizeParam("segmentOpacity", 1).toFixed(2)}</span></div>
       <div class="sl-row"><label>CT modulation</label><input class="sl-clz-mod" type="range" min="0" max="1" step="0.01"
         value="${colorizeParam("ctModulation", 0.55)}" title="How strongly the underlying CT varies each segment's brightness. At 0 segments are flat color."><span class="sl-clz-modv">${colorizeParam("ctModulation", 0.55).toFixed(2)}</span></div>` : ""}
       <h3 title="A preset sets the sliders; drag to override. Ambient is flat brightness everywhere, diffuse the directional light, specular the highlight.">Lighting</h3>
-      <div class="sl-row"><label>Lighting</label><span class="sl-vr-lights">${LIGHT_PRESETS.map((lp, i) =>
+      <div class="sl-row"><label title="Each choice sets the three sliders below.">Light</label><span class="sl-vr-lights">${LIGHT_PRESETS.map((lp, i) =>
         `<button class="sl-tool sl-vr-light" data-i="${i}" title="${lp.why}" aria-pressed="${i === lightIdx ? "true" : "false"}">${lp.name}</button>`).join("")}</span></div>
       <div class="sl-row"><label>Ambient</label><input class="sl-lt-ka" type="range" min="0" max="1" step="0.01"
         value="${shadeVec()[0]}"><span class="sl-lt-kav">${shadeVec()[0].toFixed(2)}</span></div>
@@ -786,8 +797,8 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
         value="${shadeVec()[2]}"><span class="sl-lt-ksv">${shadeVec()[2].toFixed(2)}</span></div>
       <div class="sl-row"><label>Shininess</label><input class="sl-lt-sp" type="range" min="1" max="64" step="1"
         value="${shadeVec()[3]}"><span class="sl-lt-spv">${shadeVec()[3].toFixed(0)}</span></div>
-      <h3 title="Drag a handle to change opacity, click empty space to add one, double-click a handle to remove it. A handle rings white when you are on it; it stops at its neighbors.">Scalar opacity</h3>
-      <canvas class="sl-tf-canvas" width="${W}" height="${H}" style="width:100%;border:1px solid var(--sl-border);border-radius:4px;cursor:crosshair"></canvas>
+      <h3 title="How see-through each value of the scan is: low on the curve is clear, high is solid.">Scalar opacity</h3>
+      <canvas class="sl-tf-canvas" width="${W}" height="${H}" title="Drag a handle to change opacity, click empty space to add one, double-click a handle to remove it. A handle rings white when you are on it; it stops at its neighbors." style="width:100%;border:1px solid var(--sl-border);border-radius:4px;cursor:crosshair"></canvas>
       <canvas class="sl-tf-zoom" width="${W}" height="${ZH}" style="width:100%;display:block;margin-top:2px" title="Drag a handle to zoom the curve to part of its range; drag the bar to pan; double-click to show all"></canvas>
       <div class="sl-actions"><button class="sl-tf-reset" title="Put the curve back to the preset's own, undoing every edit">Reset to preset</button></div>
       </details>`;
@@ -804,7 +815,14 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
       if (clzBtn) { const c = colorizeOn(); clzBtn.textContent = c ? "on" : "off"; clzBtn.setAttribute("aria-pressed", String(c)); }
     };
     onBtn.addEventListener("click", () => { const on = !vrNode()?.visible; setVolumeRendering(activeId, on); paintToggles(); status(on ? "volume rendering on" : "volume rendering off"); });
-    clzBtn?.addEventListener("click", () => { const on = !colorizeOn(); setColorize(on); paintToggles(); status(on ? "colorize on" : "colorize off: grayscale CT, segmentation drawn on top"); });
+    // Turning it on with the rendering off turns the rendering on, as its neighbors do: "on" with nothing drawn answered
+    // nothing (critic 2026-10-16, general audit, finding 10).
+    clzBtn?.addEventListener("click", () => {
+      const on = !colorizeOn();
+      if (on && !vrNode()?.visible) setVolumeRendering(activeId, true);
+      setColorize(on); paintToggles();
+      status(on ? "colorized volume on" : "colorized volume off: the scan in gray, its segmentation drawn solid");
+    });
     (root.querySelector(".sl-vr-clz-with") as HTMLSelectElement | null)?.addEventListener("change", (e) => {
       const id = (e.target as HTMLSelectElement).value;
       if (!vrNode()) setVolumeRendering(activeId, true);

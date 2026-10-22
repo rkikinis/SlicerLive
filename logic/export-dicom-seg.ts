@@ -22,7 +22,8 @@
 // Pure over its inputs (labels + source instance bytes); the panel supplies both.
 import { dicomIO } from "./dicom-io.ts";
 import { deflateDicomFile } from "./dicom-deflate.ts";
-import { mappingVersions } from "./anatomy/catalogue.ts";
+import { codeTablesFor } from "./segment-naming.ts";
+import { ALBULA_PRIVATE } from "./albula-private.ts";
 
 export interface SegExportSegment {
   labelValue: number;
@@ -152,15 +153,14 @@ export interface RunProvenance {
   timings?: Record<string, number>;
   job?: string;
   at?: string;
+  /** Albula's own version that wrote the SEG: the core's commit (the import-time job's `--core-version`) or the build stamp. */
+  albula?: string;
+  /** The rules that chose and ran the scan, when a job did ("brain-structures v2"). */
+  rules?: string;
 }
 
-/**
- * ALBULA'S PRIVATE BLOCK (PS3.5 §7.8), for what no standard attribute of the SEG can hold: the whole provenance line.
- * ContentDescription (0070,0081) is LO, 64 characters (dciodvfy, 2026-09-25); the line is longer on any real network run.
- * Ron, 2026-09-26: "Segmentation provenance: Yes. Standards compliance" -- a 64-character summary in ContentDescription,
- * the full line here. The creator string carries the layout's version (CLAUDE.md, "modular and versioned").
- */
-export const ALBULA_PRIVATE = { creatorTag: "00770010", creator: "SlicerAlbula provenance 1", lineTag: "00771001" } as const;
+// Albula's private block: its one definition is logic/albula-private.ts (the reader shares it).
+export { ALBULA_PRIVATE };
 /** An LO value: 64 characters, cut with "..." when longer. */
 const lo = (s: string) => s.length <= 64 ? s : `${s.slice(0, 61)}...`;
 
@@ -169,6 +169,8 @@ export function describeRun(r: RunProvenance): string {
   const parts: string[] = [];
   if (r.task) parts.push(`task ${r.task}`);
   if (r.server || r.haversack) parts.push(`${r.server ?? "server"}${r.haversack ? " " + r.haversack : ""}`);
+  if (r.albula) parts.push(`SlicerAlbula ${r.albula}`);
+  if (r.rules) parts.push(`rules ${r.rules}`);
   if (r.engine) parts.push(`engine ${r.engine}`);
   for (const m of r.models ?? []) parts.push(`weights ${m.folder ?? "?"}${m.version ? " v" + m.version : ""}${m.folds?.length ? " folds " + m.folds.join("+") : ""}`);
   if (r.device) parts.push(`device ${r.device}${r.dtype ? " " + r.dtype : ""}`);
@@ -253,6 +255,58 @@ function metaFor(s: SegExportSegment, opts: { algorithmName?: string; merged?: b
   } as Ds;
 }
 
+/** One slice's source in a multi-frame series: the file and the frame in it (1-based). */
+interface FrameRef { ReferencedSOPClassUID: string; ReferencedSOPInstanceUID: string; ReferencedFrameNumber: number }
+
+/**
+ * A MULTI-FRAME SERIES AS ONE ASSEMBLED DATASET for the SEG derivation: the frames of every file (or the `pick`ed ones,
+ * `${SOPInstanceUID}#${frame}`) with their plane positions, one shared orientation and pixel measures, and for each frame
+ * where it came from. Only geometry goes in: the MR-specific functional groups of an Enhanced MR image (timing, coils,
+ * contrast) do not belong in a SEG. One orientation and one pixel grid across the frames, or a refusal: a SEG frame
+ * carries no geometry of its own beyond its position.
+ */
+function enhancedMultiframe(datasets: Ds[], pick?: Set<string>): { multiframe: Ds; frameRefs: FrameRef[] } {
+  const item = (v: unknown) => (Array.isArray(v) ? v[0] : v) as Record<string, unknown> | undefined;
+  const per: Ds[] = [], frameRefs: FrameRef[] = [];
+  let orientation: number[] | undefined, measures: Record<string, unknown> | undefined;
+  for (const ds of datasets) {
+    const shared = item(ds.SharedFunctionalGroupsSequence) ?? {};
+    const frames = (Array.isArray(ds.PerFrameFunctionalGroupsSequence) ? ds.PerFrameFunctionalGroupsSequence : [ds.PerFrameFunctionalGroupsSequence]) as Record<string, unknown>[];
+    frames.forEach((fg, i) => {
+      if (pick && !pick.has(`${ds.SOPInstanceUID}#${i + 1}`)) return;
+      const pos = item(fg.PlanePositionSequence ?? shared.PlanePositionSequence)?.ImagePositionPatient as number[] | undefined;
+      const ori = item(fg.PlaneOrientationSequence ?? shared.PlaneOrientationSequence)?.ImageOrientationPatient as number[] | undefined;
+      const pm = item(fg.PixelMeasuresSequence ?? shared.PixelMeasuresSequence);
+      if (!pos || !ori || !pm) throw new Error("a frame of this multi-frame image carries no position, orientation or pixel size; a segmentation on it cannot be saved as DICOM");
+      const o = ori.map(Number);
+      if (!orientation) orientation = o;
+      else if (o.some((v, j) => Math.abs(v - orientation![j]) > 1e-4)) throw new Error("the frames of this multi-frame image are not all in one orientation; a segmentation on it cannot be saved as DICOM yet");
+      measures ??= pm;
+      per.push({ PlanePositionSequence: { ImagePositionPatient: pos.map(Number) } });
+      frameRefs.push({ ReferencedSOPClassUID: String(ds.SOPClassUID), ReferencedSOPInstanceUID: String(ds.SOPInstanceUID), ReferencedFrameNumber: i + 1 });
+    });
+  }
+  if (per.length < 2) throw new Error("a segmentation on a single slice cannot be saved as DICOM yet: the series geometry needs at least two slices");
+  // SpacingBetweenSlices from the positions when the image does not state it (dcmqi and Slicer need it; the
+  // single-frame path gets it from dcmjs's normalizer the same way).
+  const o = orientation!, n = [o[1] * o[5] - o[2] * o[4], o[2] * o[3] - o[0] * o[5], o[0] * o[4] - o[1] * o[3]];
+  const d = per.map((p) => { const x = (p.PlanePositionSequence as { ImagePositionPatient: number[] }).ImagePositionPatient; return x[0] * n[0] + x[1] * n[1] + x[2] * n[2]; }).sort((a, b) => a - b);
+  const gaps = d.slice(1).map((v, i) => v - d[i]).sort((a, b) => a - b);
+  const pixelMeasures: Record<string, unknown> = { PixelSpacing: (measures!.PixelSpacing as number[]).map(Number) };
+  if (measures!.SliceThickness !== undefined && measures!.SliceThickness !== "") pixelMeasures.SliceThickness = Number(measures!.SliceThickness);
+  pixelMeasures.SpacingBetweenSlices = measures!.SpacingBetweenSlices !== undefined && measures!.SpacingBetweenSlices !== "" ? Number(measures!.SpacingBetweenSlices) : Number(gaps[gaps.length >> 1].toFixed(6));
+  const first = datasets[0];
+  const multiframe: Ds = { ...first };
+  for (const k of ["PerFrameFunctionalGroupsSequence", "SharedFunctionalGroupsSequence", "ReferencedSeriesSequence", "PixelData"]) delete multiframe[k];
+  Object.assign(multiframe, {
+    NumberOfFrames: per.length,
+    SharedFunctionalGroupsSequence: { PixelMeasuresSequence: pixelMeasures, PlaneOrientationSequence: { ImageOrientationPatient: o } },
+    PerFrameFunctionalGroupsSequence: per,
+    PixelData: new ArrayBuffer(0),
+  });
+  return { multiframe, frameRefs };
+}
+
 /**
  * Build the DICOM SEG for one labelmap over one source series.
  *
@@ -273,6 +327,9 @@ export async function segmentationToDicomSeg(
     algorithmType?: "AUTOMATIC" | "SEMIAUTOMATIC" | "MANUAL";
     /** The instances of the frame this labelmap is on, when the series holds several frames. */
     sopInstanceUIDs?: string[];
+    /** Beside `sopInstanceUIDs`, slice for slice: the frame within its file, for a multi-frame source (the volume's
+     *  `frameNumbers`). Without it every frame of the files is taken. */
+    frameNumbers?: number[];
     /**
      * HOW THIS WAS MADE, into the object itself. The run's provenance as the segmentation server
      * reported it (see HaversackJob.provenance): the software and its version, the engine, the
@@ -327,12 +384,13 @@ export async function segmentationToDicomSeg(
     (ds as { _meta?: Ds })._meta = dcm.namify(parsed.meta) as Ds;
     return ds;
   });
-  // A MULTI-FRAME SOURCE (Enhanced MR/CT/PET: one file, many slices, as Siemens' XA scanners write MR) is read
-  // since 2026-09-25, but a SEG on it has to name each slice by the file AND its frame number (ReferencedFrameNumber),
-  // which this writer does not do yet. Refused in plain words rather than written with wrong references.
-  if (datasets.some((ds) => Number(ds.NumberOfFrames ?? 1) > 1 && ds.PerFrameFunctionalGroupsSequence && !String(ds.SOPClassUID ?? "").startsWith("1.2.840.10008.5.1.4.1.1.66"))) {
-    throw new Error("saving a segmentation drawn on a multi-frame image (one file holding all its slices) is not supported yet");
-  }
+  // A MULTI-FRAME SOURCE (Enhanced MR/CT/PET: one file, many slices, as Siemens' XA scanners write MR; read since
+  // 2026-09-25). Written since 2026-10-21 (Steve's Prisma T1, the first FastSurfer result on such a scan): each slice
+  // of the SEG names its source by the file AND the frame in it (ReferencedFrameNumber, C.7.6.16.2.6), and the series
+  // geometry is taken from the frames' own functional groups -- dcmjs's normalizer is for single-frame series.
+  const isEnhanced = (ds: Ds) => Number(ds.NumberOfFrames ?? 1) > 1 && !!ds.PerFrameFunctionalGroupsSequence && !String(ds.SOPClassUID ?? "").startsWith("1.2.840.10008.5.1.4.1.1.66");
+  const enhanced = datasets.some(isEnhanced);
+  if (enhanced && !datasets.every(isEnhanced)) throw new Error("this series mixes multi-frame and single-slice images; a segmentation on it cannot be saved as DICOM yet");
   // A SIEMENS MOSAIC (many slices tiled into one image, cut apart on reading since 2026-09-29) has no DICOM address for
   // one slice of it: a SEG could only reference the whole picture. Refused in plain words; without this the check below
   // called a 36-slice volume "a single slice" (critic, 2026-09-29, finding 8).
@@ -359,8 +417,17 @@ export async function segmentationToDicomSeg(
   // reads per-frame plane positions from. Using it rather than assembling that by hand is the point:
   // the derivation and the normalizer agree about frame order because they are the same library.
   note("assembling the series geometry");
-  if (datasets.length < 2) throw new Error("a segmentation on a single slice cannot be saved as DICOM yet: the series geometry needs at least two slices");
-  const multiframe = dcm.toMultiframe(datasets) as Ds;
+  let frameRefs: FrameRef[] | undefined;
+  let multiframe: Ds;
+  if (enhanced) {
+    // Which frames: those the volume names (a file can hold several volumes -- echoes, phases), else every frame.
+    const pick = opts.sopInstanceUIDs?.length && opts.frameNumbers?.length === opts.sopInstanceUIDs.length
+      ? new Set(opts.sopInstanceUIDs.map((u, i) => `${u}#${opts.frameNumbers![i]}`)) : undefined;
+    ({ multiframe, frameRefs } = enhancedMultiframe(datasets, pick));
+  } else {
+    if (datasets.length < 2) throw new Error("a segmentation on a single slice cannot be saved as DICOM yet: the series geometry needs at least two slices");
+    multiframe = dcm.toMultiframe(datasets) as Ds;
+  }
 
   const [nx, ny, nz] = dims;
   const rows = Number(multiframe.Rows), cols = Number(multiframe.Columns);
@@ -395,6 +462,12 @@ export async function segmentationToDicomSeg(
   along.forEach((e, k) => { kOfFrame[e.f] = k; });
 
   const seg = dcm.segmentationBuilder(multiframe);
+  // The series the SEG is on, each file once (dcmjs, given one assembled dataset, would name only its first file).
+  if (frameRefs) {
+    const files = [...new Map(frameRefs.map((r) => [r.ReferencedSOPInstanceUID, { ReferencedSOPClassUID: r.ReferencedSOPClassUID, ReferencedSOPInstanceUID: r.ReferencedSOPInstanceUID }])).values()];
+    // No StudyInstanceUID in it: the Common Instance Reference module names a series of the SEG's own study without one.
+    (seg.dataset as Ds).ReferencedSeriesSequence = { SeriesInstanceUID: multiframe.SeriesInstanceUID, ReferencedInstanceSequence: files };
+  }
   const sliceLen = nx * ny;
 
   // WHICH SLICES EACH LABEL OCCUPIES, IN ONE PASS.
@@ -470,7 +543,7 @@ export async function segmentationToDicomSeg(
     for (let k = 0; k < nz; k++) {
       const f = frameOfK[k];
       const src = perFrame[f] as unknown as { PlanePositionSequence: unknown; PlaneOrientationSequence?: unknown };
-      const inst = refSeries?.ReferencedInstanceSequence?.[f];
+      const inst = frameRefs ? frameRefs[f] : refSeries?.ReferencedInstanceSequence?.[f];
       pf.push({
         PlanePositionSequence: JSON.parse(JSON.stringify(src.PlanePositionSequence)),
         ...((seg.dataset.SharedFunctionalGroupsSequence as { PlaneOrientationSequence?: unknown })?.PlaneOrientationSequence ? {} : { PlaneOrientationSequence: JSON.parse(JSON.stringify(src.PlaneOrientationSequence)) }),
@@ -479,6 +552,7 @@ export async function segmentationToDicomSeg(
           DerivationImageSequence: {
             SourceImageSequence: {
               ReferencedSOPClassUID: inst.ReferencedSOPClassUID, ReferencedSOPInstanceUID: inst.ReferencedSOPInstanceUID,
+              ...((inst as FrameRef).ReferencedFrameNumber ? { ReferencedFrameNumber: (inst as FrameRef).ReferencedFrameNumber } : {}),
               PurposeOfReferenceCodeSequence: { CodeValue: "121322", CodingSchemeDesignator: "DCM", CodeMeaning: "Source image for image processing operation" },
             },
             DerivationCodeSequence: { CodeValue: "113076", CodingSchemeDesignator: "DCM", CodeMeaning: "Segmentation" },
@@ -576,6 +650,14 @@ export async function segmentationToDicomSeg(
     });
     seg.bitPackPixelData();
   }
+  // THE BINARY FORM ON A MULTI-FRAME SOURCE: dcmjs named each frame's source as its one assembled dataset; each is
+  // put right here from the frame's own file and frame number (the frame index is the second dimension value).
+  if (frameRefs && form !== "labelmap") {
+    for (const g of (seg.dataset as Ds).PerFrameFunctionalGroupsSequence as { FrameContentSequence: { DimensionIndexValues: number[] }; DerivationImageSequence?: { SourceImageSequence: Record<string, unknown> } }[]) {
+      const ref = frameRefs[g.FrameContentSequence.DimensionIndexValues[1] - 1];
+      if (g.DerivationImageSequence) Object.assign(g.DerivationImageSequence.SourceImageSequence, ref);
+    }
+  }
 
   const out = seg.dataset as Ds & { _meta?: Ds; SeriesInstanceUID?: string; SOPInstanceUID?: string; SeriesDescription?: string };
   // LO holds 64 characters. Nine files
@@ -584,8 +666,9 @@ export async function segmentationToDicomSeg(
   if (opts.seriesDescription) out.SeriesDescription = opts.seriesDescription.slice(0, 64);
   if (opts.uids) { out.SeriesInstanceUID = opts.uids.series; out.SOPInstanceUID = opts.uids.sop; }
   // WHICH MAPPING CODED THE SEGMENTS, always -- a hand-drawn segmentation with a recognized name
-  // is coded from the same tables as a network's result. The run, when there was one, comes first.
-  const mapping = mappingVersions();
+  // is coded from the same tables as a network's result; a FreeSurfer-numbered one from FreeSurfer's (codeTablesFor).
+  // The run, when there was one, comes first.
+  const mapping = codeTablesFor(opts.algorithmName ?? opts.run?.task);
   // The whole line: the run when there was one, then the codes' tables. ContentDescription gets its first 64 characters;
   // the private block below, all of it.
   const provenanceLine = opts.run ? `${describeRun(opts.run)}; codes ${mapping.join(", ")}` : `codes ${mapping.join(", ")}`;
@@ -595,7 +678,9 @@ export async function segmentationToDicomSeg(
     // The software that made the segmentation, as DICOM names it: one item per piece, the
     // server first (it is what ran), the weights as the "model" of that equipment, then the
     // mapping tables the codes came from.
-    out.SoftwareVersions = [r.server ? `${r.server} ${r.haversack ?? ""}`.trim() : "SlicerAlbula", ...(r.models ?? []).map((m) => `${m.folder ?? "weights"} ${m.version ?? ""}`.trim()), ...mapping];
+    // Each value an LO, 64 characters.
+    out.SoftwareVersions = [r.server ? `${r.server} ${r.haversack ?? ""}`.trim() : "SlicerAlbula", ...(r.models ?? []).map((m) => `${m.folder ?? "weights"} ${m.version ?? ""}`.trim()),
+      ...(r.albula ? [`SlicerAlbula ${r.albula}`] : []), ...(r.rules ? [r.rules] : []), ...mapping].map(lo);
     out.ContributingEquipmentSequence = [{
       PurposeOfReferenceCodeSequence: [{ CodeValue: "109102", CodingSchemeDesignator: "DCM", CodeMeaning: "Processing Equipment" }],
       Manufacturer: r.server ?? "SlicerAlbula",

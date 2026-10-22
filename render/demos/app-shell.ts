@@ -218,6 +218,9 @@ export async function runAction<T>(
     requestAnimationFrame(() => requestAnimationFrame(finish));
     setTimeout(finish, 120);
   });
+  // PAST TWO SECONDS, THE 3D VIEW SAYS SO TOO (render/working.ts; critic 2026-10-17, finding 17: merges, crops, transfers,
+  // downloads had no banner). Generic: shown only while no more specific work is (a load, a save say more).
+  const work = startWork({ title: (opts.busyLabel ?? label).replace(/…$/, ""), generic: true, showAfterMs: 2000 });
   try {
     const r = await run();
     btn.classList.add("sl-action-done");
@@ -228,6 +231,7 @@ export async function runAction<T>(
     failed = true;
     throw e;
   } finally {
+    work.done(!failed);
     btn.classList.remove("sl-action-busy");
     btn.disabled = wasDisabled;
     // The word stays a beat longer than the color, because the word is the message -- and a
@@ -276,6 +280,7 @@ export function fourUpCells(rect: DOMRect): { id: string; kind: "slice" | "3d"; 
  */
 // The build stamp and versioned worker URLs live in render/build-id.ts, which has no DOM in it.
 export { BUILD_ID, workerUrl } from "../build-id.ts";
+import { startWork } from "../working.ts";
 import { BUILD_ID } from "../build-id.ts";
 
 /**

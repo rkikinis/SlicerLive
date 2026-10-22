@@ -16,6 +16,8 @@ import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
 import { invertRowMajor } from "./transforms.ts";
 import { frameIsCurrent, joinSequence } from "./sequences.ts";
 import { growDevice, growFromSeeds, growInPlace } from "./grow-from-seeds.ts";
+import { fillPolygon } from "./fill-polygon.ts";
+import { finest, tuned, voxelOrUnit } from "../render/scene-scale.ts";
 
 let segSeq = 0;
 // Slicer default new-segment colours (GenericAnatomyColors sequence, from vtkSegment defaults).
@@ -161,8 +163,18 @@ export function invalidatePaintCache(segId?: string) { if (segId) paintCaches.de
 
 export interface PaintParams { segment: number; radiusMm: number; mode: "add" | "remove"; sphere?: boolean; normal?: Vec3; }
 
+/**
+ * THE STAMP SPACING ALONG A STROKE, from the grid (Ron, 2026-10-20: "did you forget about scales? from astrophysics to
+ * electron microscope"). It was max(0.5 mm, half the smaller of the radius and the voxel): 0.5 mm on every clinical
+ * grid, and at a microscope's 1 nm voxels a stamp every half a million voxels -- isolated dabs. Now the 0.5 mm as it was
+ * tuned (0.71 voxels on a 0.7 mm grid, half a voxel on grids coarser than 1 mm), held to between half a voxel and one
+ * voxel at any other scale: each stamp lands on its nearest voxel center, so a step of at most a voxel leaves no gap,
+ * and at least half a voxel keeps the number of stamps bounded.
+ */
+export function paintStepMm(voxel: number): number { return tuned(0.5, voxel, 0.5, 1); }
+
 /** Rasterize a brush swept along the stroke into the resident labelmap (in-place). Consecutive points are
- *  connected by interpolation (step <= half the radius) so a fast drag leaves a CONTINUOUS stroke, not gaps.
+ *  connected by interpolation (a step of at most a voxel, paintStepMm) so a fast drag leaves a CONTINUOUS stroke, not gaps.
  *  Marks the cache dirty. */
 export async function paintStroke(live: LiveScene, segId: string, points: Vec3[], params: PaintParams): Promise<void> {
   const c = await paintCache(live, segId); if (!c) return;
@@ -194,7 +206,7 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
     }
   };
 
-  const stepMm = Math.max(0.5, Math.min(r, sx, sy, sz) * 0.5 || r * 0.5);   // dense enough to overlap adjacent stamps
+  const stepMm = paintStepMm(voxelOrUnit(finest(sx, sy, sz)));   // dense enough to reach every voxel along the stroke
   let prev: Vec3 | null = null;
   for (const p of points) {
     if (prev) {
@@ -206,6 +218,15 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
     prev = p;
   }
   c.dirty = true;
+}
+
+/** DRAW (Slicer's Draw effect): fill the polygon drawn on a slice into `segment`, one voxel thick, in the resident
+ *  labelmap the brush paints (logic/fill-polygon.ts). The caller commits with commitPaint. Returns the voxels written. */
+export async function drawFill(live: LiveScene, segId: string, points: Vec3[], params: { segment: number; normal: Vec3 }): Promise<number> {
+  const c = await paintCache(live, segId); if (!c) return 0;
+  const n = fillPolygon(c.labelmap, c.dims, c.ijkToRAS, c.invIjk, points, params.normal, params.segment);
+  if (n) c.dirty = true;
+  return n;
 }
 
 /** Upload the resident labelmap and patch the segmentation (call on a throttle + at stroke end). */

@@ -31,7 +31,9 @@ const DICOMDIR_CLASS = "1.2.840.10008.1.3.10";
 const NOT_READ_YET: Record<string, string> = { "1.2.840.10008.1.2.2": "big endian" };
 const HEAD_BYTES = 1 << 20, HEAD_MAX = 64 << 20;
 
-export interface ImportProgress { phase: "reading" | "adding" | "done"; files: number; read: number; dicom: number; series: number; seriesDone: number }
+/** reading the headers -> adding (copying the files, `copied` scans of `series`) -> indexing (the database takes them,
+ *  `seriesDone` of `series`; past the point where a Stop can act) -> done. */
+export interface ImportProgress { phase: "reading" | "adding" | "indexing" | "done"; files: number; read: number; dicom: number; series: number; seriesDone: number; copied?: number }
 
 export interface ImportedSeries { uid: string; studyUID: string; patientID: string; patientName: string; modality: string; description: string; instances: number }
 
@@ -50,6 +52,8 @@ export interface ImportResult {
   failed: { uid: string; description: string; error: string }[];
   /** Things the person should know that are not failures (a series whose files named different studies, say). */
   notes: string[];
+  /** Stopped by the person before the database took anything: nothing was added (the copies were taken back). */
+  stopped?: boolean;
   audit?: AuditResult;
   ms: number;
 }
@@ -148,7 +152,10 @@ const exists = (p: string) => Deno.lstat(p).then(() => true, () => false);
  * renamed into place instead of copied. `left` are entries the folder walk left out, reported with the rest. Never
  * throws for one bad file or one bad series; says what happened to each.
  */
-export async function importFiles(dbDir: string, files: string[], opts: { move?: boolean; left?: { file: string; reason: string }[]; onProgress?: (p: ImportProgress) => void } = {}): Promise<ImportResult> {
+// STOP (Ron, 2026-10-17: "Stop" on jobs that can be stopped, import included): asked while the headers are read and while
+// the files are copied; the database takes the series in one step at the end, so a stop before it takes back what this
+// import copied and nothing is added. Once that step has begun the import finishes.
+export async function importFiles(dbDir: string, files: string[], opts: { move?: boolean; left?: { file: string; reason: string }[]; onProgress?: (p: ImportProgress) => void; stopped?: () => boolean } = {}): Promise<ImportResult> {
   const t0 = performance.now();
   const prog: ImportProgress = { phase: "reading", files: files.length, read: 0, dicom: 0, series: 0, seriesDone: 0 };
   const skipped: { file: string; reason: string }[] = [];
@@ -159,7 +166,21 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
 
   // 1. READ THE HEADERS.
   const found: Found[] = [];
+  const stoppedResult = async (): Promise<ImportResult> => {
+    const dirs = new Set<string>();
+    for (const list of created.values()) for (const rel of list) { await Deno.remove(`${dbDir}/${rel}`).catch(() => {}); dirs.add(rel.slice(0, rel.lastIndexOf("/"))); }
+    // AND THE FOLDERS THEY LEFT EMPTY, up to dicom/ (critic 2026-10-17, working banner, finding 15). Deno.remove without
+    // `recursive` refuses a folder with anything in it, so another import's files are safe.
+    for (const d of dirs) for (let rel = d; rel.includes("/") && rel !== "dicom"; rel = rel.slice(0, rel.lastIndexOf("/"))) {
+      if (await Deno.remove(`${dbDir}/${rel}`).then(() => false, () => true)) break;
+    }
+    prog.phase = "done";
+    opts.onProgress?.({ ...prog });
+    return { series: [], failed: [], already: 0, skipped, skippedCount, notes: ["Stopped: nothing was added."], audit: undefined, patients: 0, studies: 0, instances: 0, ms: Math.round(performance.now() - t0), stopped: true };
+  };
+  const created = new Map<string, string[]>();     // series -> files THIS import put in place
   for (const path of files) {
+    if (opts.stopped?.()) return await stoppedResult();
     prog.read++;
     if (prog.read % 50 === 0) opts.onProgress?.({ ...prog });
     let h: Map<string, string>, size: number;
@@ -200,7 +221,6 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
   // study identifier, and keeping only the files that agree thinned the scan out (finding 9). Said, not hidden.
   prog.phase = "adding"; prog.series = bySeries.size;
   opts.onProgress?.({ ...prog });
-  const created = new Map<string, string[]>();     // series -> files THIS import put in place
   // A MOVE IS A COPY, AND THE ORIGINALS GO ONLY AFTER THE DATABASE HAS TAKEN THE SERIES (the critic, 2026-10-13,
   // qa/2026-10-13-cross-platform.md A1 and A2): a rename followed by the take-back below deleted the only copies when the
   // index refused a series (0 of 3 files left anywhere), and a rename cannot cross disks (a package on a USB stick: every
@@ -210,11 +230,14 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
   const failed: ImportResult["failed"] = [];
   const description = (list: Found[]) => list[0].h.get("0008103E") ?? "";
   for (const [uid, list] of bySeries) {
+    if (opts.stopped?.()) return await stoppedResult();
     const first = list[0];
     if (list.some((f) => f.study !== first.study)) notes.push(`The images of “${description(list) || "a scan"}” named ${new Set(list.map((f) => f.study)).size} different studies; all were filed under the first.`);
     const mine: string[] = [], from: string[] = [], placed: { file: string; sop: string }[] = [];
     try {
       for (const f of list) {
+        // Asked between the files too: a 300-image scan was copied whole after a Stop (critic 2026-10-17, finding 4).
+        if (opts.stopped?.()) { created.set(uid, mine); return await stoppedResult(); }
         const rel = ctkInstancePath(first.study, f.series, f.sop);
         const dest = `${dbDir}/${rel}`;
         if (!(await exists(dest))) {
@@ -226,6 +249,7 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
       }
       created.set(uid, mine); sources.set(uid, from);
       batch.push(rowsFor(first, placed));
+      prog.copied = (prog.copied ?? 0) + 1; opts.onProgress?.({ ...prog });
     } catch (e) {
       for (const rel of mine) await Deno.remove(`${dbDir}/${rel}`).catch(() => {});
       failed.push({ uid, description: description(list), error: `could not be copied: ${(e as Error).message}` });
@@ -233,6 +257,9 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
     }
   }
 
+  if (opts.stopped?.()) return await stoppedResult();
+  // Past here a Stop cannot act: the page withdraws it (render/demos/add-to-database.ts).
+  prog.phase = "indexing"; opts.onProgress?.({ ...prog });
   // 4. INDEX, all series under one lock, one backup and one audit.
   const series: ImportedSeries[] = [];
   let audit: AuditResult | undefined;

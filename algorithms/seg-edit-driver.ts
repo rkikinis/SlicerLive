@@ -20,6 +20,21 @@ import { ScissorsEffect, type ScissorsOp } from "./effects/scissors.ts";
 import { GrowCutEffect } from "./effects/growcut.ts";
 
 export interface Brush { shape?: "sphere" | "disk"; diameterMm?: number }
+
+/** The brush when neither the op nor the driver names one: 6 voxels of the segmentation's own grid (6 mm on a 1 mm
+ *  grid). In voxels, not mm, so it paints the same at any scale (Ron, 2026-10-20: "did you forget about scales? from
+ *  astrophysics to electron microscope"; render/scene-scale.ts holds the rule for the views). */
+export const DEFAULT_BRUSH_VOXELS = 6;
+
+/** A stroke's brush diameter in mm: the op's, else the driver's default, else DEFAULT_BRUSH_VOXELS of the grid whose
+ *  voxel sizes are `spacingMm`. A grid with no usable spacing at all falls back to a 1 mm voxel -- the last resort. */
+export function strokeDiameterMm(brush: Brush | undefined, defaultMm: number | undefined, spacingMm: ArrayLike<number>): number {
+  if (brush?.diameterMm !== undefined) return brush.diameterMm;
+  if (defaultMm !== undefined) return defaultMm;
+  let v = Infinity;
+  for (let i = 0; i < spacingMm.length; i++) if (spacingMm[i] > 0 && spacingMm[i] < v) v = spacingMm[i];
+  return DEFAULT_BRUSH_VOXELS * (Number.isFinite(v) ? v : 1);
+}
 export interface StrokeEdit {
   kind: "stroke";
   segmentId?: string;
@@ -61,7 +76,7 @@ export interface SeedsEdit {
 export type SegEdit = StrokeEdit | ScissorsEdit | SeedsEdit | { kind: string; [k: string]: unknown };
 
 export interface SegEditDriverOpts {
-  defaultDiameterMm?: number;                       // brush size when the op omits one (default 6 mm)
+  defaultDiameterMm?: number;                       // brush size when the op omits one (default 6 voxels of the grid)
   labelForSegment?: (segmentId: string) => number;  // map a Slicer segment id → numeric master label
   onUnhandled?: (kind: string) => void;             // notified for kinds A-1 doesn't implement yet
   /** Source intensity volume (r32float, aligned to the seg grid) — REQUIRED for `seeds`/grow-from-seeds,
@@ -105,7 +120,7 @@ export class SegEditDriver {
     if (id === undefined) { id = this.nextLabel++; this.labels.set(segmentId, id); }
     return id;
   }
-  private radiusFor(e: StrokeEdit): number { return (e.brush?.diameterMm ?? this.opts.defaultDiameterMm ?? 6) / 2; }
+  private radiusFor(e: StrokeEdit): number { return strokeDiameterMm(e.brush, this.opts.defaultDiameterMm, this.seg.spacingMm()) / 2; }
   private modeFor(e: StrokeEdit): PaintMode {
     if (e.mode === "remove" || (e.effect ?? "").toLowerCase().startsWith("erase")) return "remove";
     return "add";
@@ -152,7 +167,7 @@ export class SegEditDriver {
     for (const sc of e.scribbles) {
       if (!sc.points?.length) continue;
       const label = sc.label ?? this.labelFor(sc.segmentId ?? e.segmentId);
-      const radiusMm = (sc.brush?.diameterMm ?? this.opts.defaultDiameterMm ?? 6) / 2;
+      const radiusMm = strokeDiameterMm(sc.brush, this.opts.defaultDiameterMm, this.seg.spacingMm()) / 2;
       this.paint.stampStroke(sc.points, { radiusMm, id: label, mode: "add" });
     }
     // (Re)build the growcut when the image changes (a different volume swapped in).

@@ -10,6 +10,7 @@
 // into the worker and 291 MB of meshes copied out would cost more than the extraction.
 import { DEFAULT_NORMAL_SMOOTH, DEFAULT_SMOOTH_ITERS, surfaceNets, type SurfaceNetsOpts } from "./surface-nets.ts";
 import { BUILD_ID } from "../render/build-id.ts";
+import { objVertexCount, writeObj, writeStl } from "../logic/writers/surface-files.ts";
 import type { Vec3 } from "../render/mat4.ts";
 
 export interface NetsRequest {
@@ -18,10 +19,22 @@ export interface NetsRequest {
   dims: Vec3;
   ijkToRAS: number[];
   opts?: SurfaceNetsOpts;
+  /**
+   * WRITE THE FILE HERE (critic 2026-10-21, surfaces export, finding 5): an OBJ of a whole body took 5-8 s to write on
+   * the drawing thread, after the banner had gone, and the page then held the meshes and the file. Asked for, the
+   * worker writes the STL or OBJ itself and sends back only the file's chunks.
+   */
+  file?: {
+    format: "stl" | "obj"; name: string; structures: { label: number; name: string; color?: number[] }[];
+    /** A part of a larger file (Save › Files › "Everything shown in 3D"): no header; OBJ vertices numbered from here. */
+    part?: { vertexOffset: number };
+  };
 }
 export interface NetsReply {
   id: number;
   meshes: { label: number; positions: ArrayBuffer; normals: ArrayBuffer; indices: ArrayBuffer }[];
+  /** The file, when one was asked for (then `meshes` is empty), and what is in it. */
+  file?: { chunks: ArrayBuffer[]; structures: number; triangles: number; vertices: number };
   ms: number;
   /**
    * WHICH WORKER RAN, AND WITH WHAT. Reported rather than assumed, because assuming it cost two
@@ -63,8 +76,23 @@ ctx.onmessage = (e) => {
     smoothIters: o.smoothIters ?? DEFAULT_SMOOTH_ITERS,
     normalSmooth: o.normalSmooth ?? DEFAULT_NORMAL_SMOOTH,
   };
+  // "Closed, for 3D printing" arrives here already padded (algorithms/close-labels.ts): nothing to do but extract.
+  const f = e.data.file;
   const meshes = surfaceNets(new Uint8Array(lab), dims, ijkToRAS, o);
   const transfer: Transferable[] = [];
+  if (f) {
+    const byLabel = new Map(f.structures.map((x) => [x.label, x]));
+    const header = !f.part;
+    const named = meshes.map((m) => ({ name: byLabel.get(m.label)?.name ?? `Segment ${m.label}`, color: byLabel.get(m.label)?.color, mesh: m }));
+    const chunks = f.format === "stl" ? writeStl(meshes, { name: f.name, header })
+      : writeObj(named, { name: f.name, header, vertexOffset: f.part?.vertexOffset ?? 0 });
+    // Each chunk's own buffer, transferred (a chunk that is a view into a larger buffer is copied out first).
+    const bufs = chunks.map((c) => c.byteOffset === 0 && c.byteLength === c.buffer.byteLength ? c.buffer as ArrayBuffer : c.slice().buffer as ArrayBuffer);
+    transfer.push(...bufs);
+    const reply: NetsReply = { id, meshes: [], file: { chunks: bufs, structures: meshes.length, triangles: meshes.reduce((n, m) => n + m.indices.length / 3, 0), vertices: objVertexCount(named) }, ms: performance.now() - t0, build: BUILD_ID, settings };
+    ctx.postMessage(reply, transfer);
+    return;
+  }
   const out = meshes.map((m) => {
     transfer.push(m.positions.buffer as ArrayBuffer, m.normals.buffer as ArrayBuffer, m.indices.buffer as ArrayBuffer);
     return {

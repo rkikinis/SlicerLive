@@ -11,4 +11,7 @@ export { setDicomLibrary } from "../logic/dicom-io.ts";
 export { default as dcmjs } from "../logic/dcmjs.ts";
 export { indexSeries, seriesFilePaths, seriesFileStamp, type IndexSeries } from "../desktop/series-files.ts";
 export { writeNrrd } from "../logic/writers/nrrd.ts";
+// SDK 12: the provenance store beside a database, read-only ("which series was made from which"), so a job finds what it
+// made before the way the page does (critic 2026-10-14, import-time jobs, finding 15).
+export { provenanceEdges, provenancePathFor, type ProvenanceEdge } from "../desktop/db-index.ts";
 export { SDK_VERSION } from "./albula.ts";

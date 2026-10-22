@@ -7,6 +7,7 @@
     "jsr:@std/cli@1.0.32": "1.0.32",
     "jsr:@std/cli@^1.0.32": "1.0.32",
     "jsr:@std/crypto@1": "1.1.0",
+    "jsr:@std/crypto@1.1.0": "1.1.0",
     "jsr:@std/encoding@1": "1.0.11",
     "jsr:@std/encoding@1.0.11": "1.0.11",
     "jsr:@std/encoding@^1.0.11": "1.0.11",
@@ -345,6 +346,7 @@
     "dependencies": [
       "jsr:@std/assert@1.0.19",
       "jsr:@std/cli@1.0.32",
+      "jsr:@std/crypto@1.1.0",
       "jsr:@std/encoding@1.0.11",
       "jsr:@std/fs@1.0.24",
       "jsr:@std/http@1.1.3",

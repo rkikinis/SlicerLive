@@ -1,5 +1,6 @@
 import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert";
-import { lineAxes, lineOrientation, linePlane, lineRange, parseLineOrientation } from "./line-axes.ts";
+import { lineAxes, lineFieldOfView, lineOrientation, linePlane, lineRange, parseLineOrientation } from "./line-axes.ts";
+import { SCALES } from "../render/scale-fixtures.ts";
 
 const close = (a: number[], b: number[], what: string) => a.forEach((x, i) => assertAlmostEquals(x, b[i], 1e-9, `${what}[${i}]`));
 
@@ -52,3 +53,31 @@ Deno.test("the across slider runs the line, with room at both ends", () => {
   assertEquals(parseLineOrientation(lineOrientation("local-markup-3", "along-2")), { markupId: "local-markup-3", view: "along-2" });
   assertEquals(parseLineOrientation("axial"), null);
 });
+
+// ANY SCALE (Ron, 2026-10-20: "did you forget about scales? from astrophysics to electron microscope"): the line view's
+// fixed parts -- the room past the ends, the smallest views -- are voxels of the scene, and today's mm on a CT.
+Deno.test("the line view on a clinical grid is today's", () => {
+  const ax = lineAxes([0, 0, 0], [0, 0, 10])!;
+  for (const v of [undefined, 0.3, 0.7, 1, 3]) {
+    assertEquals(lineFieldOfView(ax, "across", v), 40);
+    assertEquals(lineFieldOfView(ax, "along-1", v), 60);
+    assertEquals(lineRange(ax, "across", v), { min: -7.5, max: 17.5 });   // a quarter of the line and 5 mm past each end
+  }
+  assertEquals(lineFieldOfView(lineAxes([0, 0, 0], [0, 0, 100])!, "across", 0.7), 120);
+});
+
+for (const [what, v] of SCALES) {
+  Deno.test(`a short line fills its view, at any scale: ${what}`, () => {
+    // A line ten voxels long, wherever it is.
+    const at = 1000 * v, ax = lineAxes([at, at, at], [at, at, at + 10 * v])!;
+    assert(ax, "ten voxels apart is a line");
+    for (const view of ["across", "along-1", "along-2"] as const) {
+      const fov = lineFieldOfView(ax, view, v) / v;
+      assert(fov >= 10 && fov <= 240, `${view}: ${fov} voxels across`);
+      const r = lineRange(ax, view, v), room = (r.max - r.min - 15 * v) / 2 / v;   // past the line and its quarters
+      assert(room >= 1.25 - 1e-9 && room <= 20 + 1e-9, `${view}: ${room} voxels of room at each end`);
+    }
+    // The same point twice is no line, at any scale.
+    assertEquals(lineAxes([at, at, at], [at, at, at]), null);
+  });
+}

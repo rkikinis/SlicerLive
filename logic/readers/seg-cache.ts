@@ -95,7 +95,7 @@ export function segCacheKeyFromHead(head: Uint8Array, totalBytes: number, ref: S
  * records lack, and every old record becomes a miss once. 2: `referencedSOPInstanceUIDs`
  * (2026-09-13), without which a SEG cannot find its frame in a sequence.
  */
-const RECORD_VERSION = 5;   // 5: the codes the file carries (`fileCodes`) and the algorithm name past the background segment (2026-09-20); 4: the label map form decoded as such (2026-09-18); 3: overlapVoxels, UTF-8 names
+const RECORD_VERSION = 6;   // 6: who wrote the file (`writtenBy`, critic 2026-10-20, finding 3); 5: the codes the file carries (`fileCodes`) and the algorithm name past the background segment (2026-09-20); 4: the label map form decoded as such (2026-09-18); 3: overlapVoxels, UTF-8 names
 function keyFrom(uid: string | null, totalBytes: number, ref: SegReference): string | null {
   if (!uid) return null;
   const geom = `${ref.dims.join("x")}|${ref.ijkToRAS.map((v) => v.toFixed(6)).join(",")}`;
@@ -240,8 +240,8 @@ export async function clearSegCache(): Promise<void> {
  * must not fail on the way out.
  */
 /**
- * Where the decode runs. The application installs a worker-backed one; everything else uses the
- * direct call. A decoder that fails is not caught here: a load must fail loudly, not silently
+ * Where the decode runs. The direct call, in the app too: a worker-backed one was measured slower and is not installed
+ * (render/demos/slicer-app.ts); the hook stays for a caller that wants one. A decoder that fails is not caught here: a load must fail loudly, not silently
  * fall back to a slower path that may fail the same way.
  */
 export let segDecoder: ((bytes: ArrayBuffer, ref: SegReference, onPhases?: (p: DecodePhases) => void) => Promise<DecodedSeg>) | null = null;

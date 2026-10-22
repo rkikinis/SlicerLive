@@ -160,6 +160,7 @@ export class CineField implements Field {
   uniformFloats() { return 28; }          // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  voxel(): number { return this.stepMm; }
   /** The currently displayed frame's texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture(): GPUTexture { return this.texes[this.a]; }
 
@@ -212,7 +213,7 @@ fn sample_field_cine${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let lo = u_material.cine${s}_clim.x; let hi = u_material.cine${s}_clim.y;
   let tf = textureSampleLevel(t_lut_cine${s}, s_lin, vec2<f32>(clamp((val - lo) / max(hi - lo, 1e-6), 0.0, 1.0), 0.5), 0.0);
   let step = u_material.scene.x;
-  let unit = max(u_material.cine${s}_params.x, 1e-3);
+  let unit = max(u_material.cine${s}_params.x, 1e-3 * step);   // a zero guard, relative to the step (scene-scale.ts)
   let opacity = clamp(1.0 - pow(1.0 - clamp(tf.a, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
   let h = step * 2.0;

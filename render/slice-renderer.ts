@@ -271,6 +271,9 @@ export function slicerDefaultOffset01(
 }
 
 export class SliceRenderer {
+  /** The card's own time for each picture, when the app measures it (gpu-scope.ts PassClock): the frame pass and every
+   *  further overlay pass write their timestamps through it. */
+  clock: { writes(): { timestampWrites?: GPURenderPassTimestampWrites } } | null = null;
   private dev: GPUDevice;
   private format: GPUTextureFormat;
   private pipeline: GPURenderPipeline;
@@ -847,7 +850,7 @@ export class SliceRenderer {
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     this.u[112] = 0;
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "load", storeOp: "store" }] });
+    const pass = enc.beginRenderPass({ ...this.clock?.writes(), colorAttachments: [{ view, loadOp: "load", storeOp: "store" }] });
     pass.setPipeline(this.overlayPipeline);
     // The bind group was made for the main pipeline's layout; both pipelines are `layout: "auto"`
     // over the same shader, so a bind group for the overlay pipeline's layout is made from the same
@@ -868,7 +871,7 @@ export class SliceRenderer {
     this.u[111] = transparentOutside;                                                          // segParams.w
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 - transparentOutside } }] });
+    const pass = enc.beginRenderPass({ ...this.clock?.writes(), colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 - transparentOutside } }] });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bind!); pass.draw(3); pass.end();
     this.dev.queue.submit([enc.finish()]);
   }

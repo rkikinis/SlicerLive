@@ -5,6 +5,8 @@
 // macOS's dialog (the server reads it from disk; nothing passes through the page), or files the page already holds
 // (DICOM files…, a dropped folder), uploaded one by one into the database's staging folder and then added.
 
+import { startWork } from "../working.ts";
+
 export interface ImportResult {
   series: { uid: string; modality: string; description: string; instances: number; patientName: string }[];
   patients: number; studies: number; instances: number; already: number;
@@ -12,19 +14,42 @@ export interface ImportResult {
   failed: { uid: string; description: string; error: string }[];
   notes: string[];
   ms: number;
+  /** Stopped by the person before the database took anything: nothing was added. */
+  stopped?: boolean;
 }
-interface Progress { phase: string; files: number; read: number; dicom: number; series: number; seriesDone: number }
+interface Progress { phase: string; files: number; read: number; dicom: number; series: number; seriesDone: number; copied?: number }
 
+// ON THE 3D VIEW while it runs (render/working.ts; Ron, 2026-10-17): reading the files, then adding the scans, counted,
+// with Stop -- which the server honors before the database takes anything (desktop/db-import.ts): nothing is then added.
 export async function followImport(job: string, onStatus: (s: string) => void, what: string): Promise<ImportResult> {
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 400));
-    const j = await fetch(`/_db/_import/${job}`, { cache: "no-store" }).then((r) => r.json()) as { progress: Progress; result?: ImportResult; error?: string };
-    if (j.error) throw new Error(j.error);
-    if (j.result) return j.result;
-    const p = j.progress;
-    onStatus(p.phase === "reading" ? `Adding to ${what}: reading ${p.read} of ${p.files || "…"} files`
-      : `Adding to ${what}: scan ${Math.min(p.seriesDone + 1, p.series)} of ${p.series}`);
-  }
+  let stopAsked = false;
+  const work = startWork({
+    title: `Adding to ${what}: reading the files`, unit: "files",
+    stop: () => { stopAsked = true; void fetch(`/_db/_import/${job}`, { method: "DELETE" }).catch(() => {}); work.say(`Stopping: adding to ${what}`); work.unstoppable(); },
+    stopTitle: "Stop adding. Nothing is added; the files on the disk stay as they are.",
+  });
+  let ok = false;
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 400));
+      const j = await fetch(`/_db/_import/${job}`, { cache: "no-store" }).then((r) => r.json()) as { progress: Progress; result?: ImportResult; error?: string };
+      if (j.error) throw new Error(j.error);
+      if (j.result) {
+        ok = !j.result.stopped;
+        // A STOP THAT CAME TOO LATE IS SAID (critic 2026-10-17, finding 3): the database had already taken the scans.
+        if (stopAsked && !j.result.stopped) j.result.notes = [...(j.result.notes ?? []), "The Stop came after the database had taken the scans: they were added."];
+        return j.result;
+      }
+      const p = j.progress;
+      // Each stage its own words and count, so a bar never runs backwards under one title (finding 9).
+      if (stopAsked) { /* "Stopping" stays */ }
+      else if (p.phase === "reading") work.step(p.read, p.files || undefined);
+      else if (p.phase === "adding") { work.say(`Adding to ${what}: copying the scans`, "scans"); work.step(p.copied ?? 0, p.series); }
+      else if (p.phase === "indexing") { work.unstoppable(); work.say(`Adding to ${what}: entering the scans`, "scans"); work.step(p.seriesDone, p.series); }
+      onStatus(p.phase === "reading" ? `Adding to ${what}: reading ${p.read} of ${p.files || "…"} files`
+        : `Adding to ${what}: scan ${Math.min(p.seriesDone + 1, p.series)} of ${p.series}`);
+    }
+  } finally { work.done(ok); }
 }
 
 /** A chosen folder (its token from /_db/_choose-folder), added by the server. */
@@ -38,17 +63,31 @@ export async function addFolderToDatabase(dbId: string, token: string, what: str
 /** Files the page holds: uploaded (four at a time), then added; the server leaves out what is not DICOM. */
 export async function addFilesToDatabase(dbId: string, files: File[], what: string, onStatus: (s: string) => void): Promise<ImportResult> {
   const job = crypto.randomUUID();
-  let sent = 0, next = 0;
+  let sent = 0, next = 0, stopped = false;
+  // ON THE 3D VIEW, counted, with Stop (critic 2026-10-17, working banner, finding 14: a dropped folder's copy had
+  // neither). A stop drops what was sent before any import starts: nothing is added.
+  const work = startWork({
+    title: `Adding to ${what}: copying the files`, unit: "files", total: files.length,
+    stop: () => { stopped = true; work.say(`Stopping: adding to ${what}`); work.unstoppable(); },
+    stopTitle: "Stop adding. Nothing is added; the files stay where they are.",
+  });
   const one = async () => {
     for (;;) {
+      if (stopped) return;
       const i = next++;
       if (i >= files.length) return;
       const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_upload/${job}/${i}`, { method: "POST", body: files[i] });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `upload failed (${r.status})`);
-      if (++sent % 20 === 0) onStatus(`Adding to ${what}: copying ${sent} of ${files.length} files`);
+      work.step(++sent);
+      if (sent % 20 === 0) onStatus(`Adding to ${what}: copying ${sent} of ${files.length} files`);
     }
   };
-  await Promise.all([one(), one(), one(), one()]);
+  try { await Promise.all([one(), one(), one(), one()]); }
+  finally { work.done(!stopped); }
+  if (stopped) {
+    await fetch(`/_db/${encodeURIComponent(dbId)}/_upload/${job}`, { method: "DELETE" }).catch(() => {});
+    return { series: [], patients: 0, studies: 0, instances: 0, already: 0, skipped: [], skippedCount: 0, failed: [], notes: ["Stopped: nothing was added."], ms: 0, stopped: true };
+  }
   const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ upload: job }) });
   const j = await r.json() as { job?: string; error?: string };
   if (!j.job) throw new Error(j.error ?? "the server did not start the import");
@@ -84,6 +123,6 @@ export function describeImport(r: ImportResult, dbName: string): { title: string
     lines.push(`Left out: ${plural(r.skippedCount, "file")}${top.length ? ` (${top.join("; ")})` : ""}.`);
   }
   lines.push(...(r.notes ?? []));
-  const title = r.failed.length ? "Some scans were not added" : r.series.length ? `Added to ${dbName}` : r.already ? `Already in ${dbName}` : "No DICOM images found";
+  const title = r.stopped ? `Stopped: nothing added to ${dbName}` : r.failed.length ? "Some scans were not added" : r.series.length ? `Added to ${dbName}` : r.already ? `Already in ${dbName}` : "No DICOM images found";
   return { title, lines };
 }

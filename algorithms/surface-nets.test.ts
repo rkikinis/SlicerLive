@@ -237,3 +237,28 @@ Deno.test("normals stay accurate when the voxels are anisotropic", () => {
   // shape away for the shading.
   assert(rad[Math.floor(rad.length * 0.95)] < sz / 2, "radius error exceeds half a slice");
 });
+
+// A MIRRORING GRID (critic 2026-10-21, surfaces export, finding 1): with a negative determinant -- slices head to foot,
+// NIfTI LAS, FreeSurfer's LIA -- every face had pointed inward. The signed volume of a closed outward surface is positive.
+Deno.test("the surface faces outward on mirroring grids as on right-handed ones", () => {
+  const nx = 16, ny = 8, nz = 6, lab = new Uint8Array(nx * ny * nz);
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) lab[(k * ny + j) * nx + i] = 3;
+  const signedVolume = (p: Float32Array, idx: Uint32Array) => {
+    let v = 0;
+    for (let t = 0; t < idx.length; t += 3) {
+      const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+      v += p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1]) - p[a + 1] * (p[b] * p[c + 2] - p[b + 2] * p[c]) + p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c]);
+    }
+    return v / 6;
+  };
+  const grids: [string, number[]][] = [
+    ["identity", [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
+    ["DICOM axial", [-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
+    ["slices descending", [-1, 0, 0, 0, 0, -1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1]],
+    ["NIfTI LAS", [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
+    ["FreeSurfer LIA", [-1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1]],
+  ];
+  const vols = grids.map(([name, m]) => { const [mesh] = surfaceNets(lab, [nx, ny, nz], m); return [name, signedVolume(mesh.positions, mesh.indices)] as const; });
+  for (const [name, v] of vols) assert(v > 0, `${name}: signed volume ${v} -- the faces point inward`);
+  for (const [name, v] of vols) assert(Math.abs(v - vols[0][1]) < 1e-3 * vols[0][1], `${name}: ${v} against ${vols[0][1]}`);
+});

@@ -9,6 +9,7 @@
 import type { Orientation } from "../render/slice-renderer.ts";
 import { sliceBoundsFor, sliceSpacingFor } from "../render/slice-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
+import { voxelFromExtent, voxelOrUnit } from "../render/scene-scale.ts";
 
 // The two in-plane RAS axes (row, col) for each orientation — Slicer's slice-view axes.
 const IN_PLANE: Record<Orientation, [0 | 1 | 2, 0 | 1 | 2]> = {
@@ -45,7 +46,11 @@ export interface OffsetRange { min: number; max: number; step: number }
 /** Slider range + step for a slice, Slicer's signed offset convention (mm along the normal). */
 export function offsetRangeResolution(orient: Orientation, ijkToRAS: ArrayLike<number>, rasLo: Vec3, rasHi: Vec3): OffsetRange {
   const [lo, hi] = sliceBoundsFor(orient, rasLo, rasHi);
-  const step = sliceSpacingFor(orient, ijkToRAS) || 1;
+  // The grid's spacing along the normal. Only a grid that declares none usable (a zero or missing column) borrows one:
+  // a 256th of the box -- never a fixed 1 mm, which is a million voxels at a microscope's scale (render/scene-scale.ts;
+  // Ron, 2026-10-20: "from astrophysics to electron microscope").
+  const step = voxelOrUnit(sliceSpacingFor(orient, ijkToRAS),
+    voxelFromExtent(Math.hypot(rasHi[0] - rasLo[0], rasHi[1] - rasLo[1], rasHi[2] - rasLo[2])));
   if (hi - lo < step) { const c = (lo + hi) / 2; return { min: c - step, max: c + step, step }; }  // single-slice
   return { min: lo, max: hi, step };
 }

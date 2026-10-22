@@ -32,6 +32,9 @@ export interface WriteOptions {
   layout?: { arrangement: number; arrangementName?: string; splits?: Record<string, number> };
   /** The window's current values for what the live scene does not carry. */
   now?: () => string;
+  /** The extensions' own state (logic/scene/extensions.ts collectExtensionState): written under `extensions`, each
+   *  named with its version in `extensionsUsed`. */
+  extensions?: { extensions: Record<string, { v: number; state: unknown }>; used: string[] };
 }
 
 export interface WrittenScene {
@@ -216,13 +219,14 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
   const empty = !studyUID;
   const doc: Obj = {
     mrson: MRSON_VERSION,
-    extensionsUsed: [PROFILE_ID],
+    extensionsUsed: [PROFILE_ID, ...(o.extensions?.used ?? [])],
     source: { producer: o.producer, producedAt: (o.now ?? (() => new Date().toISOString()))(), origin: o.origin },
     v: (o.previousV ?? 0) + 1,
     name: o.name,
     study: { studyInstanceUID: studyUID ?? "" },
     studies,
     nodes: out,
+    ...(o.extensions && Object.keys(o.extensions.extensions).length ? { extensions: o.extensions.extensions } : {}),
   };
   fixable.sort((a, b) => Number(a.type === "segmentation") - Number(b.type === "segmentation"));   // volumes first
   return { doc, problems: checkScene(doc), refused, fixable, ...(empty ? { empty: true } : {}) };

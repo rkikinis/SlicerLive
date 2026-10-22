@@ -19,6 +19,7 @@
 import { utf8InsideSequence } from "./dicom-series.ts";
 import { dicomIO } from "../dicom-io.ts";
 import { invertRowMajor } from "../transforms.ts";
+import { writtenByAlbula } from "../albula-private.ts";
 
 /** Geometry of the volume a SEG is being placed onto. */
 export interface SegReference {
@@ -69,6 +70,8 @@ export interface DecodedSeg {
   referencedSeriesUID?: string;
   /** The object's own SOP class (binary …66.4 or label map …66.7), for anything that references it. */
   sopClassUID?: string;
+  /** The object's own instance UID: what surfaces made from it name as their source (critic 2026-10-21, finding 2). */
+  sopInstanceUID?: string;
   /**
    * The instances it names within that series. A series can hold several volumes -- the five
    * phases of a gated CTA -- and only these say WHICH one the SEG was drawn on.
@@ -94,6 +97,9 @@ export interface DecodedSeg {
   algorithmName?: string;
   /** `SegmentAlgorithmType` of the first segment, so a re-save writes the type the file had (second critic, finding 8). */
   algorithmType?: "AUTOMATIC" | "SEMIAUTOMATIC" | "MANUAL";
+  /** "SlicerAlbula" when Albula wrote the file (its SoftwareVersions or its private block, logic/albula-private.ts):
+   *  only such a file's colors follow Albula's scheme on load (logic/scheme-colors.ts followAlbulaColors). */
+  writtenBy?: "SlicerAlbula";
   /**
    * How the SEG's own geometry was arrived at.
    *
@@ -141,6 +147,7 @@ interface SegDataset {
   BitsAllocated?: number;
   PixelPaddingValue?: number;
   SpecificCharacterSet?: string;
+  SoftwareVersions?: string | string[];
   Rows?: number;
   Columns?: number;
   SegmentSequence?: {
@@ -519,5 +526,5 @@ export async function decodeSegmentation(
     }
   }
   const emptySegments = colors.map((c) => c[0]).filter((n) => !placed.has(n));
-  return { lab, colors, names, fileCodes, referencedSeriesUID, sopClassUID: String(ds.SOPClassUID ?? ""), ...(referencedSOPInstanceUIDs?.length ? { referencedSOPInstanceUIDs } : {}), ...(referencedFrames.length ? { referencedFrames } : {}), emptySegments, overlapVoxels: overlaps, framesOutside: outside, geometry, algorithmName, ...(algorithmType ? { algorithmType } : {}) };
+  return { lab, colors, names, fileCodes, referencedSeriesUID, sopClassUID: String(ds.SOPClassUID ?? ""), ...(ds.SOPInstanceUID ? { sopInstanceUID: String(ds.SOPInstanceUID) } : {}), ...(referencedSOPInstanceUIDs?.length ? { referencedSOPInstanceUIDs } : {}), ...(referencedFrames.length ? { referencedFrames } : {}), emptySegments, overlapVoxels: overlaps, framesOutside: outside, geometry, algorithmName, ...(algorithmType ? { algorithmType } : {}), ...(writtenByAlbula(ds.SoftwareVersions, dict.dict) ? { writtenBy: "SlicerAlbula" as const } : {}) };
 }

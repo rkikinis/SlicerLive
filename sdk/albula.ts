@@ -31,7 +31,31 @@
 // Version 11 (2026-10-06): setSlicePlane -- a slice view on any plane (its sliceToRAS), for a module that shows the head
 // in its own frame rather than the scanner's (the Tract review).
 
-export const SDK_VERSION = 11;
+export const SDK_VERSION = 20;   // 20 (2026-10-21, the critic's round): onAskedDerived (a set asked for a scan already on
+// screen reaches the module) and forgetAskedDerivedFor (an ask lasts while its scan is in the scene).
+// 19 (2026-10-21): askDerived / askedDerived (logic/asked-derived.ts) -- the tract set ticked in the
+// DICOM browser (or recorded in a scene) for a scan, so the module shows that one and not the newest (Ron: "when I loaded the tracts it did not
+// load its parent"; the browser now brings the scan too).
+// 18 (2026-10-21, Ron: "yes, build the scene state for extensions"): registerSceneState --
+// an extension's own state in a saved scene, under its name and version (logic/scene/extensions.ts); a window without
+// the extension carries the block unchanged.
+// 17 (2026-10-20, the critic's round on the after-load rules): loadDatabaseSeries takes
+// `{ afterLoad: false }` for a module's load for its own purpose (finding 14); and a module's database calls for a scan
+// in the scene find that scan's own database, not only the one this window has open now (finding 10) -- no call changes.
+// 16 (2026-10-19): registerAfterLoad and MAJOR_TRACTS -- an extension's say in what the 3D
+// view shows after a load (render/after-load.ts), and the major tracts of the rules' version.
+// 15 (2026-10-17): startWork -- the app's one working banner (render/working.ts), shared with
+// every module: stacked with the others, the same line once, Stop, a measured time. viewBanner stays for a module's own
+// strip (a prompt with its own buttons).
+// 14 (2026-10-16): viewBanner and pickRectangle -- what is going on, shown across the 3D view; a rectangle drawn in a view
+// 12 (2026-10-14): openDatabaseId exported (the import-time jobs, which database is open)
+
+/** Work past a few seconds, said on the 3D view (render/working.ts): what, how far, Stop, the usual time when measured. */
+export { startWork, type Work, type WorkOptions } from "../render/working.ts";
+/** What the 3D view shows after a load (render/after-load.ts): a handler that shows the load returns true. */
+export { AFTER_LOAD_VERSION, MAJOR_TRACTS, registerAfterLoad, type AfterLoadHandler, type Loaded } from "../render/after-load.ts";
+export { registerSceneState, type RestoredExtension, type SceneStateHandler } from "../logic/scene/extensions.ts";
+export { askDerived, askedDerived, forgetAskedDerivedFor, onAskedDerived } from "../logic/asked-derived.ts";
 
 // ── joining the app ──────────────────────────────────────────────────────────────────────────────────────────────
 /** A module (a panel in the module menu): registered when the app is ready, with the shell, scene, store and device. */
@@ -59,7 +83,8 @@ export async function seriesDicomFiles(seriesInstanceUID: string): Promise<Array
 /** A series of the open database, as its index knows it (SDK 9). */
 export interface DatabaseSeries { seriesInstanceUID: string; studyInstanceUID?: string; patientName?: string; patientID?: string; studyDescription?: string; studyDate?: string; seriesNumber?: number; seriesDate?: string; seriesTime?: string; modality?: string; description?: string; count: number }
 /** SDK 9: the open database's series and how they derive from each other (kind "tracts", "surface", "algorithm", …);
- *  null when no database is served. For a module that lists cases itself. */
+ *  null when no database is served. For a module that lists cases itself. SDK 17: with them, those of every database a
+ *  scan in the scene came from, so what a module asks about a loaded scan is there after a switch of databases. */
 export async function databaseSeries(opts: { /** Read the index again (a list made while an import job writes). */ fresh?: boolean } = {}): Promise<{ series: DatabaseSeries[]; edges: { child: string; parent: string; kind: string }[] } | null> {
   await databaseHandles();
   const g = globalThis as unknown as { __databaseSeries?: (o: { fresh?: boolean }) => Promise<{ series: DatabaseSeries[]; edges: { child: string; parent: string; kind: string }[] } | null> };
@@ -67,16 +92,26 @@ export async function databaseSeries(opts: { /** Read the index again (a list ma
 }
 /** The registered database this window has open: a module's files are read and written beside THAT one, not the
  *  machine-wide current one, which another window may switch (critic 2026-10-06, finding 7). */
-async function openDatabaseId(): Promise<string | null> {
+export async function openDatabaseId(): Promise<string | null> {
   await databaseHandles();
   const g = globalThis as unknown as { __openDatabaseId?: () => Promise<string | null> };
   return g.__openDatabaseId ? await g.__openDatabaseId() : null;
 }
-/** SDK 9: load series of the open database into the scene, as the DICOM browser's Load does. */
-export async function loadDatabaseSeries(seriesInstanceUIDs: string[], onProgress?: (line: string) => void): Promise<{ loaded: number; failures: string[] }> {
+/** WHERE A MODULE'S FILE IS (SDK 17; critic 2026-10-20, finding 10): named after a series of a scan the scene holds from
+ *  another database, that database -- a diffusion case keeps finding its maps after the person switched databases;
+ *  otherwise the one this window has open. */
+async function databaseIdFor(path: string): Promise<string | null> {
   await databaseHandles();
-  const g = globalThis as unknown as { __loadDatabaseSeries?: (u: string[], p?: (l: string) => void) => Promise<{ loaded: number; failures: string[] }> };
-  return g.__loadDatabaseSeries ? await g.__loadDatabaseSeries(seriesInstanceUIDs, onProgress) : { loaded: 0, failures: ["loading from the database is not available in this app"] };
+  const g = globalThis as unknown as { __databaseIdFor?: (p: string) => Promise<string | null> };
+  return g.__databaseIdFor ? await g.__databaseIdFor(path) : await openDatabaseId();
+}
+/** SDK 9: load series of the open database into the scene, as the DICOM browser's Load does -- and, as it does, what the
+ *  3D view shows after a load (render/after-load.ts). SDK 17: `{ afterLoad: false }` leaves the views as they are, for a
+ *  module that loads a scan for its own purpose and sets the views up itself (the Tract review's T1). */
+export async function loadDatabaseSeries(seriesInstanceUIDs: string[], onProgress?: (line: string) => void, opts: { afterLoad?: boolean } = {}): Promise<{ loaded: number; failures: string[] }> {
+  await databaseHandles();
+  const g = globalThis as unknown as { __loadDatabaseSeries?: (u: string[], p?: (l: string) => void, o?: { afterLoad?: boolean }) => Promise<{ loaded: number; failures: string[] }> };
+  return g.__loadDatabaseSeries ? await g.__loadDatabaseSeries(seriesInstanceUIDs, onProgress, opts) : { loaded: 0, failures: ["loading from the database is not available in this app"] };
 }
 /** SDK 9: the view layout, by its id in logic/layouts.ts (16 Conventional Widescreen, 2 Conventional, 3 Four-Up, …). */
 export const LAYOUT = { conventional: 2, fourUp: 3, conventionalWidescreen: 16 } as const;
@@ -132,18 +167,51 @@ export async function closeScene(): Promise<boolean> {
 /** SDK 9: write a small file of a module's own (a review's verdicts, as JSON) into the open database's folder, where the
  *  server puts what Albula writes (SlicerAlbula-SEG/); not indexed (not DICOM). Its address back, for databaseFileUrl. */
 export async function writeDatabaseFile(name: string, body: string | Uint8Array): Promise<{ ok: boolean; relativePath?: string; why?: string }> {
-  const id = await openDatabaseId();
+  const id = await databaseIdFor(name);
   if (!id) return { ok: false, why: "no DICOM database is open in this window" };
   const r = await fetch(`/_db/${encodeURIComponent(id)}/_write/${encodeURIComponent(name)}`, { method: "POST", body: body as BodyInit }).catch(() => null);
   if (!r?.ok) return { ok: false, why: `the server did not write it (${r?.status ?? "no answer"})` };
   return { ok: true, relativePath: `SlicerAlbula-SEG/${name.replace(/[^A-Za-z0-9._-]/g, "_")}` };
 }
-/** The address of a file in the open database's folder, as the server serves it (SDK 9) -- a cache file beside a series. */
+/** The address of a file in the open database's folder, as the server serves it (SDK 9) -- a cache file beside a series.
+ *  A file named after a series of a scan loaded from another database is in that one (SDK 17). */
 export async function databaseFileUrl(relativePath: string): Promise<string | null> {
-  const id = await openDatabaseId();
+  const id = await databaseIdFor(relativePath);
   return id ? `/_db/${encodeURIComponent(id)}/${relativePath.split("/").map(encodeURIComponent).join("/")}` : null;
 }
 /** Start placing a markup in the views, as the Markups module does (false: placement is not available in this app). */
+/** SDK 12: a text file (a table) at the top of Downloads, where Albula's pictures go (desktop/pictures.ts): a plain name
+ *  ending ".csv"; the answer gives its path. `showInDownloads(name)` opens the Finder on it. */
+export async function saveToDownloads(name: string, text: string): Promise<{ ok: boolean; path?: string; why?: string }> {
+  const r = await fetch(`/_picture/${encodeURIComponent(name)}`, { method: "POST", body: text }).catch(() => null);
+  if (!r?.ok) return { ok: false, why: r ? ((await r.json().catch(() => ({}))) as { error?: string }).error ?? `the server said ${r.status}` : "no server" };
+  return { ok: true, path: ((await r.json()) as { path?: string }).path };
+}
+export function showInDownloads(name: string): void { void fetch(`/_picture/${encodeURIComponent(name)}?reveal=1`).catch(() => {}); }
+/** SDK 12: the module template's names and row actions (render/demos/row-actions.ts; PALETTE.md "Names and row actions"). */
+export { addRowMenu, makeNameEditable, startEditing, type RowAction } from "../render/demos/row-actions.ts";
+/** SDK 13: a list in a module as tall as its rows and the column allow, with a grip to drag (MODULE-DESIGN-RULES.md). */
+export { fitList } from "../render/demos/fit-list.ts";
+
+/** SDK 14: a banner across the top of the 3D view -- a title, a progress bar (0..1; null: under way, no fraction),
+ *  a hint and buttons -- for work the person is waiting on, or a mode they are in. Update it as the work goes; close it
+ *  when done. Null outside the application. */
+export interface ViewBannerOpts { title: string; hint?: string; progress?: number | null; actions?: { label: string; primary?: boolean; title?: string; onClick: () => void }[] }
+export function viewBanner(opts: ViewBannerOpts): { update(o: Partial<ViewBannerOpts>): void; close(): void } | null {
+  const g = globalThis as unknown as { __viewBanner?: (o: ViewBannerOpts) => { update(o: Partial<ViewBannerOpts>): void; close(): void } };
+  return g.__viewBanner ? g.__viewBanner(opts) : null;
+}
+/** SDK 14: the person drags ONE rectangle in the 3D view or a slice view (Escape, or `signal` aborted: null).
+ *  `inside(ras)`: a point lies in it as that view shows it (in a slice view, within the slice's slab);
+ *  `insideSegment(a, b)`: a line's piece is in it -- in a slice view, where the piece CROSSES the plane (the dot drawn).
+ *  `onDrag` is told what the rectangle being dragged would hold, for a preview (null: not a rectangle). Not the 3D view
+ *  while the glasses show it. */
+export interface PickedRectangle { view: string; inside: (ras: number[]) => boolean; insideSegment: (a: number[], b: number[]) => boolean }
+export function pickRectangle(opts: { signal?: AbortSignal; onDrag?: (p: PickedRectangle | null) => void } = {}): Promise<PickedRectangle | null> {
+  const g = globalThis as unknown as { __pickRectangle?: (o: typeof opts) => Promise<PickedRectangle | null> };
+  return g.__pickRectangle ? g.__pickRectangle(opts) : Promise.resolve(null);
+}
+
 export function startPlacing(markupType: "fiducial" | string, persistent = false): boolean {
   const g = globalThis as unknown as { __startPlace?: (type: string, persistent: boolean) => void };
   if (!g.__startPlace) return false;

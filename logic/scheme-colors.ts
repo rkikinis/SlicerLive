@@ -4,14 +4,16 @@
 // user could say that they want to update, we do not want to ask this at each load" -- and, asked whether keeping them
 // is the default: "yes as default so people do not need to click on it for that scenario." So a segmentation loaded
 // from the database keeps the colors its file carries, a scene keeps the colors it was saved with, and a fresh result
-// takes the scheme's. Where the two differ, one button -- "Use the current colors" -- brings a segmentation to the
-// scheme; nothing asks.
+// takes the scheme's. Where the two differ, one button -- "Use Albula's colors" (once "Use the current colors") --
+// brings a segmentation to the scheme; nothing asks. EXCEPT ALBULA'S OWN COLORS (Ron, 2026-10-20: "programmatically
+// change to v4 so I dont have to do it manually for every case"): a segmentation Albula wrote whose colors are exactly
+// an earlier version of the scheme was colored by Albula, and follows the version in force on load (followAlbulaColors).
 //
 // `colorScheme` on the segmentation node says where its colors came from: a version number (the scheme's), or "file"
 // (kept as they arrived). It travels with a saved scene like any other field of the node.
 import { coloursFor, deltaE, type LookedUp } from "./segment-colours.ts";
 import { lookupStructure } from "./segment-naming.ts";
-import { paletteVersion } from "./anatomy/palettes.ts";
+import { atPaletteVersion, PALETTES, paletteVersion } from "./anatomy/palettes.ts";
 import type { LiveScene } from "../render/livescene.ts";
 
 export interface SchemeSegment { labelValue: number; structure?: string; name?: string; fileLabel?: string; color: number[] }
@@ -49,7 +51,44 @@ export function segmentationsOffScheme(live: LiveScene): { id: string; name: str
   return out;
 }
 
-/** "Use the current colors": the scheme's color for every segment it knows, the others unchanged. */
+/**
+ * ALBULA'S OWN COLORS FOLLOW ALBULA'S VERSION (Ron, 2026-10-20, on the light-blue CSF: "programmatically change to v4 so
+ * I dont have to do it manually for every case"). A segmentation whose every known segment has the color some version
+ * of Albula's scheme gives it was colored by Albula, not by a person: it is shown in the scheme in force. Colors a
+ * person or another program chose (any segment off every version) are kept, as Ron's rule of 2026-09-25 says. Returns
+ * the version the colors match, newest first, or undefined.
+ */
+export function albulaVersionOf(segs: readonly SchemeSegment[]): number | undefined {
+  for (const { version } of [...PALETTES].reverse()) {
+    const want = atPaletteVersion(version, () => schemeColors(segs));
+    if (!want.some((w) => w)) return undefined;   // the scheme knows none of them: not Albula's colors
+    if (segs.every((s, i) => !want[i] || deltaE(to255(s.color), to255(want[i]!)) < SAME)) return version;
+  }
+  return undefined;
+}
+
+/**
+ * After a load: each segmentation in `ids` that ALBULA WROTE (its origin's `writtenBy`, from the file's SoftwareVersions
+ * or private block: logic/albula-private.ts) and that is colored by an earlier version of Albula's scheme takes the
+ * scheme in force. The colors alone do not decide it (critic 2026-10-20, finding 3): the versions are built from public
+ * tables -- the catalog's published colors, FreeSurfer's own color table -- so a FreeSurfer result exported by Slicer or
+ * by another site's pipeline matches them too, and is someone else's colors. Returns the segments recolored.
+ */
+export function followAlbulaColors(live: LiveScene, ids: Iterable<string>): number {
+  let n = 0;
+  for (const id of ids) {
+    const node = live.nodes.get(id);
+    if (!node || node.type !== "segmentation") continue;
+    if ((node.origin as { writtenBy?: string } | undefined)?.writtenBy !== "SlicerAlbula") continue;
+    const segs = (node.segments ?? []) as SchemeSegment[];
+    const v = albulaVersionOf(segs);
+    if (v === undefined || !differsFromScheme(segs)) continue;
+    n += useCurrentColors(live, id);
+  }
+  return n;
+}
+
+/** "Use Albula's colors": the scheme's color for every segment it knows, the others unchanged. */
 export function useCurrentColors(live: LiveScene, segId: string): number {
   const n = live.nodes.get(segId);
   if (!n || n.type !== "segmentation") return 0;

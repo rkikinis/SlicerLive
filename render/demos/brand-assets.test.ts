@@ -51,12 +51,15 @@ Deno.test("the inlined logos are the SVGs on disk, not an older cut of them", ()
   }
 });
 
-Deno.test("every asset the page fetches by name is in the rebuild script's copy list", () => {
+// The rebuild script is the workspace's (Contents/tools), not this repository's: a checkout of the repository on its own
+// (the published snapshot) has no copy list to check, and the test says so instead of failing (critic 2026-10-16,
+// general audit, finding 20).
+const rebuildScript = join(here, "..", "..", "..", "..", "tools", "Rebuild SlicerAlbula App.command");
+const haveRebuildScript = (() => { try { Deno.statSync(rebuildScript); return true; } catch { return false; } })();
+Deno.test({ name: "every asset the page fetches by name is in the rebuild script's copy list", ignore: !haveRebuildScript }, () => {
   const html = read("slicer-app.html");
   const manifest = read("manifest.webmanifest");
-  const copyList = Deno.readTextFileSync(
-    join(here, "..", "..", "..", "..", "tools", "Rebuild SlicerAlbula App.command"),
-  );
+  const copyList = Deno.readTextFileSync(rebuildScript);
 
   const named = new Set<string>();
   for (const m of html.matchAll(/(?:href|src)="([\w.-]+\.(?:png|webmanifest|svg))"/g)) named.add(m[1]);

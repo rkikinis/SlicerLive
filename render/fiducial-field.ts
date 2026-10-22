@@ -6,6 +6,22 @@
 
 import type { Field } from "./fields.ts";
 import type { Vec3 } from "./mat4.ts";
+import { tuned } from "./scene-scale.ts";
+
+/**
+ * THE MARGIN AROUND SCREEN-SPACE GLYPHS' CENTERS in their bounds (a handle's size in the world depends on the camera, so
+ * the bounds take the centers and a generous margin): 0.15 of their spread, at least 40 mm on a clinical grid. The
+ * bounds join the scene's ray-entry box and the 3D fit, so a fixed 40 mm put a nanometer volume in a box a hundred
+ * thousand times its size and the march never reached it. The floor is kept exactly on grids of 0.25 to 5 mm and is 8 to
+ * 160 voxels outside them (scene-scale.ts; Ron, 2026-10-20: "from astrophysics to electron microscope"); with no voxel
+ * known it is 40 as before.
+ */
+export function screenPad(diag: number, voxel: number | undefined): number {
+  return Math.max(tuned(40, voxel, 40 / 5, 40 / 0.25), diag * 0.15);
+}
+/** A glyph field's march step: 1 mm on a clinical grid, kept on grids of 0.25 to 5 mm and that many voxels (0.2 to 4)
+ *  outside them, so a parsec's markups do not hold the whole scene to steps of a millimeter. */
+export function glyphStep(voxel: number | undefined): number { return tuned(1, voxel, 0.2, 4); }
 
 const MAX = 64; // spheres per field; fixed at WGSL-generation time (uniform array size)
 
@@ -28,6 +44,9 @@ export interface FiducialOpts {
    *  ring"): the sphere's color as a band, a thin white rim outside it so it reads on dark slices and dark tissue, and a
    *  clear center so what the point marks stays visible. */
   ring?: boolean;
+  /** The finest voxel of the data shown (scene units; scene-scale.ts), which sizes the bounds' margin and the march
+   *  step. Also setVoxel. Without one, the clinical mm. */
+  voxel?: number;
 }
 
 export class FiducialField implements Field {
@@ -48,8 +67,10 @@ export class FiducialField implements Field {
   private kd: number;
   private ks: number;
   private light: Vec3;
+  private dataVoxel: number | undefined;
 
   constructor(spheres: Sphere[] = [], opts: FiducialOpts = {}) {
+    this.setVoxel(opts.voxel);
     this.setSpheres(spheres);
     this.sh = opts.shininess ?? 80;
     this.ka = opts.kAmbient ?? 0.2;
@@ -77,6 +98,8 @@ export class FiducialField implements Field {
   }
 
   get count(): number { return this.n; }
+  /** The data's voxel changed (a volume loaded or hidden); takes effect at the next build or syncUniforms. */
+  setVoxel(v: number | undefined) { this.dataVoxel = v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined; }
 
   /** Hovered/active sphere (ghost mode only): it renders at full opacity while the others stay
    *  half-visible (partially hidden inside the volume). Pass null/-1 to clear. */
@@ -84,7 +107,7 @@ export class FiducialField implements Field {
   get activeIndex(): number { return this.active; }
 
   uniformFloats(): number { return 12 + MAX * 4 * 2; } // params(4)+params2(4)+light(4) + spheres + colors
-  sampleStep(): number { return 1.0; }
+  sampleStep(): number { return glyphStep(this.dataVoxel); }
 
   /** A field with no points has no place in the scene's bounds (`count` above says how many). */
   aabb(): [Vec3, Vec3] {
@@ -101,7 +124,7 @@ export class FiducialField implements Field {
     }
     if (this.screen) {
       const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-      const m = Math.max(40, diag * 0.15);
+      const m = screenPad(diag, this.dataVoxel);
       for (let a = 0; a < 3; a++) { lo[a] -= m; hi[a] += m; }
     }
     return [lo, hi];

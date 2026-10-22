@@ -102,7 +102,7 @@ export function decodedCacheReport(): { what: string; mb: number }[] {
   const out: { what: string; mb: number }[] = [];
   const mb = (d: { length: number; BYTES_PER_ELEMENT?: number }) => Math.round(d.length * (d.BYTES_PER_ELEMENT ?? 4) / 1048576);
   for (const v of decoded.values()) if (v.data.length) out.push({ what: "last decoded volume, kept for a repeat read (float32)", mb: mb(v.data) });
-  for (const v of decodedNative.values()) if (v.data.length) out.push({ what: "last decoded labelmap, kept for a repeat read", mb: mb(v.data as unknown as { length: number; BYTES_PER_ELEMENT?: number }) });
+  for (const v of decodedNative.values()) if (v.data.length) out.push({ what: "last decoded volume (a scan just loaded, or a labelmap), kept for a repeat read", mb: mb(v.data as unknown as { length: number; BYTES_PER_ELEMENT?: number }) });
   return out;
 }
 
@@ -306,7 +306,10 @@ async function assembleInWorker(
 }
 
 /** As fetchZarrVolume, but the assembled array keeps the stored dtype (no f32 expansion). */
-export async function fetchZarrVolumeNative(
+// ONE FETCH IN FLIGHT PER VOLUME in the stored dtype too (render-audit 2026-10-15): the slice and 3D managers now both
+// ask for a volume as stored, in the same tick; the second waits for the first.
+const inflightNative = new Map<string, Promise<ZarrVolumeNative>>();
+export function fetchZarrVolumeNative(
   blobBase: string,
   z: ZarrDesc,
   onBytes?: (n: number) => void,
@@ -317,7 +320,25 @@ export async function fetchZarrVolumeNative(
   wantChunks = false,
 ): Promise<ZarrVolumeNative> {
   const hitNative = decodedNative.get(descKey(z) ?? "");
-  if (hitNative) return hitNative;           // just ingested: no need to fetch and inflate it again
+  if (hitNative) return Promise.resolve(hitNative);   // just ingested: no need to fetch and inflate it again
+  // A SCAN'S READS ARE JOINED, A LABELMAP'S ARE NOT (critic 2026-10-15, render-audit-fixes finding 9): a joined read hands
+  // every caller the same array, and a labelmap's callers change theirs in place (a paint stroke, Grow from seeds). A
+  // scan is stored raw and read, never written into; a labelmap is stored deflated.
+  const key = z.compressor === "raw" ? `${descKey(z) ?? ""}|${wantRange}|${wantChunks}` : "|";
+  const going = key.startsWith("|") ? undefined : inflightNative.get(key);
+  if (going) return going;
+  const p = fetchZarrVolumeNativeOnce(blobBase, z, onBytes, concurrency, wantRange, wantChunks).finally(() => inflightNative.delete(key));
+  if (!key.startsWith("|")) inflightNative.set(key, p);
+  return p;
+}
+async function fetchZarrVolumeNativeOnce(
+  blobBase: string,
+  z: ZarrDesc,
+  onBytes: ((n: number) => void) | undefined,
+  concurrency: number,
+  wantRange: boolean,
+  wantChunks: boolean,
+): Promise<ZarrVolumeNative> {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
   // Content-addressed chunks (chunkHashes: "k.j.i" -> hash, fetched flat at blobBase+hash) or
@@ -344,10 +365,13 @@ export async function fetchZarrVolumeNative(
     }
   }
 
-  let idx = 0;
+  let idx = 0, failed = false;
   const worker = async () => {
-    while (idx < jobs.length) {
+    // ONE FAILED PIECE ENDS THE READ FOR EVERY LANE (critic 2026-10-15, render-audit-fixes finding 7): the others went on
+    // asking for their pieces after Promise.all had already rejected.
+    while (!failed && idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
+      try {
       // Stream the body so onBytes reports progress DURING the download — with
       // large (even single-chunk) volumes on a throttled store, an arrayBuffer()
       // wait looks like a hang to the user.
@@ -384,6 +408,7 @@ export async function fetchZarrVolumeNative(
       if (r) { if (r[0] < lo) lo = r[0]; if (r[1] > hi) hi = r[1]; }
       const pause = breathe();
       if (pause) await pause;
+      } catch (e) { failed = true; throw e; }
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));

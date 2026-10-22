@@ -40,6 +40,7 @@ import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type Impor
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
 import { bringDatabase, carryRecords, inspectFolder, packageFacts } from "./package-open.ts";
 import { isInside, placeOf } from "./paths.ts";
+import { databaseChanged } from "./extension-jobs.ts";
 import { DTI_SAMPLE, getDtiSample, getTestCases, SampleError, TEST_CASES, testCasesComplete, type DtiSampleProgress, type DtiSampleResult, type TestCaseProgress } from "./test-cases.ts";
 import { readRecord, recordKept, removeTransferred, sameDatabase, transferSeries, type TransferProgress, type TransferResult, type TransferSide } from "./db-transfer.ts";
 
@@ -159,7 +160,7 @@ let testCasesJob: { job: string; db: string; progress: TestCaseProgress; error?:
 let sampleJob: { job: string; db: string; progress: DtiSampleProgress; result?: DtiSampleResult; error?: string; ended?: number } | undefined;
 
 /** Imports running or finished in this process, by job id: their progress, then their result. Finished ones go after an hour. */
-const imports = new Map<string, { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number }>();
+const imports = new Map<string, { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number; stop?: boolean }>();
 /** ONE IMPORT AT A TIME PER DATABASE (critic, 2026-10-01, findings 1 and 15): the second waits, then sees what the first added. */
 const importQueue = new Map<string, Promise<unknown>>();
 const JOB = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -168,7 +169,7 @@ function startImport(dbId: string, dbPath: string, files: () => Promise<{ files:
   const now = Date.now();
   for (const [k, r] of imports) if (r.ended && now - r.ended > 3600_000) imports.delete(k);
   const job = crypto.randomUUID();
-  const rec: { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number } =
+  const rec: { db: string; progress: ImportProgress; result?: ImportResult; error?: string; started: number; ended?: number; stop?: boolean } =
     { db: dbId, progress: { phase: "reading", files: 0, read: 0, dicom: 0, series: 0, seriesDone: 0 }, started: now };
   imports.set(job, rec);
   const prev = importQueue.get(dbPath) ?? Promise.resolve();
@@ -176,7 +177,8 @@ function startImport(dbId: string, dbPath: string, files: () => Promise<{ files:
     try {
       const { files: list, left } = await files();
       rec.progress.files = list.length;
-      rec.result = await importFiles(dbPath, list, { move: opts.move, left, onProgress: (p) => { rec.progress = p; } });
+      rec.result = await importFiles(dbPath, list, { move: opts.move, left, onProgress: (p) => { rec.progress = p; }, stopped: () => rec.stop === true });
+      if (rec.result.series.length) databaseChanged(dbId);   // the extensions' import-time work (extension-jobs.ts)
       const w = icloudWarning(dbPath);
       if (w && rec.result.series.length) rec.result.notes.push(w);
     } catch (e) {
@@ -220,6 +222,7 @@ function startTransfer(from: TransferSide, to: TransferSide, series: string[], o
   queued([from.path, to.path], async () => {
     try {
       rec.result = await transferSeries(from, to, series, { move: opts.move, scenes: opts.scenes, by: opts.by, onProgress: (p) => { rec.progress = p; } });
+      if (rec.result.added) databaseChanged(to.id);
       const w = icloudWarning(to.path);
       if (w && rec.result.added) rec.result.notes.push(w);
     } catch (e) {
@@ -413,6 +416,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         // Behind any import into the same database (the same queue), so "already there" stays true.
         const prev = importQueue.get(dbPath) ?? Promise.resolve();
         const run = prev.catch(() => {}).then(() => getTestCases(dbPath, (p) => { rec.progress = p; }))
+          .then(() => databaseChanged(id, 1000))
           .catch((e) => { rec.error = (e as Error).message; })
           .finally(() => { rec.ended = Date.now(); rec.progress = { ...rec.progress, phase: "done" }; });
         importQueue.set(dbPath, run);
@@ -450,7 +454,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       const dbPath = defaultPath;
       const prev = importQueue.get(dbPath) ?? Promise.resolve();
       const run = prev.catch(() => {}).then(() => getDtiSample(dbPath, (p) => { rec.progress = p; }))
-        .then((r) => { rec.result = r; })
+        .then((r) => { rec.result = r; databaseChanged(id, 1000); })
         .catch((e) => {
           // One plain sentence for the person; the detail in the session log (critic 2026-10-14, 12).
           rec.error = e instanceof SampleError ? e.plain : `the sample could not be made (${(e as Error).message})`;
@@ -522,8 +526,15 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     }
   }
 
+  // DELETE /_db/_import/<job> -- stop it (importFiles: before the database takes anything; then nothing is added).
   // GET /_db/_import/<job> -- an import's progress, then its result.
   const ij = /^\/_db\/_import\/([0-9a-f-]{36})$/.exec(url.pathname);
+  if (ij && req.method === "DELETE") {
+    const rec = imports.get(ij[1]);
+    if (!rec) return Response.json({ error: "no such import" }, { status: 404 });
+    rec.stop = true;
+    return Response.json({ stopping: !rec.ended }, noStore);
+  }
   if (ij && req.method === "GET") {
     const rec = imports.get(ij[1]);
     if (!rec) return Response.json({ error: "no such import" }, { status: 404 });
@@ -617,6 +628,8 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       try { meta = JSON.parse(decodeURIComponent(indexHeader)) as IndexMeta; } catch { await Deno.remove(`${dir}/${name}`).catch(() => {}); return Response.json({ error: "the index record is not JSON" }, { status: 400 }); }
       try {
         const r = await indexFilesIntoDatabase(wdb.path, [{ file: written.rel, meta }]);
+        // A new image series (a crop, a converted scan) may be a job's input; a segmentation or a job's own result is not.
+        if (sub === "SlicerAlbula-Volumes" && !req.headers.get("x-albula-job")) databaseChanged(wid);
         return Response.json({ ...written, ...r });
       } catch (e) {
         await Deno.remove(`${dir}/${name}`).catch(() => {});
@@ -703,6 +716,15 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
 
   // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (DICOM files…, a drop), waiting in the staging folder.
   // POST /_db/<id>/_import {token} | {upload: <job>} -- add a chosen folder, or the uploads, to this database.
+  // DELETE /_db/<id>/_upload/<job> -- the uploads of a copy the person stopped, before any import: dropped.
+  const upDrop = /^\/_db\/([^/]+)\/_upload\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(url.pathname);
+  if (upDrop && req.method === "DELETE") {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(upDrop[1]));
+    if (!db || !db.exists) return Response.json({ error: "no such database" }, { status: 404 });
+    await Deno.remove(`${db.path}/${IMPORT_FOLDER}/${upDrop[2]}`, { recursive: true }).catch(() => {});
+    await Deno.remove(`${db.path}/${IMPORT_FOLDER}`).catch(() => {});   // the staging folder too, when nothing else waits in it
+    return Response.json({ ok: true }, noStore);
+  }
   const up = /^\/_db\/([^/]+)\/_upload\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([0-9]{1,7})$/.exec(url.pathname);
   const im = /^\/_db\/([^/]+)\/_import$/.exec(url.pathname);
   if ((up || im) && req.method === "POST") {
@@ -862,6 +884,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     if (!list?.length) return Response.json({ error: "file and meta, or files, are required" }, { status: 400 });
     try {
       const r = await indexFilesIntoDatabase(db.path, list);
+      if (!req.headers.get("x-albula-job")) databaseChanged(db.id);
       return Response.json(r);
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 409 });

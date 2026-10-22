@@ -85,6 +85,7 @@ Deno.test("round trip: a handful of segments on a small grid", async () => {
   const { out, labels, back } = await roundTrip(32, 32, 12, 3);
   assertEquals(out.segments, 3);
   assertEquals(histogram(back.lab), histogram(labels));
+  assertEquals(back.writtenBy, "SlicerAlbula", "the reader knows Albula wrote it (its colors follow Albula's scheme)");
   assertNoSegmentSpansTheImage(back.lab, 32, 32, 12);
 });
 
@@ -350,6 +351,33 @@ Deno.test("a SEG says which mapping coded it, with and without a run", async () 
   assert(withRun.ContentDescription.startsWith("task ts.v2:total;"), withRun.ContentDescription);
   assert(withRun.line.startsWith("task ts.v2:total;") && /; codes segmentation-comparison/.test(withRun.line), withRun.line);
   for (const v of versions(withRun.SoftwareVersions)) assert(v.length <= 64, v);   // LO
+});
+
+Deno.test("a FastSurfer SEG names what made it: haversack's version, FastSurfer's release, Albula's commit, the rules, FreeSurfer's code table (critic 2026-10-20, finding 3)", async () => {
+  const { runProvenanceOf } = await import("./ai-result.ts");
+  const series = await makeCtSeries(8, 8, 4);
+  const labels = slabLabels(8, 8, 4, 1);
+  // The job's provenance block as haversack 0.15.0's FastSurfer engine writes it (engines/fastsurfer.py): no `haversack`,
+  // no `models`, no `lineage`.
+  const job = { id: "j9", state: "succeeded", cached: false, inputIdentity: ["sha256:abc"], timings: { total: 48.2 },
+    provenance: { engine: "fastsurfer", fastsurfer_version: "2.5.4", network: "FastSurferVINN (2.5D view aggregation)", device: "mps", view_aggregation_device: "cpu", processing_vox_mm: 0.7, deviations: [] } } as never;
+  const run = runProvenanceOf("fastsurfer:asegdkt", job, "j9", { haversack: "0.15.0", albula: "dab8042abcde", rules: "brain-structures v2" })!;
+  const out = await segmentationToDicomSeg(labels, [8, 8, 4], [{ labelValue: 1, name: "Hippocampus, left" }], series.instances, { algorithmName: "fastsurfer:asegdkt", run });
+  const dict = dcmjs.data.DicomMessage.readFile(out.bytes.buffer.slice(out.bytes.byteOffset, out.bytes.byteOffset + out.bytes.byteLength) as ArrayBuffer).dict as Record<string, { Value?: unknown[] }>;
+  const nat = dcmjs.data.DicomMetaDictionary.naturalizeDataset(dict) as { SoftwareVersions: string | string[]; ContentDescription: string; ContributingEquipmentSequence: { ManufacturerModelName: string; SoftwareVersions: string } | { ManufacturerModelName: string; SoftwareVersions: string }[] };
+  const sv = Array.isArray(nat.SoftwareVersions) ? nat.SoftwareVersions : [nat.SoftwareVersions];
+  assertEquals(sv[0], "haversack 0.15.0");
+  assert(sv.includes("FastSurferVINN 2.5.4"), String(sv));
+  assert(sv.includes("SlicerAlbula dab8042abcde") && sv.includes("brain-structures v2"), String(sv));
+  assert(sv.some((v) => /^freesurfer-codes \d+ reviewed [0-9a-f]{8}$/.test(v)), String(sv));
+  // The two general tables code nothing of a FreeSurfer result, so they are not named.
+  assert(!sv.some((v) => v.startsWith("segmentation-comparison") || v.startsWith("MOOSE")), String(sv));
+  for (const v of sv) assert(v.length <= 64, v);
+  const eq = [nat.ContributingEquipmentSequence].flat()[0];
+  assertEquals([eq.ManufacturerModelName, eq.SoftwareVersions], ["fastsurfer", "0.15.0"]);
+  assert(nat.ContentDescription.length <= 64, nat.ContentDescription);
+  const line = String(dict["00771001"]?.Value?.[0] ?? "");
+  for (const want of ["haversack 0.15.0", "SlicerAlbula dab8042abcde", "rules brain-structures v2", "weights FastSurferVINN v2.5.4", "; codes freesurfer-codes "]) assert(line.includes(want), `${want} in ${line}`);
 });
 
 // THE FRAMES OF A SEQUENCE share one series: Ron's gated CTA writes five phases of 533 slices as

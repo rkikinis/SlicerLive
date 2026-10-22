@@ -32,6 +32,7 @@
 // can loop and roll freely, which is the point inside a vessel.
 
 import type { Vec3 } from "./mat4.ts";
+import { tuned } from "./scene-scale.ts";
 
 export interface EndoCamera {
   position: Vec3;
@@ -68,6 +69,12 @@ export interface EndoscopyOpts {
   clearance?: (dir: Vec3) => number;
   /** Stand-off kept from the wall, mm (default 6). */
   marginMm?: number;
+  /** The voxel of the volume being flown through, in the scene's units. The four defaults (speed, focal distance,
+   *  margin, the slowest speed) were set in mm for a CT; with a voxel given they stand as they were on every grid from
+   *  0.25 to 4 mm and follow the voxels outside it (render/scene-scale.ts `tuned`). Ron, 2026-10-20: "did you forget
+   *  about scales? from astrophysics to electron microscope" -- at 8 mm/s a flight through a 1 nm grid crosses eight
+   *  million voxels a second, and through a parsec grid it never moves. Without one, the mm stand. */
+  voxel?: number;
 }
 
 export interface EndoscopyControls {
@@ -108,12 +115,15 @@ export function attachEndoscopyControls(
   camera: EndoCamera,
   opts: EndoscopyOpts = {},
 ): EndoscopyControls {
-  let speed = opts.speedMmPerSec ?? 8;
+  const v = opts.voxel;
+  // In voxels: 8 mm/s, 30 mm and 6 mm are 2-32, 7.5-120 and 1.5-24 voxels -- 11, 43 and 9 on a 0.7 mm CT.
+  let speed = opts.speedMmPerSec ?? tuned(8, v, 2, 32);
+  const slowest = tuned(0.1, v, 0.025, 0.4);
   const turn = ((opts.turnDegPerSec ?? 60) * Math.PI) / 180;
   const lookRad = opts.lookRadPerPx ?? 0.005;
   const refUp: Vec3 = opts.referenceUp ?? [0, 0, 1];
-  const focalDist = opts.focalDistanceMm ?? 30;
-  const margin = opts.marginMm ?? 6;
+  const focalDist = opts.focalDistanceMm ?? tuned(30, v, 7.5, 120);
+  const margin = opts.marginMm ?? tuned(6, v, 1.5, 24);
 
   let cruise: Cruise = "stopped";
   const keys = new Set<string>();
@@ -233,7 +243,7 @@ export function attachEndoscopyControls(
     setCruise,
     lookAlong: (dir) => { setDirection(dir); opts.onChange?.(); },
     speed: () => speed,
-    setSpeed: (mmPerSec) => { speed = Math.max(0.1, mmPerSec); },
+    setSpeed: (mmPerSec) => { speed = Math.max(slowest, mmPerSec); },
     tick(dtSec) {
       let moved = false;
       const dt = Math.min(dtSec, 0.1);   // clamp: a long stall must not teleport the camera

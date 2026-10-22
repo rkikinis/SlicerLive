@@ -46,3 +46,17 @@ Deno.test("heartbeatFraction: the delay as a share of the R-R interval; nothing 
   assertEquals(heartbeatFraction({ heartRateBpm: 86 }, { index: "1", node: "n" }), "");
   assertEquals(indexOf("250 ms", 3), { value: "250", numeric: true });
 });
+
+Deno.test("a series of measurements (an extension's key on the frame) is not volume rendered on load; another series in time is", async () => {
+  const { measurementSeries } = await import("./sequences.ts");
+  const { registerVolumeInterpreter, unregisterVolumeInterpreter } = await import("./readers/volume-interpreters.ts");
+  const named = { indexType: "text", items: [{ index: "b0" }, { index: "b1000" }] };
+  const heart = { indexType: "numeric", items: [{ index: "213" }, { index: "250" }] };
+  registerVolumeInterpreter({ name: "diffusion" });
+  try {
+    assertEquals(measurementSeries(named, { origin: { modality: "MR", diffusion: { bValue: 1000 } } }), true);
+    assertEquals(measurementSeries(named, { origin: { modality: "CT" } }), false);           // names, no interpreter's key
+    assertEquals(measurementSeries(heart, { origin: { diffusion: { bValue: 0 } } }), false); // it plays
+  } finally { unregisterVolumeInterpreter("diffusion"); }
+  assertEquals(measurementSeries(named, { origin: { diffusion: { bValue: 1000 } } }), false); // no such interpreter here
+});

@@ -7,12 +7,42 @@ import type { Gpu } from "./device.ts";
 import type { Field } from "./fields.ts";
 import { bgAtWgsl, bgUniform, type RGB, SLICER_BG_BOTTOM, SLICER_BG_TOP } from "./background.ts";
 import { type Mat4, type Vec3, invert, lookAt, multiply, orthoZO, perspectiveZO, perspectiveZOTile } from "./mat4.ts";
+import { tuned, voxelFromExtent } from "./scene-scale.ts";
 
 const DEFAULT_FORMAT: GPUTextureFormat = "rgba8unorm-srgb";
 const SCENE_FLOATS = 16; // bmin(4) bmax(4) scene(4) bg(4)
 const CLIP_FLOATS = 36;  // clip_planes: array<vec4,8> (32) + clip_count: vec4 (4), appended as a tail
 
 interface Placed { field: Field; slot: number; uoff: number; bbase: number }
+
+/**
+ * THE SCENE'S MARCH STEP before the sub-voxel factor: the finest step any field asks for. A step that is not a positive
+ * number is left out rather than floored, so no length is held here (scene-scale.ts; Ron, 2026-10-20: "from
+ * astrophysics to electron microscope"); with none left, 1 as before.
+ */
+export function marchStep(steps: number[]): number {
+  let m = Infinity;
+  for (const s of steps) if (Number.isFinite(s) && s > 0 && s < m) m = s;
+  return Number.isFinite(m) ? m : 1.0;
+}
+
+/**
+ * THE DRAWING LOOK'S LENGTHS at the data's scale: AO radius, AO strength, outline threshold, halo strength, and the
+ * crevice test's depth tolerance. The three lengths were tuned by eye in mm on clinical scans (Ron, 2026-09-19/20) and
+ * are kept exactly on grids of 0.25 to 5 mm; outside that they stay the same number of voxels as at its edge, so a
+ * microscope's or a telescope's surfaces get crevice shadows and outlines and not a flat or an all-black picture.
+ */
+export function drawingLookParams(voxel: number | undefined): [number, number, number, number, number] {
+  const mm = (x: number) => tuned(x, voxel, x / 5, x / 0.25);
+  return [mm(14), 0.9, mm(2.5), 0.45, mm(0.3)];
+}
+
+/** A WGSL literal holding the f32 nearest `v` at any magnitude (toFixed(6) kept no digit of a nanometer grid's bounds). */
+export function wgslF32(v: number): string {
+  if (!Number.isFinite(v)) return "0.0";
+  const t = String(Math.fround(v));
+  return /[.eE]/.test(t) ? t : t + ".0";
+}
 
 /** Between the old double encoding (1.0) and the exact one (~2.2): Ron's choice from the patches, 2026-09-20. */
 const SURFACE_COLOUR_GAMMA = 1.6;
@@ -123,8 +153,8 @@ const NPR_WGSL = /* wgsl */ `
 struct NU {
   inv_view_proj : mat4x4<f32>,
   view_proj : mat4x4<f32>,
-  size : vec4<f32>,     // w, h, frame seed, _
-  params : vec4<f32>,   // AO radius mm, AO strength, edge threshold mm, halo strength
+  size : vec4<f32>,     // w, h, frame seed, AO depth tolerance (scene units)
+  params : vec4<f32>,   // AO radius, AO strength, edge threshold (scene units), halo strength
 };
 @group(0) @binding(0) var<uniform> nu : NU;
 @group(0) @binding(1) var t_col : texture_2d<f32>;
@@ -210,7 +240,7 @@ fn ign(p : vec2<f32>) -> f32 { return fract(52.9829189 * fract(dot(p, vec2<f32>(
     // facets a few mm across, and a sample just behind the neighboring facet's plane is not in a
     // crevice. Without this every seam between facets took a faint shadow, visible close up
     // (Ron, 2026-09-19: "the triangles seem to be visible").
-    let tol = 0.3 + 0.12 * (radius * scale);
+    let tol = nu.size.w + 0.12 * (radius * scale);
     if (dz > tol && dz < radius * 2.0) { occ += 1.0; }
   }
   let ao = 1.0 - occ / f32(N);
@@ -337,7 +367,7 @@ export interface SceneMesh {
   /** false: kept on the GPU but not drawn -- a frame of a sequence waiting for its turn. */
   visible?: boolean;
 }
-interface GpuMesh { id: string; positions: Float32Array; indices: Uint32Array; vbuf: GPUBuffer; ibuf: GPUBuffer; count: number; ubuf: GPUBuffer; color: [number, number, number]; opacity: number; visible: boolean; centre: [number, number, number] }
+interface GpuMesh { id: string; positions: Float32Array; indices: Uint32Array; vbuf: GPUBuffer; ibuf: GPUBuffer; count: number; ubuf: GPUBuffer; color: [number, number, number]; opacity: number; visible: boolean; centre: [number, number, number]; extent?: number }
 interface MeshTargets {
   /** w×h is what the textures hold; uw×uh is what THIS frame drew, in their top-left corner (a moving frame at a
    *  reduced resolution draws into a corner of the view-sized set instead of making its own; see meshTargets). */
@@ -345,6 +375,19 @@ interface MeshTargets {
   /** Copies of col/depth/nrm the solid pass reads while it writes the originals (made on first use). */
   colCopy?: GPUTexture; depthCopy?: GPUTexture; nrmCopy?: GPUTexture; solidIn?: GPUBindGroup;
 }
+
+/**
+ * SEE-THROUGH WALLS KEEP THEIR OWN DEPTH (Ron, 2026-10-21, on the corticospinal tract in tubes beside see-through
+ * anatomy: "z buffer is disorganized with transparent white matter"; "When I turn it on, the blue is behind the fibers").
+ * The solid pass used to blend every see-through wall a ray met into the one surface layer the meshes write, whose depth
+ * was the first OPAQUE wall's (or none), and the trace composited that layer once, at that depth: a tube between a
+ * see-through wall and what lay behind it was drawn over the wall. Now the first VEIL_K see-through walls of a pixel go
+ * into a list, each with its distance from the eye and its color, and the trace composites each when its march reaches
+ * it -- in front of the tubes behind it, behind the tubes in front. Walls past the VEIL_K-th stay in the layer as before.
+ * 4 covers a see-through gyrus over see-through white matter (the gyrus's front, the gyrus/white matter wall, the white
+ * matter's exit) with one to spare. 8 bytes an entry: 32 bytes a pixel, 51 MB at 1600 x 1000.
+ */
+const VEIL_K = 4;
 
 export class SceneRenderer {
   // ── surface meshes (models): rasterised before each trace into colour+depth targets the march composites ──
@@ -381,8 +424,24 @@ export class SceneRenderer {
     this.dev.queue.writeBuffer(this.camBuf, 112, this.viewProj as unknown as Float32Array);   // the solid pass's depth
   }
   drawingLookNow(): boolean { return this.drawingLook; }
-  /** AO radius (mm), AO strength, outline threshold (mm), halo strength. */
-  private nprParams: [number, number, number, number] = [14, 0.9, 2.5, 0.45];
+  /**
+   * The voxel the drawing look is sized by: the finest grid among the fields, else a 256th of the largest surface
+   * (voxelFromExtent), else none (the clinical mm). Lengths from it go through drawingLookParams.
+   */
+  lookVoxel(): number | undefined {
+    let v = Infinity;
+    for (const p of this.placed) { const x = p.field.voxel?.(); if (x !== undefined && Number.isFinite(x) && x > 0 && x < v) v = x; }
+    if (Number.isFinite(v)) return v;
+    let ext = 0;
+    for (const m of this.drawnMeshes) ext = Math.max(ext, m.extent ??= SceneRenderer.meshExtent(m.positions));
+    return voxelFromExtent(ext);
+  }
+  /** The largest side of a mesh's box; once per mesh, and only when the drawing look needs a scale without a grid. */
+  private static meshExtent(pos: Float32Array): number {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < pos.length; i += 3) for (let a = 0; a < 3; a++) { const x = pos[i + a]; if (x < lo[a]) lo[a] = x; if (x > hi[a]) hi[a] = x; }
+    return Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 0);
+  }
 
   /**
    * GEOMETRY ALREADY ON THE GPU STAYS THERE. A mesh with the same id and the same position and
@@ -545,18 +604,47 @@ export class SceneRenderer {
       this.meshTargetsBySize.set(key, t);
     }
     t.uw = w; t.uh = h;
+    if (this.veilsInTrace) this.veilFor(t);
     if (!t.bind) {
-      t.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: t.col.createView() }, { binding: 1, resource: t.depth.createView() }] });
+      t.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: this.traceGroup1(t, t.col) });
       // bindNpr was made against the previous pipeline's layout whenever bind was: remake it too.
-      if (t.colNpr) t.bindNpr = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: t.colNpr.createView() }, { binding: 1, resource: t.depth.createView() }] });
+      if (t.colNpr) t.bindNpr = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: this.traceGroup1(t, t.colNpr) });
     }
     return t;
+  }
+  /** Whether this pipeline's trace reads the see-through walls' list (a colored volume in the solid look is placed). */
+  private veilsInTrace = false;
+  /** THE SEE-THROUGH WALLS' LIST, ONE FOR ALL TARGET SIZES (critic 2026-10-21, finding 7: one per cached size was up to
+   *  five buffers of 50-300 MB): sized to the largest set of targets drawn, never past the device's own limits. A frame
+   *  uses its own corner of it (its targets' width is the stride) and clears that part; a pixel past the end keeps the
+   *  single layer (the shader checks arrayLength). */
+  private veilBuf?: GPUBuffer;
+  private veilBytes = 0;
+  private veilFor(t: MeshTargets): GPUBuffer {
+    const lim = Math.min(this.dev.limits.maxStorageBufferBindingSize, this.dev.limits.maxBufferSize);
+    const want = Math.max(8 * VEIL_K, Math.min(t.w * t.h * VEIL_K * 8, Math.floor(lim / (8 * VEIL_K)) * 8 * VEIL_K));
+    if (!this.veilBuf || this.veilBytes < want) {
+      this.veilBuf?.destroy();
+      this.veilBuf = this.dev.createBuffer({ size: want, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.veilBytes = want;
+      // Every group 1 made with the old buffer is made again.
+      for (const o of this.meshTargetsBySize.values()) { o.bind = undefined; o.bindNpr = undefined; o.solidIn = undefined; }
+    }
+    return this.veilBuf;
+  }
+  /** The bytes of the list this frame's targets use (cleared before the solid pass writes). */
+  private veilUsed(t: MeshTargets): number { return Math.min(this.veilBytes, t.w * t.h * VEIL_K * 8); }
+  /** The trace's group 1: the surfaces' color and depth, and the see-through walls when the trace reads them. */
+  private traceGroup1(t: MeshTargets, col: GPUTexture): GPUBindGroupEntry[] {
+    return [{ binding: 0, resource: col.createView() }, { binding: 1, resource: t.depth.createView() }, ...(this.veilsInTrace && this.veilBuf ? [{ binding: 3, resource: { buffer: this.veilBuf } }] : [])];
   }
   /** Rasterise the meshes for this frame's trace size; returns the bind group the trace pass needs. */
   private lastMeshTargets?: MeshTargets;
   private meshPass(enc: GPUCommandEncoder, w: number, h: number, capW = w, capH = h): GPUBindGroup {
     const t = this.meshTargets(w, h, capW, capH);
     this.lastMeshTargets = t;   // the probe reads this frame's depth, so it must be the size drawn
+    // No see-through wall until the solid pass writes one (an entry of alpha 0 is the list's end).
+    if (this.veilsInTrace && this.veilBuf) enc.clearBuffer(this.veilBuf, 0, this.veilUsed(t));
     const pass = enc.beginRenderPass({
       ...this.stageWrites(0, undefined),
       colorAttachments: [
@@ -628,6 +716,7 @@ export class SceneRenderer {
       if (!t.solidIn) {
         t.solidIn = this.dev.createBindGroup({ layout: this.solidPipeline!.getBindGroupLayout(1), entries: [
           { binding: 0, resource: t.colCopy.createView() }, { binding: 1, resource: t.depthCopy!.createView() }, { binding: 2, resource: t.nrmCopy!.createView() },
+          { binding: 3, resource: { buffer: this.veilFor(t) } },
         ] });
       }
       enc.copyTextureToTexture({ texture: t.col }, { texture: t.colCopy }, [w, h]);
@@ -654,13 +743,14 @@ export class SceneRenderer {
         { binding: 0, resource: { buffer: this.nprBuf! } }, { binding: 1, resource: t.col.createView() }, { binding: 2, resource: t.depth.createView() },
         { binding: 3, resource: t.nrm.createView() },
       ] });
-      t.bindNpr = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: t.colNpr.createView() }, { binding: 1, resource: t.depth.createView() }] });
+      t.bindNpr = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: this.traceGroup1(t, t.colNpr) });
     }
     const nu = new Float32Array(40);
     nu.set(this.baseInvVP as unknown as Float32Array, 0);
     nu.set(this.viewProj as unknown as Float32Array, 16);
-    nu[32] = w; nu[33] = h; nu[34] = (this.nprFrame++ % 64); nu[35] = 0;
-    nu[36] = this.nprParams[0]; nu[37] = this.nprParams[1]; nu[38] = this.nprParams[2]; nu[39] = this.nprParams[3];
+    const look = drawingLookParams(this.lookVoxel());
+    nu[32] = w; nu[33] = h; nu[34] = (this.nprFrame++ % 64); nu[35] = look[4];
+    nu[36] = look[0]; nu[37] = look[1]; nu[38] = look[2]; nu[39] = look[3];
     this.dev.queue.writeBuffer(this.nprBuf!, 0, nu);
     const np = enc.beginRenderPass({ colorAttachments: [{ view: t.colNpr.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     np.setViewport(0, 0, w, h, 0, 1);
@@ -1148,6 +1238,9 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
       (globalThis as unknown as { __traceStrips?: number }).__traceStrips = this.traceStrips;
     }).catch(() => { /* a lost device answers here too; nothing to adapt */ }).finally(() => { this.stripTiming = false; });
   }
+  /** How many strips this renderer cuts the ray march into now (the 3D interaction line). The solid look's pass is
+   *  not cut (critic 2026-10-17, fps measurement, finding 7). */
+  get strips(): number { return this.traceStrips; }
   /** For tests: fix the strip count (the adaptation then moves it from there). */
   setTraceStrips(n: number) { this.traceStrips = Math.max(1, Math.floor(n)); }
 
@@ -1300,7 +1393,9 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
         fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba8unorm" }] },
         primitive: { topology: "triangle-list", cullMode: "none" },
       });
-      // The solid pass (see wgsl()): only when a colored volume is in the scene.
+      // The solid pass (see wgsl()): only when a colored volume is in the scene. Its see-through walls' list is read by
+      // the trace then too (VEIL_K).
+      this.veilsInTrace = code.includes("fn fs_solid(");
       this.solidPipeline = code.includes("fn fs_solid(") ? this.dev.createRenderPipeline({
         layout: "auto",
         vertex: { module, entryPoint: "vs_main" },
@@ -1328,7 +1423,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
 
     // scene defaults
     this.setBackgroundGradient(SLICER_BG_TOP, SLICER_BG_BOTTOM);   // match 3D Slicer's 3D view
-    const step = this.placed.length ? Math.min(...this.placed.map((p) => p.field.sampleStep())) : 1.0;
+    const step = marchStep(this.placed.map((p) => p.field.sampleStep()));
     this.setSampleStep(step * 0.7); // sub-voxel for smoother integration (anti-banding)
     this.recomputeBounds();
     for (const p of this.placed) p.field.fillUniforms(this.mat, p.uoff);
@@ -1372,7 +1467,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     // The AABB is baked into the shader at build() time, so a field whose geometry
     // changes must go through build() again (every demo already does — that is also what
     // re-runs fillUniforms).
-    const wf = (v: number) => (Number.isFinite(v) ? v : 0).toFixed(6);
+    const wf = wgslF32;
     const boxSkipWGSL = (p: Placed) => {
       const [lo, hi] = p.field.aabb();
       return `
@@ -1478,6 +1573,8 @@ fn fs_solid(v : Varyings) -> SolidOut {
   let mesh_c = textureLoad(t_mesh_col, mpix, 0);
   let mesh_t = textureLoad(t_mesh_depth, mpix, 0).r;       // distance from the eye; 1e30 = none
   let mesh_n = textureLoad(t_mesh_nrm, mpix, 0);
+  let vb = veil_base(mpix);
+  var nveil : u32 = 0u;
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
@@ -1489,7 +1586,7 @@ fn fs_solid(v : Varyings) -> SolidOut {
   // ONE VOXEL PER STEP, not the trace's 0.7: every wall is placed by bisection between two steps, so
   // the step only has to be short enough not to jump over a structure, and a voxel-wide structure
   // is still caught (its smoothed copy or its labels hold the step that lands in it).
-  let step = max(u_material.scene.x, 1e-3) / 0.7;
+  let step = scene_step() / 0.7;
   t_near = max(t_near + step, 0.0);
   t_far = t_far - step;
   var t = t_near;
@@ -1498,6 +1595,9 @@ fn fs_solid(v : Varyings) -> SolidOut {
   var hp = vec3<f32>(0.0);
   var hn = vec3<f32>(0.0);
   var safety : i32 = 0;
+  var leaps : i32 = 0;                       // for the step-count picture's second and third modes
+  var walls : i32 = 0;
+  var inside : i32 = 0;
   var wasClipped = false;
   // The structure the ray is in, per colored volume: walls are where it changes. STARTED IN THE STATE
   // OF THE POINT THE RAY STARTS AT, so a camera inside a structure is not met by a wall behind the eye
@@ -1525,6 +1625,7 @@ ${clz.map((p) => `    if (u_material.clz${p.slot}_params.w > 0.5) { leap = min(l
     if (!clipped && !wasClipped && leap > step && leap < 1e29) {
       t = t + leap + 0.01 * step;
       safety = safety + 1;
+      leaps = leaps + 1;
       continue;
     }
     if (clipped) {
@@ -1551,7 +1652,8 @@ ${clz.map((p) => `      if (u_material.clz${p.slot}_params.w > 0.5) {
           let c = solid_shade_clz${p.slot}(nl, cutN, rd);
           if (c.a > 0.0) {
             if (!opaque && c.a >= 0.99) { opaque = true; hp = cutP; hn = cutN; }
-            acc = acc + (1.0 - acc.a) * c;
+            if (!opaque && nveil < VEIL_K && vb + VEIL_K <= arrayLength(&veil)) { veil[vb + nveil] = vec2<u32>(bitcast<u32>(distance(u_cam.eye.xyz, cutP)), pack4x8unorm(vec4<f32>(c.rgb, max(c.a, 1.0 / 255.0)))); nveil = nveil + 1u; }
+            else { acc = acc + (1.0 - acc.a) * c; }
           }
         }
         lab${p.slot} = nl;
@@ -1561,15 +1663,19 @@ ${clz.map((p) => `      if (u_material.clz${p.slot}_params.w > 0.5) {
 ${clz.map((p) => `      if (u_material.clz${p.slot}_params.w > 0.5) {
         let nl = solid_class_clz${p.slot}(wp, lab${p.slot}, rd);
         if (nl != lab${p.slot}) {
+          walls = walls + 1;
           let c = solid_wall_clz${p.slot}(wp - rd * step, wp, lab${p.slot}, nl, rd);
           if (c.a > 0.0) {
             if (!opaque && c.a >= 0.99) { opaque = true; hp = g_solid_p; hn = g_solid_n; }
-            acc = acc + (1.0 - acc.a) * c;
+            // A SEE-THROUGH WALL keeps its own depth (VEIL_K): listed, not blended into the layer.
+            if (!opaque && nveil < VEIL_K && vb + VEIL_K <= arrayLength(&veil)) { veil[vb + nveil] = vec2<u32>(bitcast<u32>(distance(u_cam.eye.xyz, g_solid_p)), pack4x8unorm(vec4<f32>(c.rgb, max(c.a, 1.0 / 255.0)))); nveil = nveil + 1u; }
+            else { acc = acc + (1.0 - acc.a) * c; }
           }
           lab${p.slot} = nl;
         }
       }`).join("\n")}
     }
+    if (${clz.map((p) => `lab${p.slot} > 0`).join(" || ") || "false"}) { inside = inside + 1; }
     t = t + step;
     safety = safety + 1;
   }
@@ -1582,9 +1688,21 @@ ${pickDispatch}
     let h = clamp(f32(safety) / 400.0, 0.0, 1.0);
     var od : SolidOut;
     od.col = vec4<f32>(h, h * h, 1.0 - h, 1.0); od.depth = vec4<f32>(1e30, 0.0, 0.0, 1.0); od.nrm = vec4<f32>(0.0); od.fd = 0.0;
+    // Mode 2: what the steps were -- red the fine steps (/400), green the leaps over blocks (/100), blue the walls met (/20).
+    // Mode 3: red the fine steps outside every structure (/400), green those inside one (/400), blue the walls (/20).
+    if (u_material.scene.z > 2.5) { od.col = vec4<f32>(clamp(f32(safety - leaps - inside) / 400.0, 0.0, 1.0), clamp(f32(inside) / 400.0, 0.0, 1.0), clamp(f32(walls) / 20.0, 0.0, 1.0), 1.0); return od; }
+    if (u_material.scene.z > 1.5) { od.col = vec4<f32>(clamp(f32(safety - leaps) / 400.0, 0.0, 1.0), clamp(f32(leaps) / 100.0, 0.0, 1.0), clamp(f32(walls) / 20.0, 0.0, 1.0), 1.0); }
     return od;
   }
-  if (acc.a <= 0.0) { discard; }             // nothing solid here: what the models drew stays as it is
+  if (acc.a <= 0.0) {
+    if (nveil == 0u) { discard; }            // nothing solid here: what the models drew stays as it is
+    // Only see-through walls, all in the list: the layer stays what the models drew. Written, not discarded, so the
+    // list's writes are certain to stand.
+    var keep : SolidOut;
+    keep.col = mesh_c; keep.depth = vec4<f32>(mesh_t, 0.0, 0.0, 1.0); keep.nrm = mesh_n; keep.fd = 1.0;
+    if (mesh_t < 1e29) { let kc = u_cam.view_proj * vec4<f32>(u_cam.eye.xyz + rd * mesh_t, 1.0); keep.fd = clamp(kc.z / kc.w, 0.0, 1.0); }
+    return keep;
+  }
   var o : SolidOut;
   o.col = acc + (1.0 - acc.a) * mesh_c;     // the structures met before the model, over the model
   if (opaque) {
@@ -1622,6 +1740,10 @@ ${members}
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
+// THE MARCH STEP, guarded against a zero by a millionth of the scene's box rather than by a length: 1e-3 mm was a step
+// of a thousand voxels on an electron microscope's grid (scene-scale.ts; Ron, 2026-10-20). Every field reads the step
+// through this.
+fn scene_step() -> f32 { return max(u_material.scene.x, 1e-6 * length(u_material.bmax.xyz - u_material.bmin.xyz)); }
 // Rasterised surface meshes (models): nearest-surface colour (premultiplied) + its distance along the
 // ray, produced by the mesh pass before each trace. The march composites the surface at that depth,
 // so volumes in front occlude it and it occludes what is behind — the depth-composite seam.
@@ -1629,6 +1751,26 @@ ${members}
 @group(1) @binding(1) var t_mesh_depth : texture_2d<f32>;
 // Read by the solid pass only (its copy of the models' facing normals); absent from the trace's layout.
 @group(1) @binding(2) var t_mesh_nrm : texture_2d<f32>;
+${clz.length ? `// THE SEE-THROUGH WALLS (VEIL_K in the renderer): per pixel, nearest first, each wall's distance from the eye and its
+// premultiplied color packed in 8 bits a channel; an entry of alpha 0 ends the list (the buffer is cleared every frame;
+// a wall is written with alpha 1/255 at least, so a nearly clear one does not end it -- critic 2026-10-21, finding 8).
+// A pixel past the buffer's end (a view larger than the device allows, VEIL_BYTES_MAX) keeps the old single layer.
+// Written by fs_solid, composited by fs_trace when its march reaches each.
+@group(1) @binding(3) var<storage, read_write> veil : array<vec2<u32>>;
+const VEIL_K : u32 = ${VEIL_K}u;
+fn veil_base(pix : vec2<i32>) -> u32 { return (u32(pix.y) * textureDimensions(t_mesh_col).x + u32(pix.x)) * VEIL_K; }
+// The walls of the list nearer than upto (a distance from the eye), over what is accumulated, from entry *vi on.
+fn veils_until(vb : u32, vi : ptr<function, u32>, upto : f32, acc : ptr<function, vec4<f32>>) {
+  loop {
+    if (*vi >= VEIL_K || vb + *vi >= arrayLength(&veil)) { break; }
+    let e = veil[vb + *vi];
+    let c = unpack4x8unorm(e.y);
+    if (c.a <= 0.0) { *vi = VEIL_K; break; }
+    if (bitcast<f32>(e.x) > upto) { break; }
+    *acc = *acc + (1.0 - (*acc).a) * c;
+    *vi = *vi + 1u;
+  }
+}` : ""}
 ${this.usesSampler() ? "@group(0) @binding(2) var s_lin : sampler;" : ""}
 ${decls}
 
@@ -1672,8 +1814,14 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
 
   let mpix = vec2<i32>(v.position.xy);
   let mesh_c = textureLoad(t_mesh_col, mpix, 0);          // premultiplied surface colour (0 = no mesh)
-  let mesh_t = textureLoad(t_mesh_depth, mpix, 0).r;      // distance along the ray (1e30 = none)
+  let mesh_t = textureLoad(t_mesh_depth, mpix, 0).r;      // distance from the eye (1e30 = none)
   var mesh_done = mesh_c.a <= 0.0;
+  // THE MARCH'S t IS FROM ro (the near plane), the surfaces' distances are from the eye: compared as the eye's distance
+  // to the point ro + rd t (an uncorrected 1 mm put the surface layer that much too deep, and tube ends under a solid
+  // surface showed through it). The POINT's distance, not d(eye, ro) + t: under the orthographic camera the rays are
+  // parallel and do not pass through the eye, and the sum ran ahead by the pixel's distance from the view axis, so
+  // see-through walls covered tubes in front of them (critic 2026-10-21, finding 1).
+${clz.length ? "  let vb = veil_base(mpix);\n  var vi : u32 = 0u;" : ""}
 
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
@@ -1681,12 +1829,12 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   let tmn = min(tt, tb); let tmx = max(tt, tb);
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
-  if (t_far <= t_near || t_far <= 0.0) { return mesh_c; }
+  if (t_far <= t_near || t_far <= 0.0) { ${clz.length ? "var a0 = vec4<f32>(0.0); veils_until(vb, &vi, 1e30, &a0); return a0 + (1.0 - a0.a) * mesh_c;" : "return mesh_c;"} }
 
-  let step = max(u_material.scene.x, 1e-3);
+  let step = scene_step();
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
-  if (t_far <= t_near) { return mesh_c; }
+  if (t_far <= t_near) { ${clz.length ? "var a1 = vec4<f32>(0.0); veils_until(vb, &vi, 1e30, &a1); return a1 + (1.0 - a1.a) * mesh_c;" : "return mesh_c;"} }
   let seed = ign(v.position.xy);
   var t = t_near;
   var integrated = vec4<f32>(0.0);
@@ -1717,7 +1865,8 @@ ${intervalInit}
     // At size.w = 0 this is exactly jbase, so the first accumulated frame stays byte-identical
     // to a plain renderToView — the property render/test baselines depend on.
     let js = fract(jbase + u_cam.size.w * 0.6180339887) - 0.5;
-    if (!mesh_done && t + 0.5 * step >= mesh_t) {         // the ray reaches the surface: composite it here
+${clz.length ? "    veils_until(vb, &vi, distance(u_cam.eye.xyz, ro + rd * (t + 0.5 * step)), &integrated);   // the see-through walls this step reaches" : ""}
+    if (!mesh_done && distance(u_cam.eye.xyz, ro + rd * (t + 0.5 * step)) >= mesh_t) {         // the ray reaches the surface: composite it here
       integrated = integrated + (1.0 - integrated.a) * mesh_c;
       mesh_done = true;
     }
@@ -1743,6 +1892,7 @@ ${ghostDispatch}
     if (all_defer && jump_t > t + step) { t = jump_t; } else { t = t + step; }
     safety = safety + 1;
   }
+${clz.length ? "  veils_until(vb, &vi, 1e30, &integrated);   // see-through walls beyond the slab" : ""}
   if (!mesh_done) { integrated = integrated + (1.0 - integrated.a) * mesh_c; }   // surface beyond the slab
   // GHOST x-ray, applied ONCE (never compounding): the volume IN FRONT of a handle is shown
   // at residual = 1 - handle_opacity (50% for an inactive handle at opacity 0.5, 0% for an
@@ -1779,7 +1929,7 @@ fn fs_pick() -> @location(0) vec4<f32> {
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
   if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
-  let step = max(u_material.scene.x, 1e-3);
+  let step = scene_step();
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
   var t = t_near;
@@ -1816,7 +1966,9 @@ ${pickDispatch}
     this.mat[12] = bottom[0]; this.mat[13] = bottom[1]; this.mat[14] = bottom[2]; this.mat[15] = 1;
   }
   setSampleStep(step: number) { this.mat[8] = step; }
-  /** 1: the solid pass draws how many steps each ray took instead of the picture (for tuning its speed). */
+  /** 1: the solid pass draws how many steps each ray took instead of the picture (for tuning its speed); 2: the fine
+   *  steps, the leaps over blocks and the walls met, in red, green and blue; 3: the fine steps outside every structure,
+   *  those inside one, and the walls. */
   setSolidDebug(on: number) { this.mat[10] = on; }
   /** The march's current step (mm). Read by tests that assert a change did NOT move it. */
   sampleStep(): number { return this.mat[8]; }
@@ -2112,6 +2264,39 @@ ${pickDispatch}
     this.stageCollect();
   }
 
+  /**
+   * WHERE A PICTURE'S TIME GOES, each part waited for ALONE (Ron, 2026-10-16, C3N-01524 at 13-17 frames a second). The
+   * card's own timestamps cannot split the surfaces-and-solid pass from the ray march on Apple's card: it starts a pass
+   * before the one it depends on has ended. Here each part is submitted alone and waited for, so nothing overlaps it:
+   * `surfacesMs` is the surfaces pass with the solid look's structures (fs_solid), `frameMs` the whole picture. Median
+   * over `iters`, in milliseconds of wall time (a submit's round trip, about 0.4 ms, included). The camera must already
+   * be set for width x height.
+   */
+  async timeParts(width: number, height: number, iters = 15): Promise<{ surfacesMs: number; frameMs: number }> {
+    this.ensureTrace(width, height);
+    this.flush();
+    const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const view = target.createView();
+    const med = (a: number[]) => { a.sort((x, y) => x - y); return a[a.length >> 1]; };
+    const surf: number[] = [], frame: number[] = [];
+    await this.dev.queue.onSubmittedWorkDone();
+    for (let i = 0; i < iters; i++) {
+      let t0 = performance.now();
+      const enc = this.dev.createCommandEncoder();
+      this.meshPass(enc, width, height);
+      this.dev.queue.submit([enc.finish()]);
+      await this.dev.queue.onSubmittedWorkDone();
+      surf.push(performance.now() - t0);
+      t0 = performance.now();
+      const enc2 = this.encodeFrame(this.dev.createCommandEncoder(), view);
+      this.dev.queue.submit([enc2.finish()]);
+      await this.dev.queue.onSubmittedWorkDone();
+      frame.push(performance.now() - t0);
+    }
+    target.destroy();
+    return { surfacesMs: med(surf), frameMs: med(frame) };
+  }
+
   /** Exact GPU time of the ray-march pass (median ms over `iters`), via timestamp-query.
    *  Times ONLY the render pass — no texture copy/readback — so it reflects shader cost.
    *  Returns NaN if the device lacks timestamp-query. Deno gives full-resolution timestamps;
@@ -2173,6 +2358,9 @@ ${pickDispatch}
     return out;
   }
 
+  /** The drawing look's noise from its first frame again (it changes every frame so a still view averages it away):
+   *  two pictures of the same scene are then the same bytes. For checks, not for the screen. */
+  resetNoise(): void { this.nprFrame = 0; }
   async renderToRGBA(width: number, height: number): Promise<Uint8Array> {
     this.ensureTrace(width, height);
     this.flush();
@@ -2211,7 +2399,7 @@ ${pickDispatch}
     const enc = this.dev.createCommandEncoder();
     this.meshPass(enc, width, height);
     const smt = this.meshTargets(width, height);
-    const streamMb = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: smt.col.createView() }, { binding: 1, resource: smt.depth.createView() }] });
+    const streamMb = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(1), entries: this.traceGroup1(smt, smt.col) });
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.streamPipeline); tp.setBindGroup(0, this.streamBind!); tp.setBindGroup(1, streamMb); tp.draw(3); tp.end();
     const bpr = Math.ceil((width * 4) / 256) * 256;

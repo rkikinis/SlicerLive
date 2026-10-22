@@ -40,6 +40,8 @@ export interface BuiltSeg {
    */
   referencedSeriesUID?: string;
   referencedSOPInstanceUIDs?: string[];
+  /** The SEG's own instance UID, for surfaces that name it as their source. */
+  sopInstanceUID?: string;
   /**
    * The network that made the SEG, as the object names it.
    *
@@ -52,6 +54,8 @@ export interface BuiltSeg {
    *  2026-09-24, A5). */
   sopClassUID?: string;
   algorithmType?: string;
+  /** "SlicerAlbula" when Albula wrote the file: only then do its colors follow Albula's scheme (critic 2026-10-20, finding 3). */
+  writtenBy?: string;
 }
 
 const DB = "slicerlive-seg-cache", STORE = "built";
@@ -59,7 +63,7 @@ const DB = "slicerlive-seg-cache", STORE = "built";
  * Bump when what is stored changes shape, or when the code that builds a segmentation changes what
  * it produces. Everything written before becomes a miss, once, and is evicted by the bound below.
  */
-export const BUILD_CODE = "built-3";   // built-2: the network's name; built-3: the SOP class and algorithm type
+export const BUILD_CODE = "built-4";   // built-2: the network's name; built-3: the SOP class and algorithm type; built-4: who wrote the file
 /** Records kept, oldest out first. Three megabytes each on a whole-body study; 60 is comfortable. */
 const KEEP = 60;
 

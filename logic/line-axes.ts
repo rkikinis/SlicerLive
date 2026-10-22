@@ -10,6 +10,7 @@
 // "up" in the along views is the line's end nearer the head, and the along-2 plane is turned to face front-to-back as
 // closely as the line allows (along-1 is at 90 degrees to it).
 import type { CardiacPlane } from "./cardiac-axes.ts";
+import { tuned } from "../render/scene-scale.ts";
 
 type Vec3 = [number, number, number];
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -41,7 +42,9 @@ const S: Vec3 = [0, 0, 1], A: Vec3 = [0, 1, 0];
 export function lineAxes(p0: Vec3, p1: Vec3): LineAxes | null {
   const d = sub(p1, p0);
   const length = Math.hypot(d[0], d[1], d[2]);
-  if (length < 1e-6) return null;
+  // COINCIDE means no length the numbers can tell from zero where the points are -- not a fixed 1e-6 mm, which is a
+  // whole voxel of an electron microscope's 1 nm grid (MODULE-DESIGN-RULES "Any scale").
+  if (!(length > 1e-12 * Math.max(Math.hypot(p0[0], p0[1], p0[2]), Math.hypot(p1[0], p1[1], p1[2])))) return null;
   let s = norm(d);
   // "Up" is the head end; a line lying level (no head-to-foot part to speak of) points forward instead.
   if (dot(s, S) < -1e-6 || (Math.abs(dot(s, S)) <= 1e-6 && dot(s, A) < 0)) s = scale(s, -1);
@@ -63,18 +66,27 @@ export function linePlane(ax: LineAxes, view: LineView): CardiacPlane {
   return view === "across" ? ax.across : view === "along-1" ? ax.along1 : ax.along2;
 }
 
+// THE FIXED PARTS ARE VOXELS OF THE SCENE, NOT mm (Ron, 2026-10-20: "did you forget about scales? from astrophysics to
+// electron microscope"). The 5 mm of room past the line's ends and the 40 / 60 mm smallest views were tuned on clinical
+// scans: kept exactly as they are while they lie within the voxel range below (every grid from 0.25 to 4 mm), held to
+// it outside (`tuned`) -- so on 1 nm voxels a 100 nm line is not a speck in a 40 mm view. `voxel` is the scene's
+// (render/scene-scale.ts sceneVoxel); without one the mm stand.
+const ROOM = (v?: number) => tuned(5, v, 1.25, 20);
+const SMALLEST_ACROSS = (v?: number) => tuned(40, v, 10, 160);
+const SMALLEST_ALONG = (v?: number) => tuned(60, v, 15, 240);
+
 /** The slider's range for a view: across runs the line's length (a quarter more at each end); along runs the same
  *  distance either side of the line. In mm along the plane's normal. */
-export function lineRange(ax: LineAxes, view: LineView): { min: number; max: number } {
+export function lineRange(ax: LineAxes, view: LineView, voxel?: number): { min: number; max: number } {
   const p = linePlane(ax, view);
   const o = dot(p.origin, p.n);
-  const half = ax.length / 2 + ax.length * 0.25 + 5;
+  const half = ax.length / 2 + ax.length * 0.25 + ROOM(voxel);
   return { min: o - half, max: o + half };
 }
 
 /** The field of view that frames the line: its length and some context around it. */
-export function lineFieldOfView(ax: LineAxes, view: LineView): number {
-  return view === "across" ? Math.max(40, ax.length * 1.2) : Math.max(60, ax.length * 1.8);
+export function lineFieldOfView(ax: LineAxes, view: LineView, voxel?: number): number {
+  return view === "across" ? Math.max(SMALLEST_ACROSS(voxel), ax.length * 1.2) : Math.max(SMALLEST_ALONG(voxel), ax.length * 1.8);
 }
 
 /** A slice node's orientation value for a line's view, and back. */

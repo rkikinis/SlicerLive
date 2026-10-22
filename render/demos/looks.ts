@@ -23,9 +23,9 @@ import { browserFrames, sequenceBrowsers } from "../../logic/sequences.ts";
 export type LookName = "Surfaces" | "Glass over bone" | "Vessels in context";
 
 export const LOOKS: { name: LookName; tip: string }[] = [
-  // Named "Surfaces" in the code only: on screen it is "the structures opaque" -- solid from the labels, or
-  // surface models where Generate Surface Models made them (critic, 2026-09-24, finding 10).
-  { name: "Surfaces", tip: "Every visible segmentation opaque, no volume rendering: drawn solid from its labels, or as surface models where you generated them. The default; puts back what another look changed." },
+  // Named "Surfaces" in the code only: on screen it is "the structures opaque", drawn solid from the labels (critic,
+  // 2026-09-24, finding 10; surface models are not drawn since 2026-10-21, Ron, option B).
+  { name: "Surfaces", tip: "Every visible segmentation opaque, no volume rendering: drawn solid from its labels. The default; puts back what another look changed." },
   { name: "Glass over bone", tip: "Every visible segmentation at half opacity over a volume rendering of its volume (CT-Bone on a CT; the data window otherwise): the colored anatomy shows through the glass." },
   { name: "Vessels in context", tip: "For every vessel network in the view: the organ it runs through goes see-through, the vessels stay opaque, and the rib cage is hidden. A good first view of a whole-body case with lung and liver vessels." },
 ];
@@ -94,43 +94,6 @@ function remember(n: MrsonNode, segs: Segment[]) {
 export interface LookDeps {
   setVolumeRendering: (imageId: string, on: boolean) => void;
   applyVrPreset: (imageId: string, preset: string) => void;
-}
-
-/**
- * WHAT THIS LOOK WILL COST, IN BYTES, BEFORE IT IS APPLIED.
- *
- * The colorized look builds a second copy of the volume (r16, 2 bytes a voxel) plus a copy of the
- * labelmap (1 byte), on top of what is already resident: the volume's own texture and one labelmap
- * texture per visible segmentation. On 2026-09-22 Ron had a 768x768x709 CT with FOUR whole-body
- * segmentations and switched to this look; the page was ended a minute later. The arithmetic:
- *
- *   CT texture            798 MB      (768 x 768 x 709 x 2)
- *   4 labelmaps         1,596 MB      (399 MB each)
- *   colorize copy       1,196 MB      (798 CT + 399 labels; measured, 2026-09-22)
- *                       -------
- *                       3,590 MB, before surfaces, slices and the decoded caches in the heap
- *
- * and WebKit ends a page well before 4 GB of it is actually addressable. So the look asks first
- * when it would take the window into that country, instead of the window disappearing.
- */
-export function colorizeCostMB(live: LiveScene): { total: number; volumeMB: number; labelmapsMB: number; colorizeMB: number; segmentations: number } {
-  const segs = visibleSegmentations(live);
-  let volumeMB = 0, labelmapsMB = 0, colorizeMB = 0;
-  const counted = new Set<string>();
-  for (const seg of segs) {
-    const src = sourceOf(live, seg);
-    const img = src ? live.nodes.get(src) : undefined;
-    const dims = (img?.dims as number[] | undefined) ?? (seg.dims as number[] | undefined);
-    if (!dims || dims.length !== 3) continue;
-    const voxels = dims[0] * dims[1] * dims[2];
-    labelmapsMB += Math.round(voxels / 1048576);                       // one r8uint per segmentation
-    if (src && !counted.has(src)) {
-      counted.add(src);
-      volumeMB += Math.round(voxels * 2 / 1048576);                    // the volume's own r16 texture
-      colorizeMB += Math.round(voxels * 3 / 1048576);                  // the colorize copy: r16 + labels
-    }
-  }
-  return { total: volumeMB + labelmapsMB + colorizeMB, volumeMB, labelmapsMB, colorizeMB, segmentations: segs.length };
 }
 
 /** Apply a look. Returns what it did, for the status line. */

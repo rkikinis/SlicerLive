@@ -1,6 +1,8 @@
 import type { SceneRenderer } from "../scene-renderer.ts";
 import type { Gpu } from "../device.ts";
 import { BudgetController, stepMovingScale } from "../budget-controller.ts";
+import { gpuScoped, notePicture } from "../gpu-scope.ts";
+import { TurnMeter, type TurnReading } from "../turn-meter.ts";
 
 // Shared idle-convergence driver for temporal AA (docs/UNIFIED-RENDERING-PLAN.md M2). While the
 // view is still, keep re-rendering with sub-pixel camera jitter so SceneRenderer.renderAccum folds
@@ -69,8 +71,10 @@ export const drawingHeld = (): string[] => [...holds().reasons];
 // budget input. renderMoving owns the budget (measure ms → BudgetController.update); the driver just
 // decides moving-vs-settled from interaction timing.
 export function mountAdaptiveLoop(opts: {
-  renderMoving: () => void;              // one budget-scaled frame; updates the budget from measured ms
-  renderSettled: (reset: boolean) => void;  // one native accumulated frame
+  /** One budget-scaled frame; updates the budget from measured ms. `changeAt`: when the oldest change it shows came. */
+  renderMoving: (changeAt: number) => void;
+  /** One native accumulated frame. `unchanged`: the settle after a turn, with nothing changed since its last picture. */
+  renderSettled: (reset: boolean, unchanged?: boolean) => void;
   count: () => number;                  // scene.accumCount()
   target?: number;                      // convergence target (default 32)
   idleGapMs?: number;                   // consider the view "settled" this long after the last kick (default 120)
@@ -96,9 +100,21 @@ export function mountAdaptiveLoop(opts: {
   ]);
   const sync = opts.sync ?? (() => Promise.resolve());
   let running = false, stopped = false, lastKick = -1e12, wasMoving = false, fresh = false;
-  const step = () => {
-    if (performance.now() - lastKick < idleGap) { opts.renderMoving(); wasMoving = true; fresh = false; return true; }
-    if (wasMoving || fresh) { wasMoving = false; fresh = false; opts.renderSettled(true); return true; }
+  // AN UNCHANGED VIEW IS NOT DRAWN AGAIN (critic 2026-10-17, fps measurement, findings 1-2): while the view moves, a
+  // picture is drawn only when something changed since the last one. Drawing the same view again whenever the card was
+  // free made "fps" count repeats -- 22 on the label against 10 new pictures a second on a slow turn -- and a movement
+  // that came meanwhile waited behind the repeat (166 ms against 99 from hand to screen).
+  let pendingSince = 0;                   // when the oldest change not yet drawn came (0: none)
+  // Waiting for the next change: a change wakes the loop at once, not at the next display refresh.
+  let wake: (() => void) | null = null;
+  const waitForChange = () => new Promise<void>((r) => { wake = r; void paced().then(r); }).finally(() => { wake = null; });
+  const step = (): boolean | "wait" => {
+    if (performance.now() - lastKick < idleGap) {
+      if (!pendingSince && !fresh) return "wait";   // still turning, nothing new: draw nothing
+      const since = pendingSince || performance.now(); pendingSince = 0; fresh = false; wasMoving = true; opts.renderMoving(since);
+      return true;
+    }
+    if (wasMoving || fresh) { const unchanged = wasMoving && !fresh && !pendingSince; wasMoving = false; fresh = false; pendingSince = 0; opts.renderSettled(true, unchanged); return true; }
     if (opts.count() < target) { opts.renderSettled(false); return true; }
     return false;                          // converged + idle
   };
@@ -107,16 +123,17 @@ export function mountAdaptiveLoop(opts: {
     while (!stopped) {
       // Held (holdDrawing): wait for the release, then draw the newest content from a fresh full-quality frame.
       if (holds().count > 0) { holds().waiting.add(resume); break; }
-      if (!step()) break;
-      await Promise.all([sync(), paced()]);
+      const did = step();
+      if (!did) break;
+      await (did === "wait" ? waitForChange() : Promise.all([sync(), paced()]));
     }
     running = false;
   };
   const resume = () => { fresh = true; if (!running && !stopped) run(); };
   return {
-    kick() { lastKick = performance.now(); if (!running) run(); },   // run() renders the 1st frame synchronously
+    kick() { lastKick = performance.now(); pendingSince ||= lastKick; if (!running) run(); else wake?.(); },   // run() renders the 1st frame synchronously
     stop() { stopped = true; },
-    refresh() { fresh = true; if (!running) run(); },
+    refresh() { fresh = true; pendingSince ||= performance.now(); if (!running) run(); else wake?.(); },
   };
 }
 
@@ -128,9 +145,11 @@ export interface Adaptive3d {
   draw(): void;                                  // kick the loop: an INTERACTION (camera, a dragged slice)
   refresh(): void;                               // the content changed: a fresh full-quality frame, no moving frames
   budget: BudgetController;
-  renderSettled(reset: boolean): void;           // native accumulate (for debug converge)
-  renderMoving(): void;                           // one budget-scaled frame (for debug)
+  renderSettled(reset: boolean, unchanged?: boolean): void;   // native accumulate (for debug converge)
+  renderMoving(changeAt?: number): void;          // one budget-scaled frame (for debug)
   loop: AccumLoop;
+  /** The turn reading no longer describes what is on screen (another scene): take it away (onFps(null)). */
+  clearFps(): void;
 }
 export function mountAdaptive3d(opts: {
   scene: () => SceneRenderer | null;             // getter (survives scene rebuilds)
@@ -142,7 +161,9 @@ export function mountAdaptive3d(opts: {
   targetMs?: number;                              // budget frame-time target (default 16)
   movingScaleCap?: number | (() => number);       // max resolution scale WHILE MOVING (default 1; <1 for heavy scenes); a function reads it per frame
   budgeted?: () => boolean;                       // let the budget lower the moving resolution (default: only when the cap is below 1)
-  onFps?: (fps: number, scale: number) => void;   // frames per second and resolution while moving, a few times a second
+  /** How fast the view follows a turn (turn-meter.ts), a few times a second while it turns and once at its end; null:
+   *  no reading for what is on screen now (the size, the quality or the scene changed). */
+  onFps?: (r: TurnReading | null, scale: number) => void;
   /** ONE RESOLUTION, CHOSEN BY THE PERSON (Ron, 2026-10-14: "I like the desk view to follow the same rule" as the glasses:
    *  a picture whose resolution changes while you look reads as flicker). When this returns a number, every frame --
    *  moving and still -- is drawn at that fraction of the view's pixels: no budget, no soft-while-moving, sharp-when-still.
@@ -179,12 +200,17 @@ export function mountAdaptive3d(opts: {
   // burst drew, their mean and worst GPU time and the resolution scale the budget settled on, then
   // how long the settle took to converge. Ron, 2026-09-17: "the speed of loading, viewing and
   // saving" -- and no frame had ever been timed outside a debug session.
+  let burstSize = "", burstDrawn = "";
   let burstN = 0, burstSum = 0, burstMax = 0, burstScale = 1, settleT0 = 0, settleOpen = false;
-  // FRAMES PER SECOND AS SEEN: moving frames finished per second of wall clock, from the first
-  // finished frame of the drag to the latest. Ron, 2026-09-23: "15 frames per second are borderline,
-  // 30 are more than enough. It would be nice to be able to see the fps."
-  let burstFirstDone = 0, burstLastDone = 0, fpsSaidAt = 0;
-  const burstFps = () => burstN >= 2 && burstLastDone > burstFirstDone ? (burstN - 1) / ((burstLastDone - burstFirstDone) / 1000) : 0;
+  // NEW PICTURES A SECOND WHILE THE VIEW MOVES (turn-meter.ts). Ron, 2026-09-23: "15 frames per second are borderline,
+  // 30 are more than enough. It would be nice to be able to see the fps." Counted from the first change of the turn, each
+  // picture a new view (critic 2026-10-17, fps measurement, findings 1 and 3); shown only for a turn long enough to say
+  // (half a second, five pictures) and taken away when the size or the quality changes (finding 4).
+  const meter = new TurnMeter();
+  let fpsSaidAt = 0, fpsShownFor = "";
+  const sayFps = (r: TurnReading | null, s: number, key: string) => {
+    if (r) { opts.onFps?.(r, s); fpsShownFor = key; } else if (fpsShownFor) { opts.onFps?.(null, s); fpsShownFor = ""; }
+  };
   let lastUploadMs = 0;
   const logLine = (line: string) => { try { void fetch("/_log", { method: "POST", body: line, keepalive: true }).catch(() => {}); } catch { /* no server */ } };
   const burstEnd = () => {
@@ -196,15 +222,57 @@ export function mountAdaptive3d(opts: {
     lastBuilds = sc?.buildCount ?? 0; lastUploads = sc?.uploadCount ?? 0; lastUploadMs = (sc as { uploadMs?: number } | undefined)?.uploadMs ?? 0;
     // "worst" is from the start of the frame until the GPU has finished EVERYTHING queued by then --
     // other uploads included -- so it is not the page's blocked time. The uploads' own page time is.
-    const fps = burstFps();
-    if (fps) opts.onFps?.(fps, burstScale);
-    if (burstN) logLine(`3D interaction: ${burstN} moving frames${fps ? ` at ${fps.toFixed(0)} frames a second` : ""}, mean ${(burstSum / burstN).toFixed(1)} ms, worst ${burstMax.toFixed(1)} ms, drawn at ${(burstScale * 100).toFixed(0)}% resolution in ${(globalThis as unknown as { __traceStrips?: number }).__traceStrips ?? 1} strip${((globalThis as unknown as { __traceStrips?: number }).__traceStrips ?? 1) === 1 ? "" : "s"}${builds || uploads ? ` · ${builds} shader build${builds === 1 ? "" : "s"}, ${uploads} mesh upload${uploads === 1 ? "" : "s"}${uploads ? ` (${upMs.toFixed(0)} ms of the page's time)` : ""}` : ""}`);
-    burstN = 0; burstSum = 0; burstMax = 0; burstFirstDone = 0; burstLastDone = 0;
+    const turn = meter.reading();
+    if (turn) sayFps(turn, burstScale, `${burstDrawn}@${burstScale}`);
+    meter.reset();
+    // Where the card's time went, from its own clock (Ron, 2026-10-16, C3N-01524 at 13-17 frames a second: "I would have
+    // hoped for faster" -- measured before anything is changed): the surfaces, the ray tracing, the final picture.
+    // THE WHOLE PICTURE ONLY: Apple's card starts a pass before the one it depends on has ended, so its clock cannot
+    // split the surfaces-and-solid pass from the ray tracing -- the split said "ray tracing" for what the solid look did
+    // (critic 2026-10-16, tonight's fixes, finding 4). The parts, each timed alone: __time3d.
+    // Only this turn's pictures (each turn its own sink, and none on the still pictures: finding 5); a reading longer
+    // than the whole picture as the page timed it is impossible and is said as such, not averaged in (WebKit's clock
+    // has read so, WORKING-STATE 2026-10-16 22:46).
+    const pageMean = burstN ? burstSum / burstN : 0, cardMean = stageN ? stageSum.total / stageN : 0;
+    const st = !stageN ? "" : cardMean <= pageMean + 1
+      ? ` · on the graphics card (${stageN} of them measured): ${cardMean.toFixed(1)} ms a picture`
+      : ` · the graphics card's clock read ${cardMean.toFixed(1)} ms, longer than the whole picture: not used`;
+    stageN = 0; stageSum = { march: 0, surfaces: 0, composite: 0, total: 0 }; stageGen++;
+    const strips = (sc as { strips?: number } | null)?.strips ?? 1;
+    const said = turn
+      ? `${turn.pictures} new pictures in ${turn.seconds.toFixed(1)} s (${turn.perSecond.toFixed(0)} a second), the first after ${turn.firstMs.toFixed(0)} ms, a movement shown after ${turn.followMs.toFixed(0)} ms (1 in 10 after more than ${turn.followWorstMs.toFixed(0)} ms), the longest wait between two ${turn.longestGapMs.toFixed(0)} ms`
+      : `${burstN} new picture${burstN === 1 ? "" : "s"} (too short a turn for a rate)`;
+    if (burstN) logLine(`3D interaction: ${said}; each ${burstDrawn} of ${burstSize} pixels (${(burstScale * 100).toFixed(0)}% across and down), mean ${pageMean.toFixed(1)} ms, worst ${burstMax.toFixed(1)} ms until finished on the card, the ray march in ${strips} strip${strips === 1 ? "" : "s"}${builds || uploads ? ` · ${builds} shader build${builds === 1 ? "" : "s"}, ${uploads} mesh upload${uploads === 1 ? "" : "s"}${uploads ? ` (${upMs.toFixed(0)} ms of the page's time)` : ""}` : ""}${st}`);
+    burstN = 0; burstSum = 0; burstMax = 0;
   };
   const maxMovingSamples = Math.max(1, Math.round(opts.maxMovingSamples ?? 1));
   let sampleMs = 0;                     // measured cost of ONE moving sample, for sizing k below
-  const renderMoving = () => {
+  // EACH PICTURE IN ITS OWN ERROR SCOPE, AND TIMED ON THE CARD (render/gpu-scope.ts; Ron, 2026-10-16: "more
+  // instrumentation … we want greased lightning"): an error names the 3D view, and the "play" line says its times.
+  const scoped = (kind: string, fn: () => void) => {
+    const t0 = performance.now();
+    gpuScoped(opts.gpu.device, `the 3D view (${kind})`, fn);
+    void opts.gpu.device.queue.onSubmittedWorkDone().then(() => notePicture(`3D view ${kind}`, performance.now() - t0));
+  };
+  const renderMoving = (changeAt?: number) => scoped("moving", () => renderMoving0(changeAt ?? performance.now()));
+  type StageSink = NonNullable<SceneRenderer["onStageTimes"]>;
+  let stageN = 0, stageSum = { march: 0, surfaces: 0, composite: 0, total: 0 }, stageGen = 0;
+  const deskSinks = new WeakSet<StageSink>();
+  let sinkGen = -1, sink: StageSink | null = null;
+  /** This turn's sink: the renderer keeps the sink a picture was drawn with, so a reading that comes back after its
+   *  turn's line was written falls to an old sink and is dropped. */
+  const stageSink = (): StageSink => {
+    if (sink && sinkGen === stageGen) return sink;
+    const gen = sinkGen = stageGen;
+    sink = (t) => { if (gen !== stageGen) return; stageN++; stageSum.march += t.marchMs; stageSum.surfaces += t.surfacesMs; stageSum.composite += t.compositeMs; stageSum.total += t.totalMs; };
+    deskSinks.add(sink);
+    return sink;
+  };
+  const deskSink = (f: SceneRenderer["onStageTimes"]) => f === null || deskSinks.has(f);
+  const renderMoving0 = (changeAt: number) => {
     const sc = opts.scene(); if (!sc) return;
+    // The desk's moving pictures carry the card's stage times; the glasses put their own sink while they draw.
+    if (deskSink(sc.onStageTimes)) sc.onStageTimes = stageSink();
     const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
     // Cap moving resolution so a heavy DVR is interactive FROM FRAME ONE (no waiting for the budget
     // to adapt down over several frames). Moving frames are transient — the settle snaps to native.
@@ -237,30 +305,43 @@ export function mountAdaptive3d(opts: {
         sc.renderToView(opts.view(), vw, vh);
       }
     } else { const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)); opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh); }
+    const drawn = s > 0.98 ? `${vw}×${vh}` : `${Math.max(16, Math.round(vw * s))}×${Math.max(16, Math.round(vh * s))}`, key = `${drawn}@${s}`;
+    // Another size or quality than the reading on screen: it no longer describes this view.
+    if (fpsShownFor && fpsShownFor !== key) sayFps(null, s, key);
     opts.gpu.device.queue.onSubmittedWorkDone().then(() => {
       const now = performance.now(), ms = now - t0;
       sampleMs = ms / k;
       // The budget steers on PER-SAMPLE cost (the whole k-sample time would read as one slow frame).
-      budget.update(sampleMs); dbgTick("mov", ms, s, k); burstN++; burstSum += ms; burstMax = Math.max(burstMax, ms); burstScale = s;
-      if (!burstFirstDone) burstFirstDone = now;
-      burstLastDone = now;
-      if (now - fpsSaidAt > 250) { const f = burstFps(); if (f) { opts.onFps?.(f, s); fpsSaidAt = now; } }
+      budget.update(sampleMs); dbgTick("mov", ms, s, k); burstN++; burstSum += ms; burstMax = Math.max(burstMax, ms); burstScale = s; burstSize = `${vw}×${vh}`; burstDrawn = drawn;
+      meter.picture(changeAt, now);
+      if (now - fpsSaidAt > 250) { const r = meter.reading(); if (r) { sayFps(r, s, key); fpsSaidAt = now; } }
     });
     opts.onFrame?.();
   };
-  const renderSettled = (reset: boolean) => {
+  const renderSettled = (reset: boolean, unchanged = false) => scoped("still", () => renderSettled0(reset, unchanged));
+  const renderSettled0 = (reset: boolean, unchanged: boolean) => {
     const sc = opts.scene(); if (!sc) return;
     const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
     const t0 = performance.now();
     if (reset) { burstEnd(); settleT0 = t0; settleOpen = true; }
+    // The still pictures are not timed on the card: the line is about the turn (finding 5).
+    if (deskSinks.has(sc.onStageTimes as StageSink)) sc.onStageTimes = null;
     const f = fixed();
+    // Picture quality or the size changed with no turn yet: the reading on screen is not this view's (finding 4).
+    if (f != null) { const fs = f, d = fs > 0.98 ? `${vw}×${vh}` : `${Math.max(16, Math.round(vw * fs))}×${Math.max(16, Math.round(vh * fs))}`;
+      if (fpsShownFor && fpsShownFor !== `${d}@${fs}`) sayFps(null, fs, ""); }
     if (f != null && f < 0.98) {
-      // The person's lower resolution holds for the still view too: one frame, as the moving ones are drawn.
+      // The person's lower resolution holds for the still view too: one frame, as the moving ones are drawn -- and when
+      // the last moving picture already shows everything at this resolution, that picture IS the still view: not drawn
+      // again (finding 2: a pause in the hand should cost nothing).
+      if (reset && unchanged && burstDrawn === `${Math.max(16, Math.round(vw * f))}×${Math.max(16, Math.round(vh * f))}` && burstScale === f) { lowSettled = true; settleOpen = false; return; }
       if (!reset && lowSettled) return;
       const rw = Math.max(16, Math.round(vw * f)), rh = Math.max(16, Math.round(vh * f));
       opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh);
       lowSettled = true;
-      if (settleOpen) { settleOpen = false; opts.gpu.device.queue.onSubmittedWorkDone().then(() => logLine(`3D settled: one picture at ${Math.round(f * 100)}% (the chosen quality) in ${((performance.now() - settleT0) / 1000).toFixed(2)} s`)); }
+      // Not while a series plays: each step settles, and the "play" line already sums them (critic 2026-10-16, general
+      // audit, finding 7: about four of these lines a second).
+      if (settleOpen) { settleOpen = false; if (!opts.steady?.()) opts.gpu.device.queue.onSubmittedWorkDone().then(() => logLine(`3D settled: one picture at ${Math.round(f * 100)}% (the chosen quality) in ${((performance.now() - settleT0) / 1000).toFixed(2)} s`)); }
       opts.onFrame?.();
       return;
     }
@@ -269,7 +350,7 @@ export function mountAdaptive3d(opts: {
     if (DBG) opts.gpu.device.queue.onSubmittedWorkDone().then(() => dbgTick("set", performance.now() - t0, 1));
     if (settleOpen && sc.accumCount() >= (opts.target ?? 24)) {
       settleOpen = false;
-      opts.gpu.device.queue.onSubmittedWorkDone().then(() => logLine(`3D settled: ${sc.accumCount()} samples in ${((performance.now() - settleT0) / 1000).toFixed(2)} s`));
+      if (!opts.steady?.()) opts.gpu.device.queue.onSubmittedWorkDone().then(() => logLine(`3D settled: ${sc.accumCount()} samples in ${((performance.now() - settleT0) / 1000).toFixed(2)} s`));
     }
     opts.onFrame?.();
   };
@@ -297,5 +378,6 @@ export function mountAdaptive3d(opts: {
     if (loop.refresh && opts.steady?.()) { loop.refresh(); return; }
     if (!loop.refresh || now - streamStart > 300) loop.kick(); else loop.refresh();
   };
-  return { draw, refresh, budget, renderSettled, renderMoving, loop };
+  const clearFps = () => { meter.reset(); sayFps(null, burstScale, ""); };
+  return { draw, refresh, budget, renderSettled, renderMoving, loop, clearFps };
 }

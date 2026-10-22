@@ -194,7 +194,9 @@ export function applySceneState(live: LiveScene, doc: Obj, hooks: RestoreHooks =
     if (n.type === "volumeRenderingDisplay") { const liveId = map.get(id); if (liveId) patch(liveId, { visible: n.visible }, "volume rendering"); }
     // THE VOLUME'S 3D LOOK (Scene › In 3D; render/look3d.ts). Left out, every scene came back Colored
     // whatever it was saved as (critic, 2026-09-24, finding 2).
-    if (n.type === "image" && typeof n.look3D === "string") { const liveId = map.get(id); if (liveId) patch(liveId, { look3D: n.look3D === "colored" ? "solid" : n.look3D }, "3D look"); }
+    // "colored" was the name until 2026-09-25, "surfaces" a look until 2026-10-21 (Ron, option B: surface models are an
+    // export only): both are the solid look now.
+    if (n.type === "image" && typeof n.look3D === "string") { const liveId = map.get(id); if (liveId) patch(liveId, { look3D: n.look3D === "colored" || n.look3D === "surfaces" ? "solid" : n.look3D }, "3D look"); }
   }
   // ── 4. segmentations: visibility, order, colors, per-segment state ──
   for (const [id, n] of Object.entries(nodes)) {
@@ -227,9 +229,10 @@ export function applySceneState(live: LiveScene, doc: Obj, hooks: RestoreHooks =
     // is folded (24 ribs in one color). Left out here, a scene came back with every structure in
     // its own color however it had been saved -- Ron, 2026-09-22: "The scene does not fully
     // recover the segmentations settings that I had at save time."
-    // `surfaceModels`: the segmentation was given surface models (Generate Surface Models) -- a saved
-    // choice, like the rest; without it a scene came back without them (critic, 2026-09-24, finding 2).
-    patch(liveId, { segments, visible, visible3D, opacity: n.opacity, zOrder: n.zOrder, hiddenViews: n.hiddenViews, fill2D: n.fill2D, outline2D: n.outline2D, mergedGroups: n.mergedGroups, ...(typeof n.surfaceModels === "boolean" ? { surfaceModels: n.surfaceModels } : {}),
+    // NOT `surfaceModels`. It was restored from 2026-09-24 (critic, finding 2: a scene came back without its surface
+    // models) until 2026-10-21, when surface models stopped being drawn (Ron, option B: an export only, Save › Files).
+    // A scene saved with the flag opens without making or drawing any; the flag is left out, not carried on.
+    patch(liveId, { segments, visible, visible3D, opacity: n.opacity, zOrder: n.zOrder, hiddenViews: n.hiddenViews, fill2D: n.fill2D, outline2D: n.outline2D, mergedGroups: n.mergedGroups,
       // Where its colors came from (logic/scheme-colors.ts): the scene's word; for a scene saved before the field, "scene"
       // over the load's "file" -- the colors just applied are the scene's. Nothing where the load set none (a file saved
       // and read back stays the same file).

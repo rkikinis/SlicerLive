@@ -20,6 +20,8 @@ import { makeNameEditable } from "./row-actions.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
+import { nodeVoxel } from "../scene-scale.ts";
+import { lengthText } from "../length-text.ts";
 import { keepScroll } from "./panel-scroll.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { MrsonNode } from "../mrson.ts";
@@ -47,6 +49,9 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
   let chosenBox = "";
   let busy = false;
   let note = "";
+  // SAVED, SAID ON THE BUTTON (critic 2026-10-14, 27): the save rewrites the node and the panel redraws before the
+  // button can say "Saved ✓"; for a few seconds after a save the Result shows it, then Where it lives says the rest.
+  let savedAt = 0;
   let lastCrop = "";                       // the volume the last crop made, for the "where does it live" row
   let autoSlices = false;                  // the one-time "show the slices in 3D" on first arrival
 
@@ -155,7 +160,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
     const tilt = cut.tiltDeg > 5
       ? ` The cut follows the volume's own axis, ${cut.tiltDeg.toFixed(0)}° off this slice, so it stays lossless.`
       : "";
-    note = `box trimmed to everything above ${pl.label}: ${pl.at.toFixed(1)} mm — the red slice.${tilt} ` +
+    note = `box trimmed to everything above ${pl.label}: ${lengthText(pl.at, 1, nodeVoxel(img))} — the red slice.${tilt} ` +
       `Move the slice and press again to adjust, then crop.`;
     render();
   };
@@ -319,7 +324,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
       const anc = hooks().__dicomAncestorOf?.(lastCrop) ?? null;
       const fd = fresh.dims as number[] | undefined, m = fresh.ijkToRAS as number[] | undefined;
       const mm = m ? [0, 1, 2].map((c) => Math.hypot(m[c], m[4 + c], m[8 + c])) : undefined;
-      const size = fd ? `${fd.join(" × ")}${mm ? ` · ${mm.map((x) => x.toFixed(2).replace(/\.?0+$/, "")).join(" × ")} mm` : ""}` : "";
+      const size = fd ? `${fd.join(" × ")}${mm ? ` · ${mm.every((x) => x >= 0.1 && x < 1e4) ? `${mm.map((x) => x.toFixed(2).replace(/\.?0+$/, "")).join(" × ")} mm` : mm.map((x) => lengthText(x)).join(" × ")}` : ""}` : "";
       const res = shell.section(root, "Result", { open: true, band: "green", note: size });
       res.classList.add("sl-crop-result");
       // ITS NAME IS EDITABLE where it is shown (Ron, 2026-10-14: "yes, with a way to edit the name"; row-actions.ts).
@@ -341,6 +346,11 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
         : `${fresh.name} is in the scene only: it disappears when the application restarts, and so ` +
           `does anything you segment on it — a saved segmentation has to point at a volume that is ` +
           `in the database.`;
+      if (savedUid && Date.now() - savedAt < 3000) {
+        const doneRow = shell.actions(res);
+        doneRow.innerHTML = `<button class="sl-primary sl-crop-save" disabled>Saved ✓</button>`;
+        setTimeout(render, 3000 - (Date.now() - savedAt));
+      }
       if (!savedUid && anc) {
         const saveRow = shell.actions(res);
         saveRow.innerHTML = `<button class="sl-primary sl-crop-save"${busy ? " disabled" : ""}
@@ -355,6 +365,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
             if (!r) { note = "no DICOM route here"; throw new Error(note); }
             note = `${fresh.name} → the DICOM database. ${r.note ?? ""}`;
             if (r.indexed === false || /NOT indexed|NOT saved|browser's downloads/i.test(r.note ?? "")) throw new Error(r.note ?? "not indexed");
+            savedAt = Date.now();
           } catch (e) {
             note = `could not save it: ${(e as Error).message}`;
             throw e;                         // the button says "Not saved" rather than falling silent

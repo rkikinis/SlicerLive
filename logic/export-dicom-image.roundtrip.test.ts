@@ -118,7 +118,8 @@ Deno.test("the patient, the study and the acknowledgement come with it", async (
   // ITS OWN identity, though, and honest about being made rather than acquired.
   assert(ds.SeriesInstanceUID !== series.seriesInstanceUID, "it reused the source's series UID");
   assertEquals(ds.SeriesInstanceUID, out.seriesInstanceUID);
-  assertEquals([...(ds.ImageType as string[])], ["DERIVED", "SECONDARY"]);
+  // The source (this synthetic CT) gives no value 3; the CT Image module requires one, so AXIAL (2026-10-21).
+  assertEquals([...(ds.ImageType as string[])], ["DERIVED", "SECONDARY", "AXIAL"]);
   assert(String(ds.DerivationDescription).includes("no resampling"));
   assertEquals(ds.FrameOfReferenceUID, dcmjs.data.DicomMetaDictionary.naturalizeDataset(
     dcmjs.data.DicomMessage.readFile(series.instances[0]).dict,
@@ -363,3 +364,18 @@ function sameVolumeInSpaceWithin(b: { dims: readonly number[]; ijkToRAS: readonl
     assert(Math.abs(va - vb) <= tol, `voxel ${i},${j},${k}: ${vb} against ${va} (tolerance ${tol})`);
   }
 }
+
+// CTHead.nrrd written as a CT (2026-10-21): a file's volume has no source series to supply what the CT IOD requires,
+// and dciodvfy found four errors (Laterality and PatientPosition missing, ImageType without value 3, KVP missing).
+Deno.test({
+  name: "dciodvfy: a CT made from a file (no source series) has no conformance errors",
+  ignore: !HAS_DCIODVFY,
+  fn: async () => {
+    const dims: [number, number, number] = [6, 5, 4], I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const data = Int16Array.from({ length: 120 }, (_, i) => i * 20 - 1024);
+    const out = await volumeToDicomSeries(data, dims, I, [], { subject: { patientName: "T^CT", patientID: "T", modality: "CT", studyDate: "", studyTime: "" } });
+    const d = dcmjs.data.DicomMetaDictionary.naturalizeDataset(dcmjs.data.DicomMessage.readFile(ab(out.instances[0].bytes)).dict) as Record<string, unknown>;
+    assertEquals(d.ImageType, ["DERIVED", "SECONDARY", "AXIAL"]);
+    assertEquals(dciodvfy(out.instances[0].bytes)!.errors, []);
+  },
+});

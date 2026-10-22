@@ -486,7 +486,7 @@ export function openTransferWindow(o: TransferWindowOptions = {}): void {
     opt("radio", "Move — it leaves the first database", "Copies, reads every image back to check it is identical, then asks before removing anything from the first database. The results made from a moved scan go with it.", move, (v) => { if (v) move = true; }, "sl-tw-move");
     h("What to include");
     opt("checkbox", "Scans — the original images", "The images from the scanner.", include.scans, (v) => { include.scans = v; });
-    opt("checkbox", "Results — outlines, segmentations, surfaces", "What was made from the scans.", include.results, (v) => { include.results = v; });
+    opt("checkbox", "Results — outlines, segmentations, tracts", "What was made from the scans.", include.results, (v) => { include.results = v; });
     opt("checkbox", "Scenes — saved views of these studies", "A saved scene comes along when every scan it shows is in the other database.", include.scenes, (v) => { include.scenes = v; });
     h("What is new here");
     opt("checkbox", "Show only what the other database does not have", "Hides the scans the database you copy into already holds whole.", onlyNew, (v) => { onlyNew = v; });

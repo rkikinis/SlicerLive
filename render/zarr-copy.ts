@@ -224,3 +224,52 @@ export async function loadSequenceFromCopy(dbBase: string, seriesUID: string): P
     pieces: jobs.length,
   };
 }
+
+/**
+ * THE PIECES OF ONE VOLUME OF A SERIES, from its copy -- what the store gave back, and nothing else: no voxel array
+ * is assembled, no other volume fetched. The store's way of getting a volume back once it is needed again
+ * (`__restoreVolumeChunks`). Until 2026-10-15 that read the whole series from DICOM for each volume asked: two phases
+ * of the beating heart took 13 s and took the page to 6.3 GB (checked in the pane). The volume is the one whose pieces
+ * include `want.hash` -- a name only it has; a label is a display name, and a diffusion scan's six volumes are all
+ * "b 0" (critic 2026-10-15, render-audit-fixes finding 1) -- or, without a hash, the one labeled `want.label`, or the
+ * first. `{ missing }` as for `loadSequenceFromCopy`.
+ */
+export async function readCopyPieces(dbBase: string, seriesUID: string, want: { hash?: string; label?: string } = {}): Promise<Map<string, Uint8Array> | { missing: string }> {
+  const r = await fetch(new URL(`_zarr/${encodeURIComponent(seriesUID)}`, dbBase), { cache: "no-store" }).catch(() => null);
+  if (!r) return { missing: "the server did not answer" };
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({})) as { error?: string };
+    return { missing: j.error ?? `HTTP ${r.status}` };
+  }
+  const answer = await r.json() as CopyAnswer;
+  const other = copyMadeByOtherCode(answer.group?.code, COPY_CODE, (answer.group as { interpreters?: Record<string, string> } | undefined)?.interpreters);
+  if (other) return { missing: other };
+  const f = want.hash ? answer.arrays.findIndex((a) => Object.values(a.attributes.duckn.extensions.albula.zarr.chunkHashes).includes(want.hash!))
+    : want.label !== undefined ? answer.arrays.findIndex((a) => a.attributes.duckn.extensions.albula.frame.label === want.label) : 0;
+  const arr = answer.arrays[f];
+  if (!arr) return { missing: want.hash ? "the copy holds no volume with that piece" : `the copy holds no volume labeled ${want.label}` };
+  const a = arr.attributes.duckn.extensions.albula;
+  const t = TYPED[a.zarr.dtype];
+  if (!t) return { missing: `the copy holds ${a.zarr.dtype}, which this page does not read` };
+  const off = zarrDisagrees(arr);
+  if (off) return { missing: `the copy's Zarr description no longer matches what Albula wrote: ${off} (rewritten by another tool?)` };
+  const [cz, cy, cx] = a.zarr.chunks;
+  const jobs = Object.entries(a.zarr.chunkHashes).map(([key, hash]) => {
+    const [kk, jj, ii] = key.split(".").map(Number);
+    return { url: new URL(`${answer.base}/${answer.group.frames[f]}/c/${kk}/${jj}/${ii}?h=${hash.slice(7, 23)}`, dbBase).href, rawSize: cz * cy * cx * t.bpe, hash };
+  });
+  const blobs = new Map<string, Uint8Array>();
+  let next = 0, failed: string | null = null;
+  const lane = async (pw: PoolWorker) => {
+    while (!failed && next < jobs.length) {
+      const job = jobs[next++];
+      const m = await askForPiece(pw, job);
+      if (failed) return;
+      if (m.error || !m.out) { failed = m.error ?? "a piece did not come back"; return; }
+      blobs.set(job.hash, new Uint8Array(m.out));
+    }
+  };
+  await Promise.all(workers().flatMap((pw) => [lane(pw), lane(pw)]));
+  if (failed) return { missing: `a piece of the copy could not be used: ${failed}` };
+  return blobs;
+}

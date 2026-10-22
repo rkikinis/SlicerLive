@@ -7,13 +7,16 @@
 //
 // Same code runs in the browser and in Deno (both have global WebSocket + fetch).
 
+import { SeriesField } from "./series-field.ts";
 import { type Field, hasSharedTexture, ImageField } from "./fields.ts";
 import { SLICER_VR_SHADE, type Shade } from "./shading.ts";
 import { ColorizeField } from "./colorize-field.ts";
 import { segLookOf } from "./look3d.ts";
+import { paddedGrid } from "../algorithms/close-labels.ts";
 import { makeMergedLabelTexture, mergeLabels } from "./solid-merge.ts";
 import { SLICER_BG_BOTTOM, SLICER_BG_TOP } from "./background.ts";
 import { FiducialField, type Sphere } from "./fiducial-field.ts";
+import { sceneVoxel } from "./scene-scale.ts";
 import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
 import { createRoiWidget, ROI_BAR_RGB, ROI_CENTER_RGB, ROI_HANDLE_RGB, type RoiWidget } from "./demos/roi-widget.ts";
 import { registerTerminology, terminologies, type TerminologySource, unregisterTerminology } from "../logic/anatomy/terminology.ts";
@@ -23,17 +26,14 @@ import { boxPlanePolygon } from "../logic/crop.ts";
 import { forgetDecoded, descKey, fetchZarrVolume, fetchZarrVolumeNative, getBlobFetch, knownRange, type ZarrDesc, type ZarrVolume, type ZarrVolumeNative } from "./zarr.ts";
 import { rowMul, worldForNode } from "../logic/transforms.ts";
 import { DEFAULT_PRESENTATION, presentationParams } from "../logic/presentation.ts";
-import { BUILD_ID, workerUrl } from "./build-id.ts";
-import { DRAW_ERROR_VOXELS, smallestVoxelEdge } from "../logic/decimate.ts";
 import type { Finish } from "../logic/anatomy/palettes.ts";
 import { lookupStructure } from "../logic/segment-naming.ts";
 import { finishFor, onShadingVersion } from "./shading-versions.ts";
-import type { LabelMesh } from "../algorithms/surface-nets.ts";
-import { DEFAULT_NORMAL_SMOOTH, DEFAULT_SMOOTH_ITERS } from "../algorithms/surface-nets.ts";
-import { surfaceNetsGpu } from "../algorithms/surface-nets-gpu.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
+import { nodeVoxel, tuned } from "./scene-scale.ts";
 import type { MrsonNode } from "./mrson.ts";
-import { companionItem, frameMate } from "../logic/sequences.ts";
+import { companionItem, frameMate, sequencePlays } from "../logic/sequences.ts";
+import { startWork, type Work } from "./working.ts";
 import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
 
 export type Vec3 = [number, number, number];
@@ -164,6 +164,10 @@ export interface MirrorView {
    *  through "nothing in 3D" between them (a sequence step). Optional: without it the two are
    *  done one after the other. */
   swapVolume3D?(prevId: string, imageId: string, vol: Volume3D | null): void;
+  /** The fields in the 3D view are the same ones, but one now reads other textures (a series stepped to another
+   *  frame: render/series-field.ts): rebuild the bind group and re-send the uniforms, without re-composing the view or
+   *  compiling. Optional: without it the caller re-publishes. */
+  rebind3d?(): void;
   // slice/MPR views and layout
   setSlicePlane(cell: string, plane: SlicePlane): void;
   setLayout(name: string): void;
@@ -235,6 +239,10 @@ export interface SegOverlay {
 export interface Volume3D {
   field: Field;
   colorizedSeg?: string;
+  /** A SERIES' field (render/series-field.ts): the segmentations of the family its frames are colored by, one per
+   *  frame -- constant while it plays, so a step changes nothing about which segmentations the volume draws (critic
+   *  2026-10-16, cine step 1, finding 2). Counted as colorizedSeg is. */
+  colorizedSegs?: string[];
   /** Segmentations whose anatomy this field draws (the solid look over merged segmentations): their
    *  own surfaces stand down, as a colorized one's do. */
   drawsSegs?: string[];
@@ -568,6 +576,10 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     // patient-aligned box around the head maps back onto the tilted grid as the whole volume.
     const ax = node.orientation as number[] | undefined;
     const axes = ax && ax.length === 9 ? ax : undefined;
+    // THE SMALLEST BOX IS ONE VOXEL of the finest volume in the scene, whatever its scale (microscopy to astrophysics;
+    // Ron, 2026-10-20). The same voxel sizes the box's bars when it is made.
+    // The scene's voxel, from the one module that says how big a voxel is (scene-scale.ts).
+    const finest = sceneVoxel(scene.nodes.values());
     let w = this.roiWidgets.get(node.id);
     if (!w) {
       // Created from this box's own extent (coverage 0.5 makes half exactly the extent's half), then
@@ -575,13 +587,14 @@ export class MarkupsDisplayableManager implements DisplayableManager {
       w = createRoiWidget(
         [c[0] - half[0], c[1] - half[1], c[2] - half[2]],
         [c[0] + half[0], c[1] + half[1], c[2] + half[2]],
-        { coverage: 0.5, axes },
+        { coverage: 0.5, axes, voxel: finest },
       );
       this.roiWidgets.set(node.id, w);
       scene.view?.setField(key, w.box);
       scene.view?.setField(hKey, w.handles);
     }
     w.setAxes(axes);
+    if (finest !== undefined) w.setMinHalf(finest / 2);
     w.setBox(c, half);
     scene.view?.redraw();
   }
@@ -725,6 +738,9 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     else this.field.setSpheres(this.allSpheres());          // in place
     if (!this.lines) this.lines = new CapsuleField(this.allSegments(), { screenSpace: true, ghost: true });
     else this.lines.setSegments(this.allSegments());
+    // Their drawn bounds are padded by a length that follows the data's scale (fiducial-field.ts screenPad).
+    const voxel = sceneVoxel(scene.nodes.values());
+    this.field.setVoxel(voxel); this.lines.setVoxel(voxel);
     if (first) {
       scene.view?.setField("markups", this.field);           // coarse add once
       scene.view?.setField("markupLines", this.lines);
@@ -1075,43 +1091,14 @@ interface SegSlot {
    * r8uint labelmap the baker already holds, and this.
    */
   paletteTex: GPUTexture;
-  /** True while this segmentation's surfaces are published as a mesh group. */
-  meshed?: boolean;
-  /** An extraction is in flight; a second must not be started for the same slot. */
-  meshing?: boolean;
-  /** The token of this slot's current build (SegmentationDisplayableManager.buildSurfaces). A continuation
-   *  whose token is not this one belongs to a build that was Removed or replaced: it publishes nothing and
-   *  touches nothing. */
-  build?: number;
-  /** The drawing copies are being made for the surfaces this slot holds now. */
-  decimating?: LabelMesh[];
-  /** The stored-surface store has been asked about this slot, and answered. Asked ONCE: a database
-   *  that has nothing for this segmentation will still have nothing on the next 3D toggle, and a
-   *  lookup per toggle would be a round trip to say so every time. */
-  storedTried?: boolean;
-  /**
-   * The extracted GEOMETRY, kept so a color change never re-extracts.
-   *
-   * Extraction depends on the labelmap and the geometry and on nothing else -- not color, not
-   * opacity, not the camera -- so it is once per segmentation, and again only if the voxels are
-   * edited. Holding it is what makes an eye toggle a buffer re-push instead of another 17 seconds.
-   */
-  surfaces?: LabelMesh[];
-  /**
-   * The labelmap at NATIVE resolution, for surface extraction.
-   *
-   * A surface costs by AREA, which is why it needs no resampled copy -- the capped isotropic grid
-   * the SDF path used to build is gone with it. One byte a voxel -- 16 MB for a brain, 418 MB for a
-   * whole-body CT, which is the same array the baker uploaded rather than a second one.
-   */
-  nativeLab?: Uint8Array;
-  /** The extraction worker running for this slot, so Remove can stop it. */
-  worker?: Worker;
-  /** Why the last attempt at surface models failed, for Generate Surface Models; cleared on a new attempt. */
-  surfaceFailed?: string;
+  // NO SURFACES HERE ANY MORE (Ron, 2026-10-21, option B). This slot held the extracted meshes, their drawing
+  // copies, the labelmap copy for the extraction and the worker that made them, for the Surfaces look and the
+  // Generate Surface Models module; both are gone. Anatomy is drawn solid from the labels (updateSolid), and
+  // surface models are an export made on demand from Save › Files (render/surface-export.ts), which reads the
+  // labels back from the card (readLabelmap) and keeps nothing.
   /** Roughly how many voxels carry a label (every 7th voxel counted, times 7): which segmentation is
    *  the more specific where two overlap, for the solid look's merge. Counted when the labels arrive,
-   *  because the labelmap itself is let go once the surfaces are built. */
+   *  because the labelmap itself is not kept on the processor (it is a texture). */
   labelledVoxels?: number;
   dims: Vec3;
   ijkToRAS: number[];
@@ -1120,6 +1107,9 @@ interface SegSlot {
   zarrSig: string;                   // changes when the segmentation is EDITED
   lastDisp?: MrsonNode;              // the display node to re-apply when the 3D answer flips
 }
+
+/** The label read-back's slab, in bytes (SegmentationDisplayableManager.readLabels); a test makes it small. */
+export const LABEL_READ_SLAB = { bytes: 32 << 20 };
 
 export class SegmentationDisplayableManager implements DisplayableManager {
   interestedTypes = ["segmentation", "image", "volumeRenderingDisplay"]   // the last two: the volume's 3D look (render/look3d.ts);
@@ -1195,11 +1185,10 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       // The palette is what carries per-segment color and visibility, and it is cheap: a 2 KB write
       // for the slice overlay, and a re-bake of the 3D volume only when one is built.
       const key = paletteKey((node.segments as Segment[]) ?? [], mergedOf(node));
-      // lastDisp FIRST, as on the event path below: recolorize re-pushes the surfaces, and
-      // pushSurfaces reads each segment's color and opacity from lastDisp. Left as it was, every
-      // per-segment opacity or color set in one write was drawn one change late -- the look
-      // "Vessels in context" showed opaque lungs while its status line said see-through (critic,
-      // 2026-09-20 evening, finding 1; the building session's own picture showed it too).
+      // lastDisp FIRST, as on the event path below: the solid look reads each segment's color and opacity
+      // from lastDisp. Left as it was, every per-segment opacity or color set in one write was drawn one
+      // change late -- the look "Vessels in context" showed opaque lungs while its status line said
+      // see-through (critic, 2026-09-20 evening, finding 1; the building session's own picture showed it too).
       existing.lastDisp = node;
       if (key !== existing.palKey) {
         existing.palKey = key;
@@ -1231,11 +1220,8 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       // already renders — an in-place REPLACE. No removeField/setField, so no dark flash between applies.
       existing.zarrSig = sig;
       existing.baker.updateLabelmap(lab);
-      existing.nativeLab = node.surfaceModels === true ? lab : undefined;   // THE FIREWALL: see surfacesOn
       existing.labelledVoxels = countLabelled(lab);
       forgetDecoded(node.zarr as ZarrDesc);              // it is a texture now
-      existing.surfaces = undefined;                    // the voxels moved: the geometry is stale
-      if (existing.meshed) { this.hideSurfaces3D(existing, scene); }
       existing.palKey = paletteKey(segments, mergedOf(node));
       this.recolorize(existing, segPalette(segments, mergedOf(node)), scene);
       this.apply(existing, node, scene);
@@ -1248,8 +1234,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     // THE SEGMENTATION MAY HAVE GONE WHILE THIS WAS READING. `destroySlot` frees the baker's
     // textures and the palette; a build that carries on with the slot it was holding writes into
     // them and takes the device down: "Destroyed texture ... used in a submit", reproduced by the
-    // critic on 2026-09-22 by deleting a segmentation 5 ms into a rebuild. The stored-surfaces
-    // callback twenty lines below has always re-checked; this path never did.
+    // critic on 2026-09-22 by deleting a segmentation 5 ms into a rebuild.
     if (!scene.nodes.get(node.id)) return;
     // Only the chunks that hold anything go to the card, when the read handed them back (see
     // ColorizeBaker); a labelmap read on the page, without the worker, goes whole as before.
@@ -1257,7 +1242,6 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     const slot: SegSlot = {
       id: node.id, baker, paletteTex: makeLabelPaletteTexture(this.dev), dims: zv.dims,
       ijkToRAS: node.ijkToRAS as number[], palKey: paletteKey(segments, mergedOf(node)), zarrSig: sig,
-      nativeLab: node.surfaceModels === true ? lab : undefined,   // THE FIREWALL: see surfacesOn
       labelledVoxels: countLabelled(lab),
     };
     // AND IT MAY GO BETWEEN THE UPLOAD AND THE PUBLISH. Checked again rather than once: the two
@@ -1266,8 +1250,8 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     if (!scene.nodes.get(node.id)) { baker.destroy(); slot.paletteTex.destroy(); return; }
     this.slots.set(node.id, slot);
     forgetDecoded(node.zarr as ZarrDesc);                // uploaded: the cache was the last CPU copy
-    // Only the crisp slice overlay is baked here. The smoothed 3D volume and its field are built by
-    // apply(), and only if they will be drawn -- see showSurfaces3D.
+    // Only the slice overlay's palette is written here; 3D is the solid look's merge (updateSolid), which
+    // apply() schedules.
     timedLoadSync("labelmap · color it", () => this.recolorize(slot, segPalette(segments, mergedOf(node)), scene));
     this.listen(scene);
     timedLoadSync("labelmap · show it", () => this.apply(slot, node, scene));
@@ -1286,9 +1270,9 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     if (!slot) return;
     const d = ev.display as MrsonNode & { segments?: Segment[] };
     const key = paletteKey(d.segments ?? [], mergedOf(d));
-    // lastDisp FIRST: recolorize re-pushes the surfaces, and pushSurfaces reads the segments'
-    // colors and opacity from lastDisp -- so it must see this event's, not the previous one's.
-    // (Colors always came right on the NEXT change; a see-through toggle showed one event late.)
+    // lastDisp FIRST: the solid look reads the segments' colors and opacity from lastDisp -- so it must
+    // see this event's, not the previous one's. (Colors always came right on the NEXT change; a
+    // see-through toggle showed one event late.)
     slot.lastDisp = d;
     if (key !== slot.palKey) { slot.palKey = key; this.recolorize(slot, segPalette(d.segments ?? [], mergedOf(d)), scene); }
     this.apply(slot, d, scene);
@@ -1331,7 +1315,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       // its surface names the structure. It used to be dropped here, which is why a 3D pick on a
       // segmentation whose 2D was off said "none".
       if (fillOpacity <= 0 && outlineOpacity <= 0 && !in3D) continue;
-      // ALPHA 0 IS HIDDEN, the same test pushSurfaces uses to decide whether a segment gets a mesh.
+      // ALPHA 0 IS HIDDEN, the same test the solid look uses to decide whether a structure is drawn.
       // A segment at low-but-nonzero opacity stays in the mask: it is on screen, so it is what the
       // cursor is over, and only being switched OFF takes a structure out of the picture.
       const vis = new Uint32Array(8);
@@ -1347,7 +1331,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
         fillOpacity,
         outlineOpacity,
         visible: vis,
-        // The same rule showSurfaces3D's caller applies: absent means "follow the 2D visibility".
+        // The same rule apply() follows: absent means "follow the 2D visibility".
         visible3D: in3D,
       });
     }
@@ -1391,39 +1375,13 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       }
       if (!this.overlayOwner) this.clearOverlay(scene);
     }
-    // The 3D field is independent: when the colorize volume of THIS segmentation's own source volume
-    // is on, it already renders these segments, and a second field would be the duplicate that made
-    // a bone group set to zero stay on screen. Not drawn means not built -- the smoothed volume and
-    // the blur scratch are ~1.19 GB each on a full-body study, and re-baking them on every palette
-    // change is what made the group sliders lag.
-    //
-    // `visible3D` is independent of the slice overlay above -- Subject Hierarchy's own 3D toggle,
-    // for "the ability to display each of them in the 3D viewer" separately from the slices. Absent
-    // means it has never been set, so it defaults to following `visible`.
-    const visible3D = (disp.visible3D as boolean | undefined) ?? visible;
-    // THE VOLUME'S LOOK IN SCENE decides whether its segmentations are in 3D at all: not under "off" or
-    // "volume" (render/look3d.ts). Solid ones are drawn by the merged field (updateSolid), which tells
-    // the view, so segments3DDrawnByVolume answers for them.
+    // 3D IS THE SOLID LOOK'S, for every segmentation (updateSolid reads `visible3D`, the volume's look in Scene
+    // and whether a volume rendering colors it). Surface models drawn here are gone (Ron, 2026-10-21, option B):
+    // they are an export now, made from Save › Files. The redraw is the one this branch always made for a
+    // segmentation on in 3D (absent `visible3D` follows `visible`; the volume's look may hide it).
     const segNode = scene.nodes.get(slot.id);
-    // A member of a sequence too: setLook3D writes one look on every frame. Leaving the members out let
-    // a flagged heart draw its surfaces under Off and over the gray volume rendering (critic, 2026-09-24).
-    const hiddenByLook = !!segNode && segLookOf(scene, segNode) === "hidden";
-    const want3D = visible3D && !hiddenByLook && !(scene.view?.segments3DDrawnByVolume?.(slot.id) ?? false);
-    if (want3D) {
-      this.showSurfaces3D(slot, scene);
-      scene.view?.redraw();
-    } else {
-      this.hideSurfaces3D(slot, scene);
-      // NOT DRAWN HERE, BUT STILL WANTED. `ensureSurfaces` may have been called before this slot
-      // existed -- the load path and the end of a run both do -- and this is the first moment the
-      // request can be acted on. Without it the surfaces of a segmentation that a volume is
-      // colorizing are never built, which is what left a fresh run with none to save.
-      // AND A SEGMENTATION GIVEN SURFACE MODELS HAS THEM, drawn or not: a scene brings the flag back (scene-
-      // restore) with no one asking, and under Colored nothing else would build them -- the module waited
-      // "for the segmentation to load" forever and Save wrote the SEG alone. Not again after a failure: the
-      // module's Try again asks (generateSurfaces).
-      if (this.surfacesOn(slot, scene) && !slot.surfaces && !this.inFlight(slot) && !slot.surfaceFailed) this.buildSurfaces(slot, scene);
-    }
+    const visible3D = (disp.visible3D as boolean | undefined) ?? visible;
+    if (visible3D && !(segNode && segLookOf(scene, segNode) === "hidden")) scene.view?.redraw();
     this.scheduleSolid(scene);
   }
 
@@ -1432,9 +1390,9 @@ export class SegmentationDisplayableManager implements DisplayableManager {
   // Under the Colored look (render/look3d.ts) every segmentation shown in 3D is drawn solid -- with or
   // without its CT: those on one voxel grid (at most two grids) are merged into ONE label image on the
   // card (render/solid-merge.ts; where two overlap, drawOrder decides, for the slices and 3D alike) and
-  // drawn by one ColorizeField with no CT. Their surfaces stand down but are KEPT
-  // (Ron: "keep the surfaces until we know for sure that it works"). The members of a sequence stay
-  // with the colored volume, which steps with the frames.
+  // drawn by one ColorizeField with no CT. The members of a sequence stay with the colored volume, which
+  // steps with the frames. (Ron, 2026-09-23: "keep the surfaces until we know for sure that it works";
+  // 2026-10-21, option B: surface models are an export only, render/surface-export.ts.)
   private solidGroups = new Map<string, { field: ColorizeField; labels: GPUTexture; sig: string; palSig: string; drawnKey: string; bytes: number }>();
   private finishWatch?: () => void;
   private solidScheduled = false;
@@ -1485,8 +1443,8 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     const left: string[] = [];
     // AT MOST TWO VOXEL GRIDS SOLID: a solid set reads 6 of the 16 images one drawing step may read in the
     // application's window, and a third was refused by the card -- its segmentations then drawn neither
-    // solid nor as surfaces (critic, finding 2). A third grid's segmentations are not drawn in 3D (the
-    // firewall: nothing stands in) and the status line names them.
+    // solid nor as surfaces (critic, finding 2). A third grid's segmentations are not drawn in 3D (nothing
+    // stands in) and the status line names them.
     const MAX_GRIDS = 2;
     for (const s of this.drawOrder()) {
       const d = s.lastDisp;
@@ -1502,6 +1460,11 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       if (d.sequence) {
         const family = ((scene.nodes.get(d.sequence as string)?.items as { node: string }[] | undefined) ?? []).map((it) => it.node);
         if ([s.id, ...family].some((id) => scene.view?.segmentColoredByVolumeRendering?.(id) ?? false)) continue;
+      } else if (scene.view?.segmentColoredByVolumeRendering?.(s.id)) {
+        // ANY VOLUME RENDERING THAT COLORS IT draws it (Volume Rendering › Colorized volume on a plain CT): drawn here as
+        // well, the anatomy was in two fields, and the colorize sliders reached only one of them -- Segment opacity at 0
+        // left bones, colon and kidneys on screen (critic 2026-10-16, general audit, finding 1).
+        continue;
       }
       const segNode = scene.nodes.get(s.id);
       if (!segNode || segLookOf(scene, segNode) !== "solid") continue;   // the volume's look in Scene
@@ -1550,6 +1513,11 @@ export class SegmentationDisplayableManager implements DisplayableManager {
         }
         inputs.push({ labels: s.baker.labelTexture(), remap });
         drawn.push(s.id);
+        // A SERIES MEMBER STANDS FOR ITS WHOLE FAMILY (CINE-RETHINK.md step 1, the critic's count: the solid group
+        // re-published, and the 3D view re-composed, on every step, because the member drawn changed): the family's
+        // members are all named, the same list at every step, so a step re-merges the voxels and nothing else.
+        const fam = s.lastDisp?.sequence ? ((scene.nodes.get(s.lastDisp.sequence as string)?.items as { node: string }[] | undefined) ?? []).map((it) => it.node) : [];
+        for (const id of fam) if (id !== s.id) drawn.push(id);
         mergeParts.push(`${s.id}:${s.zarrSig}:${Array.from(remap).join(",")}`);
       }
       // WHAT MAKES A NEW MERGE is which voxels and which numbers -- not a color or an opacity, which is a
@@ -1557,7 +1525,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       // scratch at 768x768x709).
       const mergeSig = mergeParts.join(";");
       const palSig = JSON.stringify(pal);
-      const drawnKey = drawn.join("|");
+      const drawnKey = [...drawn].sort().join("|");
       let g = this.solidGroups.get(key);
       let publish = false;
       if (!g) {
@@ -1579,6 +1547,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
         mergeLabels(this.dev, inputs, w.dims as [number, number, number], g.labels);
         g.field.labelsChanged();                // new voxels: the smoothed copy is made again
         g.sig = mergeSig; g.palSig = "";
+        view.redraw?.();                        // new voxels in the same field: drawn (a series step no longer re-publishes)
       }
       if (g.palSig !== palSig) {
         for (let l = 1; l < 256; l++) {
@@ -1618,608 +1587,68 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     });
   }
 
-  /** This segmentation is wanted in 3D as SURFACE MODELS (the look says Surfaces): draw the ones held, or start
-   *  them. Only for a segmentation given surface models (the firewall); anything else is drawn solid elsewhere. */
-  private showSurfaces3D(slot: SegSlot, scene: LiveScene) {
-    if (slot.meshed || !slot.palette) return;
-    if (!this.surfacesOn(slot, scene)) return;           // THE FIREWALL (surfacesOn)
-    if (slot.surfaceFailed) return;                      // said once; Generate Surface Models' Try again asks again
-    // SURFACES, AND NOTHING DRAWN IN FRONT OF THEM. Measured on Ron's 95-parcel FastSurfer result
-    // at its native 0.67 mm: 5.08M triangles in 2.5 s, 122 MB of buffers. No resampling, so no
-    // blocky surfaces and no sawtooth where two parcels meet, which is what Ron objected to in both
-    // earlier attempts.
-    //
-    // THERE USED TO BE AN INTERIM PICTURE HERE and it is gone on purpose (Ron, 2026-09-10: "drop 2:
-    // yes"). A coarse SDF shell was built to cover the wait, which was 118 s when that was written;
-    // extraction is now 2.8 s on a chest CT and instant when the surfaces come back from the DICOM
-    // database, so it spent several seconds and 410 MB of GPU to cover a 2.8 s gap. It also caused a
-    // real bug: pushSurfaces failed to tear it down, so the coarse shell went on drawing UNDER 12M
-    // triangles, which is what Ron was looking at both times he said the result was still ugly.
-    this.buildSurfaces(slot, scene);
-    // Stored surfaces come back synchronously, so this is already true for the common case.
-    if (slot.meshed) return;
-    // IN FLIGHT MEANS WAIT, NOT FALL BACK. buildSurfaces answers false both while an extraction is
-    // running and when one cannot be started at all; the SDF used to cover both, so nothing had to
-    // tell them apart. `meshing` does: it is set by the two paths that will finish (the stored
-    // lookup and the worker) and left alone by the two that will not (no native labelmap or no
-    // setMeshGroup, and a worker that would not start).
-    if (this.inFlight(slot)) return;
-    // NOTHING IS COMING. The blurred-presence volume used to stand in here, drawn under the name of the
-    // surfaces; no longer (Ron, 2026-09-24: "We have had now several instances where you told me that
-    // its volume rendering only to find out on further investigation that it is not."). Said instead.
-    // (Nothing drawn because every structure is hidden, or there are none, is not a failure: silent.)
-    if (!slot.surfaces) surfaceProgress?.(`the surface models of ${SegmentationDisplayableManager.nameOf(slot)} could not be built — Scene › In 3D › Colored shows the segmentation`);
-  }
-
-
   /**
-   * The segments as extracted, smoothed TRIANGLE SURFACES -- Slicer's "Show 3D", without VTK.
+   * A SEGMENTATION'S LABELS, read back from the graphics card, for the surface export (render/surface-export.ts).
    *
-   * Ron: "check how andras did it when you push the 3d button in the slicer segmentation module." The
-   * pipeline there is extraction (flying edges or surface nets), smoothing, optional decimation and
-   * computed normals. Surface nets is used here for a reason beyond speed: it places ONE vertex per
-   * cell shared by every label meeting in it, so parcels that touch cannot crack apart -- which is
-   * what Slicer's separate "joint smoothing" option exists to prevent.
-   *
-   * The coarse copy is NOT used: this runs on the native labelmap, which is the whole point.
+   * The card holds the only copy (the samples were let go when they became a texture, CONSTRAINTS.md "a copy of the
+   * data is held only while something is reading it"), and it is the copy that is drawn -- an edit in the Segment
+   * Editor is in it. The caller owns what comes back and drops it when its extraction is done; nothing is kept here.
+   * Null when the segmentation is not (yet) on the card.
    */
-  private buildSurfaces(slot: SegSlot, scene: LiveScene): boolean {
-    const view = scene.view;
-    if (!view?.setMeshGroup) return false;
-    if (!this.surfacesOn(slot, scene)) return false;     // THE FIREWALL: only a segmentation given surface models
-    if (slot.meshing) return true;                       // already on its way; do not start a second
-    const owner = this.laneOwner ? this.slots.get(this.laneOwner) : undefined;
-    const busy = !!owner && owner !== slot && !!owner.meshing;   // an owner with nothing in flight holds nothing
-    if (busy && this.queue.includes(slot.id)) return false;      // waiting its turn
-    // ALREADY EXTRACTED: push what we have instead of recomputing it. The geometry depends only on
-    // the labelmap, so nothing about a 3D toggle can have changed it.
-    //
-    // BEFORE the labelmap is asked for. The labelmap is let go once the surfaces are built, and this
-    // returned "cannot" for want of it -- so surfaces that had stood down (for the colored volume, or
-    // the solid look) and were wanted back fell through to the old blurred-volume drawing: opaque,
-    // grainy, deaf to a structure's opacity. Seen twice on 2026-09-23 as "the lungs came back opaque".
-    if (slot.surfaces) { this.pushSurfaces(slot, scene); this.releaseIfIdle(slot, scene); return true; }
-
-    // ONE EXTRACTION AT A TIME, across every segmentation (critic, 2026-09-24, round 2, finding 1): a
-    // sequence's five phases, or a restored scene's four flagged segmentations, each started at once --
-    // a whole-body build holds ~0.8 GB for a moment in the page's process, which the system ends above
-    // 4 GB. The others wait in `queue` and start as each one finishes (releaseIfIdle -> pump).
-    if (busy) {
-      if (!this.queue.includes(slot.id)) this.queue.push(slot.id);
-      return false;
-    }
-    this.queue = this.queue.filter((x) => x !== slot.id);
-    this.laneOwner = slot.id;
-    const token = slot.build = ++this.buildGen;
-
-    // ALREADY EXTRACTED IN AN EARLIER SESSION: read it back rather than recomputing it.
-    //
-    // Ron: "Is there a meaningful way to round trip the surfaces through the dicom data base, so I
-    // don't need to recreate everytime I am starting a new version." The writing half has shipped
-    // for a while (logic/export-dicom-surface.ts, SOP class 66.5); this is the half that makes it
-    // worth anything. Extraction is 15 s on a whole-body study -- inside the budget, but paid on
-    // every load of a result that has not changed since the last one.
-    //
-    // ONE ATTEMPT PER SLOT, and the extraction is not started until it has answered. Racing the two
-    // would mean either throwing away a finished extraction or drawing meshes twice; the lookup is
-    // an index read and a file read, so waiting for it costs far less than the work it may save.
-    slot.surfaceFailed = undefined;
-    const sig = slot.zarrSig;                            // the labels this attempt is for (see landed)
-    if (storedSurfaceLoader && !slot.storedTried) {
-      slot.storedTried = true;
-      slot.meshing = true;                               // holds the second entrant off until we know
-      storedSurfaceLoader(slot.id).then((meshes) => {
-        if (slot.build !== token) return;                // Removed (or replaced) meanwhile: not ours any more
-        slot.meshing = false;
-        if (!this.landed(slot, scene, sig)) { this.releaseIfIdle(slot, scene); return; }   // deleted, Removed or edited while we were looking
-        if (meshes?.length) {
-          slot.surfaces = meshes;
-          slot.nativeLab = undefined;                    // read for the extraction, and nothing else
-
-          const tris = meshes.reduce((n, m) => n + m.indices.length / 3, 0);
-          // PLAIN, AND UNMISTAKABLE AGAINST THE OTHER ONE. The whole point of the round trip is that
-          // this run did NOT recompute anything, so the message says that rather than implying it.
-          surfaceProgress?.(`3D surfaces LOADED from the DICOM database (nothing recomputed) — ` +
-            `${meshes.length} structures, ${tris.toLocaleString()} triangles · ${SegmentationDisplayableManager.nameOf(slot)}`);
-          this.pushSurfaces(slot, scene);
-          this.makeDrawingCopies(slot, scene, surfaceProgress);
-        } else {
-          this.buildSurfaces(slot, scene);               // nothing stored: extract, as before (the lane is still ours)
-        }
-        this.releaseIfIdle(slot, scene);
-      }).catch((e) => {
-        // A store that cannot answer is not a failure of anything: extraction is the path that was
-        // always here. Said out loud so a database problem does not read as a slow first load.
-        if (slot.build !== token) return;
-        slot.meshing = false;
-        console.log(`no stored surfaces for ${slot.id} (${e}); extracting`);
-        if (this.slots.has(slot.id)) this.buildSurfaces(slot, scene);
-        this.releaseIfIdle(slot, scene);
-      });
-      return false;                                      // in flight; `meshing` says so, and holds
-    }
-    // ── ON THE GRAPHICS CARD, when the setting says so (Settings › Surfaces) ──
-    //
-    // Measured 2026-09-23 on the whole-body checkpoints: the whole extraction, all four phases,
-    // 0.91 s on the card against 10.02 s on the processor, with the meshes IDENTICAL -- same
-    // triangle count and same vertex count for every label, surface areas within 0.0002%.
-    // `algorithms/surface-nets-gpu.ts` and the bench beside it have the numbers.
-    //
-    // It reads the labelmap texture the colorize baker already uploaded, so there is nothing to
-    // send and nothing to copy. It is a setting rather than the default until Ron has run it on his
-    // own studies in this window; if it throws, the worker below still runs, and the log says so.
-    const gg = globalThis as unknown as { __gpuSurfaces?: boolean; __lastSurfacePath?: string };
-    if (gg.__gpuSurfaces && slot.baker?.labelTexture()) {
-      gg.__lastSurfacePath = "gpu";
-      slot.meshing = true;
-      const t0 = performance.now();
-      // A WATCHDOG, because a refused submission does not reject. The first in-app run hit a
-      // validation error inside a pass; the promise simply never settled and the segmentation had
-      // no surfaces and no reason given. Two minutes is far beyond the measured 0.9 s.
-      const watchdog = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("the graphics card did not finish within two minutes")), 120_000));
-      Promise.race([surfaceNetsGpu(new Uint8Array(0), slot.dims, {
-        device: this.dev, texture: slot.baker.labelTexture(),
-        smoothIters: DEFAULT_SMOOTH_ITERS, normalSmooth: DEFAULT_NORMAL_SMOOTH,
-        labelMeshes: true, keepMeshes: true, ijkToRAS: slot.ijkToRAS,
-      }), watchdog]).then((g) => {
-        if (slot.build !== token) return;
-        slot.meshing = false;
-        if (!this.landed(slot, scene, sig)) { this.releaseIfIdle(slot, scene); return; }   // deleted, Removed or edited while it was extracting
-        slot.nativeLab = undefined;
-        slot.surfaces = (g.meshes ?? []).map((m) => ({ label: m.label, positions: m.positions, normals: m.normals, indices: m.indices }));
-        const tris = slot.surfaces.reduce((n, m) => n + m.indices.length / 3, 0);
-        const msg = `3D surfaces COMPUTED ON THE GPU in ${((performance.now() - t0) / 1000).toFixed(1)}s — ` +
-          `${slot.surfaces.length} structures, ${tris.toLocaleString()} triangles · ${SegmentationDisplayableManager.nameOf(slot)}`;
-        console.log(msg);
-        surfaceProgress?.(msg);
-        this.pushSurfaces(slot, scene);
-        this.makeDrawingCopies(slot, scene, surfaceProgress);
-        this.releaseIfIdle(slot, scene);
-      }).catch((e) => {
-        if (slot.build !== token) return;
-        slot.meshing = false;
-        // WRITTEN DOWN WHERE IT CAN BE READ. A fallback that only logs is a fallback nobody sees:
-        // the first in-app test of this fell back to the worker and the console line never surfaced.
-        (globalThis as unknown as { __gpuSurfaceError?: string }).__gpuSurfaceError = String((e as Error)?.stack ?? e);
-        console.log(`the surfaces could not be built on the GPU (${e}); the worker will do it`);
-        surfaceProgress?.(`building surfaces on the processor instead — the graphics card could not: ${e}`);
-        // THROUGH THE READ-BACK: the labelmap is not kept for a segmentation that loaded without surface
-        // models, and buildSurfacesInWorker alone gave up without a word (critic, 2026-09-24, finding 6).
-        if (this.slots.has(slot.id) && this.surfacesOn(slot, scene)) this.workerWithLabels(slot, scene);
-        this.releaseIfIdle(slot, scene);
-      });
-      return false;
-    }
-    gg.__lastSurfacePath = gg.__gpuSurfaces ? "worker (no label texture)" : "worker";
-    const r = this.workerWithLabels(slot, scene);
-    this.releaseIfIdle(slot, scene);                     // a worker that would not start holds no lane
-    return r;
+  async readLabelmap(id: string, opts: { pad?: boolean } = {}): Promise<{ labels: Uint8Array; dims: Vec3; ijkToRAS: number[]; padded?: boolean } | null> {
+    // A build in flight (onNodeAdded) finishes first, so the labels read are the ones it uploads.
+    for (let inFlight = this.building.get(id); inFlight; inFlight = this.building.get(id)) await inFlight;
+    const slot = this.slots.get(id);
+    if (!slot) return null;
+    const labels = await this.readLabels(slot, !!opts.pad);
+    // Removed or replaced while it was read: its textures may be gone, and what came back is not this segmentation's.
+    if (this.slots.get(id) !== slot) return null;
+    // PADDED (Save › Files › "Closed, for 3D printing"; algorithms/close-labels.ts): one voxel of background on every
+    // side, written straight into the larger array as the slabs come back -- no second copy, no extra time.
+    if (opts.pad) { const g = paddedGrid(slot.dims, slot.ijkToRAS); return { labels, dims: g.dims, ijkToRAS: g.ijkToRAS, padded: true }; }
+    return { labels, dims: [...slot.dims] as Vec3, ijkToRAS: slot.ijkToRAS.slice() };
   }
-
-  /** The processor extraction, with the labelmap read back from the graphics card when it is not kept
-   *  (it is not, for a segmentation that loaded without surface models). */
-  private workerWithLabels(slot: SegSlot, scene: LiveScene): boolean {
-    if (slot.nativeLab) return this.buildSurfacesInWorker(slot, scene);
-    const sig = slot.zarrSig;
-    const token = slot.build;
-    slot.meshing = true;
-    void this.readLabels(slot).then((lab) => {
-      if (slot.build !== token) return;                  // Removed meanwhile: the labels go unread
-      slot.meshing = false;
-      if (!this.landed(slot, scene, sig)) { this.releaseIfIdle(slot, scene); return; }
-      slot.nativeLab = lab;
-      this.buildSurfacesInWorker(slot, scene);
-      this.releaseIfIdle(slot, scene);
-    }).catch((e) => {
-      if (slot.build !== token) return;
-      slot.meshing = false;
-      slot.surfaceFailed = `the labelmap could not be read back: ${e}`;
-      surfaceProgress?.(`the surface models of ${SegmentationDisplayableManager.nameOf(slot)} could not be made — ${slot.surfaceFailed}`);
-      this.releaseIfIdle(slot, scene);
-    });
-    return false;
-  }
-
-  /**
-   * MAY AN ASYNCHRONOUS BUILD PUBLISH WHAT IT MADE? Only if the segmentation is still here, still has
-   * surface models, and still has the labels the build started from. Without this a build that landed
-   * after Remove was held anyway (critic, 2026-09-24, finding 3), and one that landed after a paint
-   * stroke published the geometry of the labels before it -- which Save then wrote under the new SEG
-   * (finding 1). Edited meanwhile: the result is dropped and the build runs again on the current labels.
-   */
-  private landed(slot: SegSlot, scene: LiveScene, sig: string): boolean {
-    if (!this.slots.has(slot.id) || !this.surfacesOn(slot, scene)) return false;
-    if (slot.zarrSig !== sig) { slot.surfaces = undefined; this.buildSurfaces(slot, scene); return false; }
-    return true;
-  }
-
-  // ── THE LANE: one extraction at a time (see buildSurfaces) ──
-  private buildGen = 0;
-  private laneOwner?: string;
-  private queue: string[] = [];
-  /** Building, or waiting its turn to. */
-  private inFlight(slot: SegSlot): boolean { return !!slot.meshing || this.queue.includes(slot.id); }
-  /** The lane goes to the next in the queue once this slot has nothing in flight. */
-  private releaseIfIdle(slot: SegSlot, scene: LiveScene): void {
-    if (this.laneOwner !== slot.id || slot.meshing) return;
-    this.laneOwner = undefined;
-    while (!this.laneOwner && this.queue.length) {
-      const next = this.slots.get(this.queue.shift()!);
-      if (!next || !this.surfacesOn(next, scene) || next.surfaces || next.surfaceFailed) continue;
-      this.buildSurfaces(next, scene);
-      if (!next.meshing && this.laneOwner === next.id) this.laneOwner = undefined;
-    }
-  }
-  /** Stop whatever this slot has in flight: the worker, and any continuation (its token no longer matches). */
-  private cancelBuild(slot: SegSlot, scene: LiveScene): void {
-    slot.build = ++this.buildGen;
-    slot.worker?.terminate(); slot.worker = undefined;
-    slot.meshing = false;
-    this.queue = this.queue.filter((x) => x !== slot.id);
-    this.releaseIfIdle(slot, scene);
-  }
-
-  // ── THE FIREWALL AROUND SURFACE MODELS (Ron, 2026-09-24) ──
-  //
-  // "I think that I am ready to ask you to remove the surface models as a 'first class' citizen. We need a
-  // new module called generate surface models where someone could explicitly decide to generate them, at
-  // which time the proper controls would appear in the scene. But I would firewall it."
-  //
-  // A segmentation has surface models only when its node says `surfaceModels: true`, and only the Generate
-  // Surface Models module sets that. Without it nothing here builds, loads (from the cache or the DICOM
-  // database), holds or draws a surface, and the labelmap copy extraction needs is not kept. Every path
-  // into surfaces passes through buildSurfaces, ensureSurfaces or pushSurfaces, and each asks this.
-  private surfacesOn(slot: SegSlot, scene: LiveScene): boolean {
-    return scene.nodes.get(slot.id)?.surfaceModels === true;
-  }
-  /** The labelmap, read back from the graphics card (the processor extraction needs it). */
-  private async readLabels(slot: SegSlot): Promise<Uint8Array> {
+  /** The labelmap, read back from the graphics card. Rows are padded to 256 bytes on the way back. */
+  private async readLabels(slot: SegSlot, pad = false): Promise<Uint8Array> {
     const tex = slot.baker.labelTexture();
     const [nx, ny, nz] = slot.dims as [number, number, number];
     const bpr = Math.ceil(nx / 256) * 256;
-    const buf = this.dev.createBuffer({ size: bpr * ny * nz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: ny }, [nx, ny, nz]);
-    this.dev.queue.submit([enc.finish()]);
-    await buf.mapAsync(GPUMapMode.READ);
-    const raw = new Uint8Array(buf.getMappedRange());
-    // One copy when the rows need no padding (768 wide: the whole-body case), else row by row.
-    const out = bpr === nx ? raw.slice() : new Uint8Array(nx * ny * nz);
-    if (bpr !== nx) for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) out.set(raw.subarray((z * ny + y) * bpr, (z * ny + y) * bpr + nx), (z * ny + y) * nx);
-    buf.unmap(); buf.destroy();
+    // IN SLABS of slices (critic 2026-10-21, surfaces export, finding 14): one 418 MB staging buffer beside its 418 MB
+    // copy was 836 MB at once for a whole body; a slab of at most 32 MB is reused. And on any failure (a lost device, a
+    // refused buffer) the staging buffer is destroyed and the reason is said in words.
+    const slab = Math.max(1, Math.min(nz, Math.floor(LABEL_READ_SLAB.bytes / (bpr * ny))));
+    const buf = this.dev.createBuffer({ size: bpr * ny * slab, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    // Padded: each row lands one voxel in, one row down, one slice in, of the larger grid.
+    const p = pad ? 1 : 0, X = nx + 2 * p, Y = ny + 2 * p;
+    const out = new Uint8Array(X * Y * (nz + 2 * p));
+    const rowAt = (z: number, y: number) => ((z + p) * Y + (y + p)) * X + p;
+    try {
+      for (let z0 = 0; z0 < nz; z0 += slab) {
+        const d = Math.min(slab, nz - z0);
+        const enc = this.dev.createCommandEncoder();
+        enc.copyTextureToBuffer({ texture: tex, origin: { x: 0, y: 0, z: z0 } }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: ny }, [nx, ny, d]);
+        this.dev.queue.submit([enc.finish()]);
+        await buf.mapAsync(GPUMapMode.READ, 0, bpr * ny * d);
+        const raw = new Uint8Array(buf.getMappedRange(0, bpr * ny * d));
+        if (bpr === nx && !p) out.set(raw, z0 * nx * ny);
+        else for (let z = 0; z < d; z++) for (let y = 0; y < ny; y++) out.set(raw.subarray((z * ny + y) * bpr, (z * ny + y) * bpr + nx), rowAt(z0 + z, y));
+        buf.unmap();
+      }
+    } catch (e) {
+      throw new Error(`the segmentation's labels could not be read back from the graphics card (${(e as Error).message})`);
+    } finally {
+      buf.destroy();
+    }
     return out;
   }
-  /** Give this segmentation surface models (the Generate Surface Models module): stored ones if there are
-   *  any, else built. The flag goes on the node, so a saved scene brings them back. */
-  generateSurfaces(id: string, scene: LiveScene): boolean {
-    const node = scene.nodes.get(id);
-    if (!node || node.type !== "segmentation") return false;
-    // storedTried cleared BEFORE the flag is written: the write itself starts the build (apply), and
-    // clearing it afterwards made that build ask the database a second time (critic, round 2, finding 7).
-    const slot = this.slots.get(id);
-    if (slot && node.surfaceModels !== true) slot.storedTried = false;
-    if (slot && slot.surfaceFailed) { slot.surfaceFailed = undefined; slot.storedTried = false; }   // Try again
-    if (node.surfaceModels !== true) scene.write({ op: "patch", id, path: "#/surfaceModels", value: true });
-    return this.ensureSurfaces(id, scene);
-  }
-  /** Take this segmentation's surface models away: not drawn, not held, the flag off. */
-  removeSurfaces(id: string, scene: LiveScene): void {
-    if (scene.nodes.get(id)?.surfaceModels === true) scene.write({ op: "patch", id, path: "#/surfaceModels", value: false });
-    const slot = this.slots.get(id);
-    if (!slot) return;
-    // A build in flight is stopped (the worker) or dropped when it lands (its token is stale), and one
-    // waiting its turn leaves the queue; the lane goes on to the next.
-    this.cancelBuild(slot, scene);
-    scene.view?.setMeshGroup?.(`seg:${slot.id}`, []);
-    slot.meshed = false;
-    slot.surfaces = undefined;
-    slot.surfaceFailed = undefined;
-    slot.nativeLab = undefined;
-    slot.storedTried = false;
-  }
-  /** What the module shows for one segmentation. */
-  surfaceState(id: string, scene: LiveScene): { on: boolean; building: boolean; structures: number; triangles: number; mb: number; failed?: string; held: boolean } {
-    const slot = this.slots.get(id);
-    const on = scene.nodes.get(id)?.surfaceModels === true;
-    const surf = slot?.surfaces ?? [];
-    let bytes = 0;
-    for (const m of surf) bytes += m.positions.byteLength + m.normals.byteLength + m.indices.byteLength + ((m as { drawIndices?: Uint32Array }).drawIndices?.byteLength ?? 0);
-    return { on, building: !!slot && this.inFlight(slot), structures: surf.length, triangles: surf.reduce((n, m) => n + m.indices.length / 3, 0), mb: Math.round(bytes / 1048576), failed: slot?.surfaceFailed, held: !!slot?.surfaces };
-  }
 
-  /** The extraction as it has always run: one worker, off the drawing thread. */
-  private buildSurfacesInWorker(slot: SegSlot, scene: LiveScene): boolean {
-    const lab = slot.nativeLab;
-    if (!lab) return false;
-    const sig = slot.zarrSig;                            // the labels this build is for (see landed)
-    const token = slot.build;
-    try {
-      // OFF THE DRAWING THREAD, ALWAYS. Extraction is 2.5 s on a brain and 17.3 s on a whole-body CT,
-      // and neither belongs on the thread that draws -- the second froze the application outright.
-      // The main-thread size gate that stood here is gone with the reason for it.
-      const worker = new Worker(workerUrl("./surface-nets-worker.js"), { type: "module" });
-      slot.worker = worker;                              // so Remove can stop it
-      slot.meshing = true;
-      // TRANSFERRED, AND NOW IT REALLY IS. This said "the labelmap is TRANSFERRED" over a
-      // `lab.slice()`, which copies -- so the page held the labelmap twice, 836 MB per
-      // segmentation, for the length of every extraction, and the comment is why nobody looked
-      // (critic, 2026-09-22, finding 5). The slot's copy goes over to the worker and the slot lets
-      // go of it here; a rebuild re-reads it, which it did anyway. A labelmap that is a view into a
-      // larger buffer is still copied, because transferring would take the rest of that buffer too.
-      const whole = lab.byteOffset === 0 && lab.byteLength === lab.buffer.byteLength;
-      const copy = whole ? lab : lab.slice();
-      if (whole) slot.nativeLab = undefined;
-      worker.onmessage = (e: MessageEvent<{ progress?: { done: number; total: number }; meshes: { label: number; positions: ArrayBuffer; normals: ArrayBuffer; indices: ArrayBuffer }[]; ms: number; build?: string; settings?: { smoothIters: number; normalSmooth: number } }>) => {
-        if (e.data.progress) {
-          const { done, total } = e.data.progress;
-          surfaceProgress?.(`building surfaces for ${slot.id} — ${Math.round(100 * done / total)}%`);
-          return;
-        }
-        worker.terminate();
-        if (slot.worker === worker) slot.worker = undefined;
-        if (slot.build !== token) return;                // Removed or replaced: not ours (and the lane is not either)
-        slot.meshing = false;
-        if (!this.landed(slot, scene, sig)) { this.releaseIfIdle(slot, scene); return; }   // deleted, Removed or edited while it was extracting
-        slot.surfaces = e.data.meshes.map((m) => ({
-          label: m.label,
-          positions: new Float32Array(m.positions),
-          normals: new Float32Array(m.normals),
-          indices: new Uint32Array(m.indices),
-        }));
-        // THE LABELMAP'S CPU COPY GOES WITH THE EXTRACTION IT WAS FOR. 418 MB per segmentation on
-        // the test study, four of them at once, kept against a rebuild that re-reads it anyway.
-        // Usually already gone: the transfer above detaches it. Measured 2026-09-22.
-        slot.nativeLab = undefined;
-        const tris = slot.surfaces.reduce((n, m) => n + m.indices.length / 3, 0);
-        // THE WORKER'S OWN BUILD, next to the page's. They are separate files and only one of them
-        // was ever cache-busted, so "the new build" on screen said nothing about the code that did
-        // this work. A mismatch here is the whole story, visible without opening a console.
-        const st = e.data.settings;
-        const stale = e.data.build && e.data.build !== BUILD_ID ? ` — WORKER IS ${e.data.build}, PAGE IS ${BUILD_ID}: reload` : "";
-        const msg = `3D surfaces COMPUTED in ${(e.data.ms / 1000).toFixed(1)}s — ` +
-          `${slot.surfaces.length} structures, ${tris.toLocaleString()} triangles · ${SegmentationDisplayableManager.nameOf(slot)}` +
-          (st ? ` [smooth ${st.smoothIters}, normals ${st.normalSmooth}]` : "") + stale;
-        console.log(msg);
-        surfaceProgress?.(msg);
-        this.pushSurfaces(slot, scene);
-        this.makeDrawingCopies(slot, scene, surfaceProgress);
-        this.releaseIfIdle(slot, scene);
-      };
-      // LOUD, NOT SILENT. This failed for two sessions -- the worker ran out of memory on a 418M-voxel
-      // labelmap and died -- and all that reached the window was the interim picture it was meant to
-      // replace, which looks like a result rather than like a failure. The console line was there and
-      // nobody had reason to open the console.
-      //
-      // The interim picture is gone, so this handler now has to PUT one up: showSurfaces3D returned
-      // while the extraction was still in flight, and nothing else will run for this slot. Without
-      // this the 3D view simply stays empty after a failure, which is the same silence in a
-      // different costume.
-      worker.onerror = (err: unknown) => {
-        worker.terminate();
-        if (slot.worker === worker) slot.worker = undefined;
-        if (slot.build !== token) return;
-        slot.meshing = false;
-        const detail = (err as ErrorEvent)?.message || String(err);
-        // NO STAND-IN. The blurred presence volume used to be drawn here under the name of the surfaces
-        // (critic, 2026-09-24, finding 5; Ron: "you told me that its volume rendering only to find out …
-        // that it is not"). Said, and the module shows it.
-        slot.surfaceFailed = detail;
-        console.log(`surface extraction failed: ${detail}`);
-        surfaceProgress?.(`the surface models of ${SegmentationDisplayableManager.nameOf(slot)} could not be made — ${detail}`);
-            this.releaseIfIdle(slot, scene);
-      };
-      worker.postMessage({ id: 1, lab: copy.buffer, dims: slot.dims, ijkToRAS: slot.ijkToRAS }, [copy.buffer as ArrayBuffer]);
-      // FALSE MEANS "ASKED", NOT "FAILED". `slot.meshing` is what showSurfaces3D reads to tell the
-      // two apart -- it is true from here until onmessage or onerror, and the 3D view stays empty
-      // for that time by design (Ron accepted the trade when the wait became 2.8 s).
-      return false;
-    } catch (e) {
-      slot.meshing = false;
-      console.log(`could not start surface extraction: ${e}`);   // meshing stays false: showSurfaces3D says it could not be built
-      return false;
-    }
-  }
-
-  /**
-   * Push the extracted surfaces with their CURRENT colors.
-   *
-   * Separate from extraction because the two change at completely different rates: the geometry once
-   * per segmentation, the colors on every eye toggle, every group collapse and every palette edit.
-   * Re-extracting for a color was seventeen seconds of worker time to change three floats.
-   */
-  /**
-   * THE DRAWING COPIES, made off the main thread once the surfaces are up: the full meshes draw
-   * first (as they always did), and when the worker answers each structure is redrawn with its
-   * shorter index list. Ron, 2026-09-18: an error limit of 0.2 voxel, the stored normals kept
-   * (docs/decimation-study-2026-09-18.md in the workspace). A slot whose surfaces changed while
-   * the worker ran ignores the answer; a worker of another build says so in the status line.
-   */
-  private makeDrawingCopies(slot: SegSlot, scene: LiveScene, surfaceProgress?: (m: string) => void): void {
-    const surfaces = slot.surfaces;
-    if (!surfaces?.length || slot.decimating === surfaces) return;
-    if (surfaces.every((m) => m.drawIndices)) return;
-    slot.decimating = surfaces;
-    const voxel = smallestVoxelEdge(slot.ijkToRAS);
-    const errorLimit = DRAW_ERROR_VOXELS * voxel;
-    const worker = new Worker(workerUrl("./decimate-worker.js"), { type: "module" });
-    worker.onmessage = (e: MessageEvent<{ results: { label: number; drawIndices: ArrayBuffer; error: number; locked: number }[]; ms: number; build?: string }>) => {
-      worker.terminate();
-      if (slot.decimating !== surfaces) return;          // the surfaces changed underneath
-      slot.decimating = undefined;
-      if (!this.slots.has(slot.id) || slot.surfaces !== surfaces) return;
-      const byLabel = new Map(e.data.results.map((r) => [r.label, new Uint32Array(r.drawIndices)]));
-      let full = 0, drawn = 0;
-      for (const m of surfaces) {
-        const d = byLabel.get(m.label);
-        if (d) m.drawIndices = d;
-        full += m.indices.length / 3; drawn += (m.drawIndices ?? m.indices).length / 3;
-      }
-      const stale = e.data.build && e.data.build !== BUILD_ID ? ` — DECIMATE WORKER IS ${e.data.build}, PAGE IS ${BUILD_ID}: reload` : "";
-      surfaceProgress?.(`3D surfaces drawn with ${drawn.toLocaleString()} of ${full.toLocaleString()} triangles (error limit ${DRAW_ERROR_VOXELS} voxel, ${(e.data.ms / 1000).toFixed(1)}s) · ${SegmentationDisplayableManager.nameOf(slot)}${stale}`);
-      if (slot.meshed) this.pushSurfaces(slot, scene);
-    };
-    worker.onerror = (ev) => {
-      worker.terminate();
-      if (slot.decimating === surfaces) slot.decimating = undefined;
-      console.warn("decimate worker failed; the full meshes stay drawn:", (ev as ErrorEvent).message);
-    };
-    const meshes = surfaces.map((m) => ({ label: m.label, positions: m.positions.slice().buffer as ArrayBuffer, normals: m.normals.slice().buffer as ArrayBuffer, indices: m.indices.slice().buffer as ArrayBuffer }));
-    worker.postMessage({ id: 1, errorLimit, voxel, meshes }, meshes.flatMap((m) => [m.positions, m.normals, m.indices]));
-  }
-
-  private pushSurfaces(slot: SegSlot, scene: LiveScene, visible = true): void {
-    const view = scene.view;
-    if (!slot.surfaces || !view?.setMeshGroup) return;
-    if (!this.surfacesOn(slot, scene)) { view.setMeshGroup(`seg:${slot.id}`, []); slot.meshed = false; return; }   // THE FIREWALL
-    // AND ONLY WHERE THE LOOK SAYS SURFACES and the segmentation is on in 3D. A build that landed drew
-    // itself whatever Scene said -- Generate under Volume put surfaces over the volume rendering (critic,
-    // 2026-09-24, finding 4). Kept, not drawn; apply() draws them when the look comes to Surfaces.
-    {
-      const n = scene.nodes.get(slot.id);
-      const d = slot.lastDisp;
-      const on3D = ((d?.visible3D as boolean | undefined) ?? (d?.visible !== false));
-      // A sequence's member going dark (hideSurfaces3D, visible=false) keeps its buffers under the Surfaces
-      // look: that is how a step between phases avoids an upload.
-      if (n && (segLookOf(scene, n) !== "surfaces" || (visible && !on3D))) { view.setMeshGroup(`seg:${slot.id}`, []); slot.meshed = false; return; }
-    }
-    const colour = new Map<number, number[]>();
-    const alpha = new Map<number, number>();
-    for (const sg of (slot.lastDisp?.segments as Segment[] | undefined) ?? []) {
-      colour.set(sg.labelValue, sg.color);
-      if (typeof sg.opacity === "number") alpha.set(sg.labelValue, Math.max(0, Math.min(1, sg.opacity)));
-    }
-    const merged = mergedColours(mergedOf(slot.lastDisp));
-    const p = slot.palette ?? new Float32Array(256 * 4);
-    const out: SceneMeshData[] = [];
-    for (const m of slot.surfaces) {
-      // Alpha 0 in the palette is a hidden segment -- it must not become a surface either.
-      if (p[m.label * 4 + 3] <= 0) continue;
-      const c = merged.get(m.label) ?? colour.get(m.label) ?? [p[m.label * 4], p[m.label * 4 + 1], p[m.label * 4 + 2]];
-      // THE DRAWING COPY when there is one (logic/decimate.ts): the same vertices and normals, a
-      // shorter index list. The full `indices` stay the data.
-      out.push({
-        id: `seg:${slot.id}:${m.label}`, positions: m.positions, normals: m.normals, indices: m.drawIndices ?? m.indices,
-        color: [c[0], c[1], c[2]], opacity: alpha.get(m.label) ?? 1, ...(visible ? {} : { visible: false }),
-      });
-    }
-    // BUILT IS NOT THE SAME AS DRAWN. When the source volume is colorizing this segmentation it is
-    // already showing these labels, and putting the meshes up as well would draw the same anatomy
-    // twice. The geometry is kept either way -- that is what `ensureSurfaces` is for, and what the
-    // save needs -- so this is a decision about the picture and not about the work.
-    if (scene.view?.segments3DDrawnByVolume?.(slot.id)) return;
-    const tUp = performance.now();
-    view.setMeshGroup(`seg:${slot.id}`, out);
-    const upMs = performance.now() - tUp;
-    if (upMs > 50) { try { void fetch("/_log", { method: "POST", body: `surfaces to GPU: ${out.length} structures in ${(upMs / 1000).toFixed(2)}s · ${SegmentationDisplayableManager.nameOf(slot)}`, keepalive: true }).catch(() => {}); } catch { /* no server */ } }
-    slot.meshed = out.length > 0;
-  }
-
-
-  /** Not wanted in 3D as surfaces: stand the drawn surfaces down (they are kept, see below). */
-  private hideSurfaces3D(slot: SegSlot, scene?: LiveScene) {
-    // A MEMBER OF A SEQUENCE KEEPS ITS SURFACES ON THE GPU while it is not the frame showing: the
-    // step from one frame to the next is then a change of what is drawn, not an upload of what
-    // was uploaded a beat ago (SceneRenderer.setMeshes keeps geometry it has seen). Anything else
-    // that goes dark gives its buffers back.
-    if (slot.meshed) {
-      if (slot.lastDisp?.sequence && slot.surfaces && scene) this.pushSurfaces(slot, scene, false);
-      else scene?.view?.setMeshGroup?.(`seg:${slot.id}`, []);
-      slot.meshed = false;
-    }
-    // THE SURFACES SURVIVE. Ron: "Toggling the 3D for the ts:total restarts the build." It did --
-    // this line threw them away, so turning 3D off and on again paid two minutes of extraction to
-    // recompute geometry that had not changed. They are plain CPU buffers, about 290 MB on this
-    // study, and destroySlot frees them with the rest of the slot when the segmentation itself goes.
-  }
-
-  /** A new palette (colors, opacity, visibility): the slice overlay's palette texture, and the surfaces' colors. */
-  private recolorize(slot: SegSlot, palette: Float32Array, scene?: LiveScene) {
+  /** A new palette (colors, opacity, visibility): the slice overlay's palette texture. */
+  private recolorize(slot: SegSlot, palette: Float32Array, _scene?: LiveScene) {
     slot.palette = palette;
     // The slice overlay is now a 2 KB write instead of a full-volume compute dispatch. That
     // dispatch ran on every palette change -- which is every eye toggle, every color edit, every
     // group slider -- over 418 million voxels.
     writeLabelPaletteTexture(this.dev, slot.paletteTex, palette);
-    // A surface's color lives on its mesh, so a palette change re-pushes the group -- with the
-    // geometry it already has. This used to call buildSurfaces, which re-ran the whole extraction:
-    // seventeen seconds of worker time, on a whole-body study, to change a color.
-    if (slot.surfaces && scene) this.pushSurfaces(slot, scene);
-  }
-
-  /**
-   * The extracted surfaces for one segmentation, or null if it has none yet.
-   *
-   * For the DICOM save. It deliberately does NOT extract on demand: building them is 2.5 s on a brain
-   * and 17 s on a whole-body CT, and a save that quietly does that much work is a save that looks
-   * hung. They exist only for a segmentation given surface models in Generate Surface Models (the
-   * firewall, 2026-09-24); the save writes the SEG alone otherwise.
-   */
-
-  /**
-   * What to call a segmentation on screen.
-   *
-   * NOT `slot.id`, which is "local-segmentation-1" -- an internal handle that names nothing to
-   * anybody. The two surface messages both led with it, and the one that matters ("read from the
-   * DICOM database", meaning nothing was recomputed) was misread as its opposite by the person who
-   * asked for the feature. Ron: "I just tried loading. The surface was recreated." It had not been;
-   * his own status line said so, in language that made the fact easy to miss.
-   */
-  private static nameOf(slot: SegSlot): string {
-    const n = (slot.lastDisp?.name as string | undefined)?.trim();
-    return n && n.length ? n : slot.id;
-  }
-
-  surfacesOf(id: string): { label: number; positions: Float32Array; normals: Float32Array; indices: Uint32Array }[] | null {
-    return this.slots.get(id)?.surfaces ?? null;
-  }
-
-  /** What each segmentation is holding — labelmap samples, drawing copies, meshes — for the report. */
-  memoryReport(): { what: string; mb: number }[] {
-    const out: { what: string; mb: number }[] = [];
-    const mb = (b: number) => Math.round(b / 1048576);
-    for (const [id, slot] of this.slots) {
-      const name = String((slot.lastDisp?.name as string | undefined) ?? id).slice(0, 34);
-      const s = slot as unknown as { nativeLab?: Uint8Array; surfaces?: { positions: Float32Array; normals: Float32Array; indices: Uint32Array; drawIndices?: Uint32Array }[] };
-      const lab = s.nativeLab?.byteLength ?? 0;
-      if (lab) out.push({ what: `labelmap samples kept for ${name}`, mb: mb(lab) });
-      // INCLUDING THE DRAWING COPY. Every surface has a second index list for the illustration look
-      // and this summed positions + normals + indices only, so those were invisible to the report
-      // that is supposed to say what the page is holding (critic, 2026-09-22, finding 2).
-      let mesh = 0;
-      for (const m of s.surfaces ?? []) mesh += m.positions.byteLength + m.normals.byteLength + m.indices.byteLength + (m.drawIndices?.byteLength ?? 0);
-      if (mesh) out.push({ what: `surfaces of ${name}`, mb: mb(mesh) });
-    }
-    return out;
-  }
-
-  /**
-   * Build this segmentation's surfaces because someone asked for them, not because of how it is
-   * being drawn.
-   *
-   * THE BUG THIS EXISTS TO FIX. Extraction only ever ran from `apply`, under
-   * `want3D = visible3D && !segments3DDrawnByVolume(id)` -- and after an AI run the source volume
-   * COLORIZES the segmentation, which is exactly what makes that false. So a freshly computed
-   * segmentation never had surfaces: not built, so not saved, so extracted again on the next load.
-   * Ron saw the far end of it ("it offers to save, but the surface net has not yet been generated")
-   * and my wait for them timed out after three minutes on something that was never going to happen.
-   *
-   * Surfaces are a PRODUCT OF THE SEGMENTATION, not a side effect of a display setting -- which is
-   * Ron's own line about them belonging to the segmentation rather than to the user's to-do list. So
-   * the save asks for them directly and gets them whatever the 3D view happens to be showing.
-   *
-   * Returns true when they are already in hand; otherwise starts the work and returns false, and
-   * `surfacesOf` reports them when it lands.
-   */
-  ensureSurfaces(id: string, scene: LiveScene): boolean {
-    // THE FLAG ON THE NODE IS THE RECORD: a segmentation given surface models gets them built by `apply` when its
-    // slot appears (it may not exist yet when this is called), so nothing else needs remembering here.
-    // THE FIREWALL: a segmentation without surface models gets none.
-    if (scene.nodes.get(id)?.surfaceModels !== true) return false;
-    const slot = this.slots.get(id);
-    if (!slot) return false;
-    if (slot.surfaces) return true;
-    this.buildSurfaces(slot, scene);
-    return !!slot.surfaces;
   }
 
   onNodeRemoved(id: string, scene: LiveScene) {
@@ -2232,7 +1661,6 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     }
   }
   onSceneClosed(scene: LiveScene) {
-    this.queue = [];                                     // nothing waiting starts while everything goes
     for (const slot of [...this.slots.values()]) this.destroySlot(slot, scene);
     for (const [key, g] of [...this.solidGroups]) { scene.view?.setVolume3D?.("solid:" + key, null); this.solidDestroy(g); }
     this.solidGroups.clear();
@@ -2240,12 +1668,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     this.unlisten = undefined;
   }
   private destroySlot(slot: SegSlot, scene: LiveScene) {
-    // Its extraction stops with it, and the lane goes on (critic, 2026-09-24, round 2, finding 6).
     this.slots.delete(slot.id);
-    this.cancelBuild(slot, scene);
-    // Withdraw the surfaces too. A mesh group outlives its segmentation otherwise -- the same shape
-    // as the colorize field that kept coloring a volume after its segmentation was deleted.
-    if (slot.meshed) { scene.view?.setMeshGroup?.(`seg:${slot.id}`, []); slot.meshed = false; }
     // UNBIND BEFORE DESTROY. The view holds this slot's labelmap and palette in a bind group, so the
     // list has to be re-pushed without it while those textures are still alive -- destroying first
     // would leave the view bound to freed textures until the next apply(). (The slot left the map above.)
@@ -2332,6 +1755,14 @@ export class ModelDisplayableManager implements DisplayableManager {
  * CT goes from 1.6 GB to 0.8 GB on the card, in a window the system ends above about 4 GB. A byte volume
  * (a label map) stays one byte (fields.ts uploadVolumeTexture).
  */
+/**
+ * THE SAMPLES FOR A TEXTURE, AS STORED (render-audit 2026-10-15, finding 1): ImageField converts slab by slab to what the
+ * card holds, so a 16-bit CT is no longer widened to a 32-bit copy (1.7 GB for C3N-01524) on its way. Typed as the
+ * ZarrVolume the managers keep, whose samples are dropped (slim) once the texture is up; nothing else reads them.
+ */
+async function samplesAsStored(blobBase: string, z: ZarrDesc, onBytes?: (n: number) => void): Promise<ZarrVolume> {
+  return await fetchZarrVolumeNative(blobBase, z, onBytes).then((nv) => ({ data: nv.data as unknown as Float32Array, dims: nv.dims, range: nv.range }));
+}
 function textureOpts(node: MrsonNode): { textureKey?: string; halfFloat?: boolean; rgb24?: boolean } {
   // A color volume (`rgb24: true` on its node, fields.ts ImageFieldOpts.rgb24) keeps its packed samples exact: no half float.
   if ((node as { rgb24?: boolean }).rgb24) return { textureKey: descKey(node.zarr as ZarrDesc) ?? undefined, rgb24: true };
@@ -2496,7 +1927,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     const key = descKey(z) ?? undefined;
     const range = knownRange(z);
     if (hasSharedTexture(key) && range) return { data: new Float32Array(0), dims: [...(z.shape as number[])].reverse() as [number, number, number], range };
-    return await fetchZarrVolume(this.blobBaseHref, z, this.onBytes);
+    return await samplesAsStored(this.blobBaseHref, z, this.onBytes);
   }
   /** Build the fields of these images now (a sequence's frames at load), reporting as it goes. */
   async prepare(ids: string[], scene: LiveScene, onProgress?: (i: number, n: number) => void): Promise<void> {
@@ -2611,26 +2042,6 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
  *  panel because "we no longer allocate this" is exactly the kind of claim that should be shown
  *  rather than asserted. */
 
-/** Where surface extraction says how far along it is, and how it ended. Set by the application to its
- *  status bar; unset in tests and in demos that have no status bar, hence the optional call. */
-export let surfaceProgress: ((msg: string) => void) | undefined;
-export function setSurfaceProgressReporter(fn: (msg: string) => void) { surfaceProgress = fn; }
-
-/**
- * Where already-extracted surfaces can be read back from, given a segmentation node id.
- *
- * Set by the application to the DICOM database lookup; unset here, in tests and in any demo without
- * a database, in which case extraction is the only path -- which is what it was before this existed.
- *
- * This is a FUNCTION rather than an import because the direction of the dependency matters: the
- * renderer knows what a mesh is and nothing about DICOM, SOP classes or where a database sits. The
- * application knows both and is the right place to join them.
- */
-export let storedSurfaceLoader:
-  | ((segId: string) => Promise<{ label: number; positions: Float32Array; normals: Float32Array; indices: Uint32Array }[] | null>)
-  | undefined;
-export function setStoredSurfaceLoader(fn: typeof storedSurfaceLoader) { storedSurfaceLoader = fn; }
-
 /** Timing hooks the application installs (load-profile.ts); no-ops in tests and benches. */
 export let timedLoad: <T>(name: string, fn: () => Promise<T>) => Promise<T> = (_n, fn) => fn();
 export let timedLoadSync: <T>(name: string, fn: () => T) => T = (_n, fn) => fn();
@@ -2648,6 +2059,9 @@ export function setLoadTimers(a: typeof timedLoad, b: typeof timedLoadSync) { ti
  * CTs sharing a preset is the wanted behavior, not a limitation.
  */
 interface VrSlot {
+  /** Colorize builds asked for and not yet out, and the one banner they share (render/working.ts). */
+  buildCalls?: number;
+  buildWork?: Work;
   image: MrsonNode;
   /** The frame this one is replacing in the 3D view, withdrawn in the same rebuild that adds this one. */
   swapFrom?: string;
@@ -2716,6 +2130,16 @@ interface VrSlot {
   retries?: number;
 }
 
+/** The colored fields' diagnostic lines (__gpuLog), the last GPU_LOG_KEEP of them: a sequence playing added about twenty a
+ *  second, kept for the whole session (critic 2026-10-16, general audit, finding 6). */
+const GPU_LOG_KEEP = 300;
+function gpuLogLine(m: string): void {
+  const g = globalThis as unknown as { __gpuLog?: string[] };
+  const log = (g.__gpuLog ??= []);
+  log.push(`${new Date().toISOString().slice(11, 19)} ${m}`);
+  if (log.length > GPU_LOG_KEEP) log.splice(0, log.length - GPU_LOG_KEEP);
+}
+
 export class VolumeRenderingDisplayableManager implements DisplayableManager {
   /** What this manager is holding, per rendered volume, for the memory report. */
   memoryReport(): { what: string; mb: number }[] {
@@ -2746,6 +2170,7 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
     this.blobBaseHref = scene.blobBase();
     this.view = scene.view;
+    this.lastScene = scene;
     let touched: VrSlot | undefined;
     if (node.type === "image") {
       if (node.labelmap) return;                     // a labelmap is a segmentation's source, not a VR volume
@@ -2799,6 +2224,8 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       // Destroy and publish in one breath, as the colorize-off case does, so no frame is
       // submitted against a freed palette.
       if (!slot.visible && (slot.colorField || slot.colorizeSegId !== undefined)) { this.decolorize(slot); this.push(imageId, slot); }
+      // And every other frame of its sequence, which now keep their colors between steps (colorizeOtherFrames).
+      if (!slot.visible && slot.image.sequence) for (const o of this.slots.values()) if (o !== slot && o.image.sequence === slot.image.sequence && !o.visible && o.colorField) this.decolorize(o);
       // Absent means ON for a sequence, OFF for a single volume (see buildColorize).
       const wantColorize = slot.image.sequence ? (node.colorize as boolean | undefined) !== false : node.colorize === true;
       // A different segmentation asked for: rebuild with it, even though the switch did not move.
@@ -2819,6 +2246,8 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
           // every view dead. The segmentation-removal path below does decolorize-then-push with no
           // await between, and that is the only correct order.
           if (slot.colorField || slot.colorizeSegId !== undefined) { this.decolorize(slot); this.push(imageId, slot); }
+          // And the other frames of its sequence, which keep their colors between steps (critic 2026-10-16, finding 4).
+          if (slot.image.sequence) for (const o of this.slots.values()) if (o !== slot && o.image.sequence === slot.image.sequence && !o.visible && o.colorField) this.decolorize(o);
         } else {
           // Switched on with a segmentation present: build it, preferring the one we colorized
           // before so a toggle off and on comes back to the same picture -- and only while the
@@ -2859,6 +2288,10 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
         if (!slot.visible) { if (slot.colorField) slot.colorizeStale = true; continue; }
         if (slot.colorize && (target.id !== slot.colorizeSegId || slot.colorField)) void this.buildColorize(slot, scene, target);
       }
+      // A SEQUENCE'S OTHER FRAMES are colored again with what has arrived, once the arrivals settle (scheduleFrameColors).
+      const seqs = new Set<string>();
+      for (const slot of this.slots.values()) if (slot.visible && slot.colorize && slot.image.sequence && this.covers(node, slot.image, scene)) seqs.add(slot.image.sequence as string);
+      for (const q of seqs) this.scheduleFrameColors(q, scene);
       return;
     }
     else if (node.type === "scalarVolumeDisplay") {
@@ -2915,9 +2348,82 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
    * view dead). Freed, a moment later, when the last field holding it goes.
    */
   private labelTextures = new Map<string, { tex: GPUTexture; refs: number }>();
+  /** A merged label texture's members and their renumbering (labelTextures key -> what each member's labels became). */
+  private mergeInfos = new Map<string, { segId: string; remap: Uint32Array }[]>();
+  /**
+   * WHAT ONE FRAME'S FIELD DRAWS under the solid look of a series that plays: `primary` and every other family shown in
+   * 3D with the solid look -- each taken at THIS frame (frameMate) -- most structures first. Otherwise `primary` alone,
+   * as before.
+   */
+  private mergeMembers(slot: VrSlot, primary: MrsonNode, scene: LiveScene): MrsonNode[] {
+    const seq = slot.image.sequence as string | undefined;
+    if (!seq || !this.solidOf(slot) || !this.framesPlay(seq, scene)) return [primary];
+    const out = new Map<string, MrsonNode>([[primary.id as string, primary]]);
+    // BY FAMILY, not by member: a family is shown when ANY of its members is. A step hides the leaving phase's members and
+    // shows the arriving ones in separate writes, so asking each member made a frame see one family mid-step and build
+    // without the other -- rebuilds and churn while playing (checked in the pane, 2026-10-16).
+    const shown = new Map<string, boolean>();
+    for (const v of slot.segs.values()) {
+      const mateId = frameMate(scene, v.id as string, slot.image.id as string) ?? (v.id as string);
+      const on = ((v.visible3D as boolean | undefined) ?? (v.visible as boolean | undefined)) !== false;
+      shown.set(mateId, (shown.get(mateId) ?? false) || on);
+    }
+    for (const [mateId, on] of shown) {
+      if (!on) continue;                                // a family not shown
+      const m = scene.nodes.get(mateId);
+      if (!m?.zarr || segLookOf(scene, m) !== "solid") continue;
+      const dimsOk = (m.dims as number[] | undefined)?.every((d, i) => d === slot.zv?.dims[i]);
+      if (dimsOk) out.set(m.id as string, m);
+    }
+    // A provisional order, the same on every frame (so the signature is): by Scene's ▲▼ when every family has it, else by
+    // id. The drawing order itself is settled once the labels are read (mergeOrder).
+    const z = (m: MrsonNode) => this.familyLook(slot, scene, m).zOrder;
+    const list = [...out.values()].sort((a, b) => typeof z(a) === "number" && typeof z(b) === "number" ? (z(a) as number) - (z(b) as number) : String(a.id) < String(b.id) ? -1 : 1);
+    // Counted over the structures SHOWN, which are the ones given a number -- as the solid group counts (critic
+    // 2026-10-16, step 2, finding 7). Past 255 the frame draws its own family alone, and says so once.
+    const shownCount = (m: MrsonNode) => { const hidden = this.mergeHidden(slot, scene, m); return ((m.segments as { name?: string }[] | undefined) ?? []).filter((sg) => !hidden.has(String(sg.name))).length; };
+    const labels = list.reduce((n, m) => n + shownCount(m), 0);
+    if (labels <= 255) return list;
+    const say = `the time series in 3D shows ${String(primary.name ?? primary.id)} alone: its segmentations have more than 255 structures shown together; hide some to bring them in`;
+    if (this.mergeLeftSaid !== say) {
+      this.mergeLeftSaid = say;
+      (globalThis as unknown as { __shell?: { setStatus(m: string): void } }).__shell?.setStatus(say);
+    }
+    return [primary];
+  }
+  private mergeLeftSaid = "";
+  /** A FAMILY'S LOOK -- its structures' colors, visibility, its ▲▼ order -- is read from the member shown now, the same for
+   *  every frame: a frame's own member is marked hidden whenever another frame is shown (pane, 2026-10-16). */
+  private familyLook(slot: VrSlot, scene: LiveScene, member: MrsonNode): MrsonNode {
+    return this.familyShownMember(slot, scene, member) ?? member;
+  }
+  /** The member of `member`'s family shown in 3D now (its 3D button on), or nothing when the family is hidden in 3D. */
+  private familyShownMember(slot: VrSlot, scene: LiveScene, member: MrsonNode): MrsonNode | undefined {
+    const mateId = member.id as string;
+    for (const v0 of slot.segs.values()) {
+      const v = scene.nodes.get(v0.id as string) ?? v0;
+      if (((v.visible3D as boolean | undefined) ?? (v.visible as boolean | undefined)) === false) continue;
+      if ((frameMate(scene, v.id as string, slot.image.id as string) ?? v.id) === mateId) return v;
+    }
+    return undefined;
+  }
+  /** The NAMES of a member's structures hidden in 3D (its eye, or opacity 0), from its family's look. A hidden structure is
+   *  not written into the merge, so what lies behind it shows -- the solid group's rule (critic 2026-10-16, step 2,
+   *  finding 4). */
+  private mergeHidden(slot: VrSlot, scene: LiveScene, member: MrsonNode): Set<string> {
+    // THE FAMILY'S OWN 3D BUTTON (Ron, 2026-10-16: "chambers stay even when i turn them off by pushing the 3d button in
+    // the scenes view"): the family the field was built around is in every merge, so hidden in 3D it is written with
+    // none of its structures -- what is behind shows, as for any other family turned off.
+    if (!this.familyShownMember(slot, scene, member)) return new Set(((member.segments as { name?: string }[] | undefined) ?? []).map((sg) => String(sg.name)));
+    const look = this.familyLook(slot, scene, member);
+    return new Set(((look.segments as { name?: string; visible?: boolean; opacity?: number }[] | undefined) ?? [])
+      .filter((sg) => sg.visible === false || (typeof sg.opacity === "number" && sg.opacity <= 0)).map((sg) => String(sg.name)));
+  }
+  /** Labeled voxels of a member's labels (every 7th voxel, as the segmentation manager counts), by member and data. */
+  private mergeVoxels = new Map<string, number>();
   private releaseLabels(key: string | undefined): void {
     const t = key ? this.labelTextures.get(key) : undefined;
-    if (t && --t.refs <= 0) { this.labelTextures.delete(key!); const tex = t.tex; setTimeout(() => tex.destroy(), 250); }
+    if (t && --t.refs <= 0) { this.labelTextures.delete(key!); this.mergeInfos.delete(key!); const tex = t.tex; setTimeout(() => tex.destroy(), 250); }
   }
 
   /** Start tracking an image. Picks up a volumeRenderingDisplay and a segmentation that are already
@@ -2998,15 +2504,80 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
    *  the grayscale one when it exists -- they are alternatives, not layers -- and naming the
    *  segmentation it draws is what lets that segmentation's own 3D field stand down instead of
    *  painting the same anatomy a second time. */
+  /** The scene last seen (push has none of its own; a series' "plays" is asked of it). */
+  private lastScene?: LiveScene;
+  /** A series that plays: ONE field in the 3D view (render/series-field.ts), keyed `series:<sequence id>`. */
+  private series = new Map<string, { field: SeriesField; vol: Volume3D }>();
+  /** Frames published under their own id (a single volume, a series that does not play, a frame before its series
+   *  was known): taken out when their series takes over. */
+  private published = new Set<string>();
+  /**
+   * ONE FIELD FOR A SERIES THAT PLAYS (Ron, 2026-10-16: "Steve architecture is superior"; CINE-RETHINK.md, step 1). The
+   * series' entry in the 3D view stands for its frames and shows the one rendered now; a step re-points it, and when the
+   * shader is the same (the frames' fields are of one kind) the view only rebinds -- no field swapped, the view not
+   * re-composed. A shader change (a frame not yet colored beside colored ones) re-publishes, as a step did before.
+   */
+  private pushSeries(seq: string, from?: string): void {
+    const key = `series:${seq}`;
+    let shown: VrSlot | undefined;
+    for (const s of this.slots.values()) if (s.image.sequence === seq && s.visible) { shown = s; break; }
+    const f = shown ? shown.colorField ?? shown.field : undefined;
+    const leftovers = [...this.published].filter((id) => this.slots.get(id)?.image.sequence === seq);
+    const drop = () => { for (const id of leftovers) { this.published.delete(id); this.view?.setVolume3D(id, null); } };
+    const cur = this.series.get(seq);
+    if (!f) {
+      if (cur) { this.series.delete(seq); this.view?.setVolume3D(key, null); }
+      drop();
+      return;
+    }
+    const colorizedSeg = shown!.colorField ? shown!.colorizeSegId : undefined;
+    // The whole family the shown frame is colored by, one member per frame (frameMate): what the volume draws over the
+    // series, the same set at every step.
+    // And every segmentation merged into a frame's field (step 2): the volume draws them, their own 3D stands down.
+    const fromMerges = [...this.slots.values()].filter((s) => s.image.sequence === seq && s.colorLabelsKey)
+      .flatMap((s) => (this.mergeInfos.get(s.colorLabelsKey!) ?? []).map((i) => i.segId));
+    const colorizedSegs = colorizedSeg && this.lastScene
+      ? [...new Set([...[...this.slots.values()].filter((s) => s.image.sequence === seq).map((s) => frameMate(this.lastScene!, colorizedSeg, s.image.id as string) ?? colorizedSeg), ...fromMerges])].sort()
+      : undefined;
+    if (!cur) {
+      const field = new SeriesField(f);
+      const vol: Volume3D = { field, colorizedSeg, colorizedSegs };
+      this.series.set(seq, { field, vol });
+      // From the frame published under its own id to the series in ONE rebuild, so the view never holds both.
+      if (leftovers.length === 1 && this.view?.swapVolume3D) { this.published.delete(leftovers[0]); this.view.swapVolume3D(leftovers[0], key, vol); }
+      else { this.view?.setVolume3D(key, vol); drop(); }
+      return;
+    }
+    drop();
+    cur.vol.colorizedSeg = colorizedSeg; cur.vol.colorizedSegs = colorizedSegs;
+    // THE SAME FIELD AGAIN: either a push for another frame (a hidden one decolorized, a display node of a frame not
+    // shown) -- nothing for the view -- or the shown frame's field changed IN PLACE (the solid look switched: its
+    // textures replaced, its shader too), which is re-published in full, as before series (critic 2026-10-16, cine step
+    // 1, finding 1: returning here left the view drawing destroyed textures).
+    if (f === cur.field.shown) {
+      if (from === shown!.image.id) { cur.field.recheck(); this.view?.setVolume3D(key, cur.vol); }
+      return;
+    }
+    const changed = cur.field.show(f);
+    if (changed || !this.view?.rebind3d) this.view?.setVolume3D(key, cur.vol);
+    else this.view.rebind3d();
+  }
+
   private push(imageId: string, slot: VrSlot): void {
+    const seq = slot.image.sequence as string | undefined;
+    if (seq && this.lastScene && this.framesPlay(seq, this.lastScene)) { slot.swapFrom = undefined; this.pushSeries(seq, imageId); return; }
+    // A series that no longer plays (critic 2026-10-16, cine step 1, finding 5): its series field leaves the view.
+    if (seq && this.series.has(seq)) { this.series.delete(seq); this.view?.setVolume3D(`series:${seq}`, null); }
     const f = slot.colorField ?? slot.field;
     const vol = slot.visible && f ? { field: f, colorizedSeg: slot.colorField ? slot.colorizeSegId : undefined } : null;
+    if (vol) this.published.add(imageId); else this.published.delete(imageId);
     // A frame replacing another (a sequence step) is published as ONE swap by whichever path
     // publishes first -- buildColorize's own push, or the handler's tail -- so the view never
     // holds both frames (two colorize fields: a shader compile) nor neither (every surface gone).
     const from = slot.swapFrom;
     if (from && from !== imageId) {
       slot.swapFrom = undefined;
+      this.published.delete(from);
       if (this.view?.swapVolume3D) { this.view.swapVolume3D(from, imageId, vol); return; }
       this.view?.setVolume3D(imageId, vol);
       const old = this.slots.get(from); if (old) this.view?.setVolume3D(from, null);
@@ -3043,7 +2614,9 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     if (!slot) return;
     this.decolorize(slot);   // a colorize field is GPU memory; a deleted volume's must go with it
     this.slots.delete(id);
+    this.published.delete(id);
     scene.view?.setVolume3D(id, null);
+    if (slot.image.sequence && this.series.has(slot.image.sequence as string)) this.pushSeries(slot.image.sequence as string);
     releaseFieldLater(slot.field);                     // after the views have let go (see releaseFieldLater)
     if (id === this.primaryId) {
       this.primaryId = this.slots.keys().next().value;
@@ -3065,6 +2638,8 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   onSceneClosed(scene: LiveScene) { this.reset(scene); }
   private reset(scene: LiveScene) {
     for (const id of this.slots.keys()) scene.view?.setVolume3D(id, null);
+    for (const seq of this.series.keys()) scene.view?.setVolume3D(`series:${seq}`, null);
+    this.series.clear(); this.published.clear();
     for (const slot of this.slots.values()) { this.decolorize(slot); releaseFieldLater(slot.field); }
     this.slots.clear();
     this.vrOwner.clear();
@@ -3121,12 +2696,41 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     const colorized = slot.colorizeSegId ? slot.segs.get(slot.colorizeSegId) : undefined;
     if (!slot.colorField || !colorized) return;
     const scale = typeof slot.tf?.segmentOpacity === "number" ? slot.tf.segmentOpacity as number : 1;
+    // MERGED (several families in one field): each member's structures at their new numbers.
+    const merged0 = slot.colorLabelsKey ? this.mergeInfos.get(slot.colorLabelsKey) : undefined;
+    if (merged0) {
+      for (const { segId, remap } of merged0) {
+        const own = slot.segs.get(segId) ?? this.lastScene?.nodes.get(segId);
+        if (!own) continue;
+        // THE FAMILY'S LOOK, from the member shown now -- the same for every frame. A frame's own member is marked hidden
+        // whenever another frame is shown, and taking that hid its structures, changed what is solid and re-smoothed
+        // the whole volume at every step (pane, 2026-10-16: the smoothing ran ~8 times a second while playing).
+        const m = this.lastScene ? this.familyLook(slot, this.lastScene, own) : own;
+        const mc = mergedColours(mergedOf(m));
+        // Matched by structure NAME to this frame's own member, as a step carries them (critic, finding 9): a phase whose
+        // segmentation numbers its structures differently still gets each structure's own color.
+        const ownLabel = new Map(((own.segments as { labelValue: number; name?: string }[] | undefined) ?? []).map((sg) => [String(sg.name), sg.labelValue]));
+        for (const sg of (m.segments as { labelValue: number; color?: number[]; visible?: boolean; opacity?: number; name?: string }[] | undefined) ?? []) {
+          const lv = ownLabel.get(String(sg.name)) ?? sg.labelValue;
+          const n = lv > 0 && lv < 256 ? remap[lv] : 0;
+          if (!n) continue;
+          const c = mc.get(sg.labelValue) ?? sg.color;
+          if (c) slot.colorField.setSegmentColor(n, [c[0], c[1], c[2]]);
+          slot.colorField.setSegmentMaterial(n, finishOfSegment(sg.name));
+          slot.colorField.setSegmentOpacity(n, sg.visible === false ? 0 : (sg.opacity ?? 1) * scale);
+        }
+      }
+      slot.colorField.flushPalette();
+      return;
+    }
 
     // NO GROUP OPACITIES (Ron, 2026-09-23: "abandon the group settings. I prefer working in the
     // segmentations module."). Each structure's own opacity, as the surfaces and the solid look take it;
     // a transfer function saved with `segmentGroups` keeps them in the file and nothing reads them.
 
     const segs = (colorized.segments as { labelValue: number; color?: number[]; visible?: boolean; opacity?: number; name?: string }[] | undefined) ?? [];
+    // Its 3D button off (in Scene or Segmentations): none of its structures in 3D (Ron, 2026-10-16, the chambers).
+    const off3D = !!this.lastScene && !this.familyShownMember(slot, this.lastScene, colorized);
     // A COLLAPSED BRANCH IS ONE COLOR HERE TOO. This path colors the volume that draws CT and
     // segments together, which is what the 3D view usually shows, and it reads each segment's own
     // color -- so without this the slices honored a collapse and 3D ignored it.
@@ -3135,7 +2739,7 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       const c = merged.get(seg.labelValue) ?? seg.color;
       if (c) slot.colorField.setSegmentColor(seg.labelValue, [c[0], c[1], c[2]]);
       slot.colorField.setSegmentMaterial(seg.labelValue, finishOfSegment(seg.name));
-      const a = seg.visible === false ? 0 : (seg.opacity ?? 1) * scale;
+      const a = off3D || seg.visible === false ? 0 : (seg.opacity ?? 1) * scale;
       slot.colorField.setSegmentOpacity(seg.labelValue, a);
     }
     slot.colorField.flushPalette();
@@ -3206,6 +2810,16 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
    * sliders were tuned to read as opacity per centimeter and that is what they say.
    */
   private static readonly PRESET_UNIT_MM = 1;
+  /**
+   * BOTH UNITS ARE IN mm, AND mm IS RIGHT AT ONE SCALE ONLY (Ron, 2026-10-20: "did you forget about scales? from
+   * astrophysics to electron microscope"; MODULE-DESIGN-RULES "Any scale"). The scene is in the data's own units, so on
+   * 1 nm voxels a 1 mm unit is a million voxels long -- the volume fully transparent -- and on 1 parsec voxels it is
+   * 3e-20 of a voxel -- an opaque shell. Each unit is kept EXACTLY as tuned while it lies within its range of voxels of the
+   * volume's own grid, and held to that range outside it (`tuned`): the preset's 1 mm between 1/4 and 4 voxels, the
+   * colorize field's 10 mm between 2.5 and 40, so every clinical grid from 0.25 to 4 mm voxels renders as it did.
+   */
+  static presetUnit(voxel: number | undefined): number { return tuned(VolumeRenderingDisplayableManager.PRESET_UNIT_MM, voxel, 0.25, 4); }
+  static colorizeUnit(voxel: number | undefined): number { return tuned(VolumeRenderingDisplayableManager.OPACITY_UNIT_MM, voxel, 2.5, 40); }
 
   /**
    * The HU window the CT is normalized against, for the LUT and for brightness modulation.
@@ -3244,6 +2858,9 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
    * a thumbnail: the scalar range the LUT is sampled over, and the LUT the volume is drawing with
    * right now so the field can be put back exactly after the thumbnails are made.
    */
+  /** The field that draws this volume in 3D now (its colored one, or its plain one), whether the view holds it under
+   *  the volume's own id or under its series' (render/series-field.ts). For the preset thumbnails and the lighting. */
+  fieldFor(imageId: string): Field | undefined { const s = this.slots.get(imageId); return s ? s.colorField ?? s.field : undefined; }
   climFor(imageId: string): [number, number] | null {
     const s = this.slots.get(imageId);
     return s ? this.climOf(s) : null;
@@ -3283,9 +2900,18 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       if (slot.colorField || slot.colorizeSegId !== undefined) { this.decolorize(slot); this.push(slot.image.id as string, slot); }
       return;
     }
+    // The picture ON SCREEN being built is said on the 3D view (render/working.ts; Ron, 2026-10-17): the heart's first
+    // phase took 4 s after the load with nothing said. Hidden frames are counted by colorFrames' own banner. A build that
+    // finds nothing to do returns within the banner's first 0.3 s and shows nothing.
+    // ONE BANNER PER PICTURE however many calls queue for it (each segmentation change starts one; they wait in turn):
+    // opened by the first, closed when the last is out (pane, 2026-10-17: 60 banners on the heart's load).
+    slot.buildCalls = (slot.buildCalls ?? 0) + 1;
+    if (slot.visible && !slot.buildWork) slot.buildWork = startWork({ title: "Preparing the 3D picture" });
     try {
       await this.buildColorizeInner(slot, scene, seg);
     } catch (e) {
+      // A build for a volume no longer in the scene (closed while it read) is not a failure to tell anyone about.
+      if (this.slots.get(slot.image.id) !== slot) return;
       const why = `the colored 3D view of ${String(seg.name ?? seg.id)} could not be built: ${(e as Error)?.message ?? e}`;
       console.warn(why);
       // The app's status line, which also writes the session log (app-shell.ts setStatus); the log
@@ -3298,14 +2924,15 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
         this.push(slot.image.id, slot);
         this.view?.redraw();
       }
+    } finally {
+      slot.buildCalls = (slot.buildCalls ?? 1) - 1;
+      if (slot.buildCalls <= 0) { slot.buildWork?.done(); slot.buildWork = undefined; }
     }
   }
 
   private async buildColorizeInner(slot: VrSlot, scene: LiveScene, seg: MrsonNode): Promise<void> {
     const note = (m: string) => {
-      const g = globalThis as unknown as { __gpuLog?: string[] };
-      (g.__gpuLog ??= []).push(`${new Date().toISOString().slice(11, 19)} ${m}`);
-      console.log(m);
+      gpuLogLine(m);
     };
     const giveUp = () => {
       if (slot.colorizeSegId !== undefined || slot.colorField) {
@@ -3317,7 +2944,10 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     if (!slot.zv) return;                                      // CT not loaded yet; retried on build
     // A sequence's frame kept no CPU samples (slim) and its CT is already on the GPU
     // as r16float: the colorize field ADOPTS that texture rather than uploading the CT again.
-    const adoptCT = slot.image.sequence && slot.field?.textureFormat() === "r16float" ? slot.field.volumeTexture() : undefined;
+    // ANY VOLUME'S CT, not only a series frame's (critic 2026-10-16, general audit, finding 2: Colorized volume on a plain
+    // CT read the scan back and uploaded it again, +798 MB of C3N-01524's +1,196). The volume's own field lives as long as
+    // this colored field can: both go together (onNodeRemoved, reset), the colored one first.
+    const adoptCT = slot.field?.textureFormat() === "r16float" ? slot.field.volumeTexture() : undefined;
     if (!adoptCT && !slot.zv.data.length && slot.image.zarr) slot.zv = await fetchZarrVolume(this.blobBaseHref, slot.image.zarr as ZarrDesc, this.onBytes);
     const segZarr = seg.zarr as ZarrDesc | undefined;
     if (!segZarr) { giveUp(); return; }
@@ -3331,8 +2961,22 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     // those re-fetched the labelmap and allocated another 1.25 GB of GPU textures (836 MB ctTex +
     // 418 MB labTex at this volume's size) for a palette change that writePalette does in
     // microseconds. The colors are applied below on the existing field instead.
-    const sig = `${seg.id}|${JSON.stringify(segZarr)}`;
+    // SEVERAL FAMILIES IN ONE FIELD, for a series that plays under the solid look (CINE-RETHINK.md step 2, Ron 2026-10-16:
+    // "ok that makes a lot of sense. Do both"): the chambers and the coronary arteries of a phase merged into one label
+    // image, drawn by this one colored field -- the solid group no longer re-merges and re-smooths them at every step.
+    // AFTER THE STEP'S WRITES: a step hides the leaving phase's members and shows the arriving ones one write after another,
+    // and a build begun in between saw a family hidden and left it out (pane, 2026-10-16: two phases fell back to one
+    // family during play, the solid group came back, ~300 textures churned). The writes are one task; this waits it out.
+    if (slot.image.sequence) await new Promise((r) => setTimeout(r, 0));
+    if (this.slots.get(slot.image.id as string) !== slot) return;
+    const members = this.mergeMembers(slot, seg, scene);
+    // A merge is made anew when its members' data, their ▲▼ order or the structures hidden change -- not for a color.
+    const sig = members.length > 1
+      ? `merged|${members.map((m) => `${m.id}|${JSON.stringify(m.zarr)}|${this.familyLook(slot, scene, m).zOrder ?? ""}|${[...this.mergeHidden(slot, scene, m)].sort().join(",")}`).join(";")}`
+      : `${seg.id}|${JSON.stringify(segZarr)}`;
     if (slot.colorField && slot.colorizeSig === sig) {
+      // The family asked for ("Colorize with") is in the merge already: the slot names it (critic, finding 8).
+      if (members.length > 1 && slot.colorizeSegId !== seg.id) slot.colorizeSegId = seg.id as string;
       this.writePalette(slot);
       this.applyColorizeParams(slot);
       this.view?.redraw();
@@ -3353,7 +2997,59 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     try {
     let adoptLabels: GPUTexture | undefined;
     let labelsKey: string | undefined;
-    if (slot.image.sequence) {
+    if (slot.image.sequence && members.length > 1) {
+      labelsKey = sig;
+      const have = this.labelTextures.get(labelsKey);
+      if (have) { adoptLabels = have.tex; have.refs++; }
+      else {
+        // Each member's labels on the card for the moment of the merge, renumbered into one numbering (1..255) in order:
+        // the one with most structures first, so a smaller, more specific one is drawn over it where they overlap (the
+        // solid look's rule, solid-merge.ts).
+        // Every member READ first, the build still wanted after each read; only then anything on the card, destroyed on
+        // every way out (critic 2026-10-16, step 2, finding 2: a scene closed mid-merge left a 133 MB texture to the
+        // garbage collector and a "could not be built" about a scene already closed).
+        const read: { m: MrsonNode; data: ArrayLike<number> }[] = [];
+        for (const m of members) {
+          const zv = await fetchZarrVolumeNative(this.blobBaseHref, m.zarr as ZarrDesc, this.onBytes);
+          if (this.slots.get(slot.image.id as string) !== slot || !slot.zv) return;
+          read.push({ m, data: zv.data });
+        }
+        // WHICH FAMILY IS ON TOP where two overlap: the slices' rule (drawOrder; critic, finding 3) -- Scene's ▲▼ once
+        // every family has it, else the one labeling fewer voxels drawn last. Later in the list is on top.
+        const voxels = (r: { m: MrsonNode; data: ArrayLike<number> }) => {
+          const k = `${r.m.id}|${JSON.stringify(r.m.zarr)}`;
+          let n = this.mergeVoxels.get(k);
+          if (n === undefined) { n = countLabelled(r.data); this.mergeVoxels.set(k, n); }
+          return n;
+        };
+        const zo = (r: { m: MrsonNode }) => this.familyLook(slot, scene, r.m).zOrder;
+        const ordered = read.every((r) => typeof zo(r) === "number");
+        read.sort((a, b) => ordered ? (zo(a) as number) - (zo(b) as number) : voxels(b) - voxels(a));
+        const inputs: { labels: GPUTexture; remap: Uint32Array }[] = [], info: { segId: string; remap: Uint32Array }[] = [];
+        try {
+          let next = 1;
+          for (const { m, data } of read) {
+            const hidden = this.mergeHidden(slot, scene, m);
+            const remap = new Uint32Array(256);
+            for (const sg of (m.segments as { labelValue: number; name?: string }[] | undefined) ?? []) {
+              if (sg.labelValue > 0 && sg.labelValue < 256 && next < 256 && !hidden.has(String(sg.name))) remap[sg.labelValue] = next++;
+            }
+            inputs.push({ labels: ColorizeField.makeLabelTexture(this.dev, data, slot.zv.dims), remap });
+            info.push({ segId: m.id as string, remap });
+          }
+          const again = this.labelTextures.get(labelsKey);   // made by another frame meanwhile
+          if (again) { adoptLabels = again.tex; again.refs++; }
+          else {
+            adoptLabels = makeMergedLabelTexture(this.dev, slot.zv.dims as [number, number, number]);
+            mergeLabels(this.dev, inputs, slot.zv.dims as [number, number, number], adoptLabels);
+            this.labelTextures.set(labelsKey, { tex: adoptLabels, refs: 1 });
+            this.mergeInfos.set(labelsKey, info);
+          }
+        } finally {
+          for (const inp of inputs) inp.labels.destroy();   // merged: each member's own copy is not kept (the labels once)
+        }
+      }
+    } else if (slot.image.sequence) {
       labelsKey = sig;
       const have = this.labelTextures.get(labelsKey);
       if (have) { adoptLabels = have.tex; have.refs++; }
@@ -3402,8 +3098,8 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
 
     // A RUNNING TALLY OF GPU MEMORY, because this is where it goes and there was no way to see it.
     // Ron: "I think you will have to instrument the relevant pieces so I can paste you the
-    // feedback." __gpuLog is a plain array of strings on globalThis; the app copies it into the
-    // status pane, and it survives whatever happens to the views.
+    // feedback." __gpuLog is a plain array of strings on globalThis, read by tests and a diagnosis; its last
+    // GPU_LOG_KEEP lines are kept (gpuLogLine). __colorizeFields counts the fields built (the play line reads it).
     {
       const [dx, dy, dz] = slot.zv.dims;
       const mb = (bytes: number) => Math.round(bytes / 1048576);
@@ -3411,14 +3107,14 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       const ctB = adoptCT ? 0 : dx * dy * dz * 2, labB = adoptLabels && this.labelTextures.get(labelsKey!)!.refs > 1 ? 0 : dx * dy * dz;
       const one = ctB + labB;
       slot.colorBytes = one;
-      const g = globalThis as unknown as { __gpuLog?: string[]; __gpuMB?: number };
+      const g = globalThis as unknown as { __gpuMB?: number; __colorizeFields?: number };
       g.__gpuMB = (g.__gpuMB ?? 0) + mb(one);
-      (g.__gpuLog ??= []).push(
-        `${new Date().toISOString().slice(11, 19)} colorize ${seg.id} ` +
-        `${dx}x${dy}x${dz} = ${mb(one)} MB (ct ${adoptCT ? "shared with the frame" : mb(ctB) + " MB"} + labels ${labB ? mb(labB) + " MB" : "shared"}) ` +
+      g.__colorizeFields = (g.__colorizeFields ?? 0) + 1;
+      gpuLogLine(
+        `colorize ${seg.id} ` +
+        `${dx}x${dy}x${dz} = ${mb(one)} MB (ct ${adoptCT ? "shared with the volume" : mb(ctB) + " MB"} + labels ${labB ? mb(labB) + " MB" : "shared"}) ` +
         `· colorize fields now ~${g.__gpuMB} MB`,
       );
-      console.log(g.__gpuLog[g.__gpuLog.length - 1]);
     }
     const ijkToRAS = rowMul(worldForNode(slot.image, scene.nodes), slot.image.ijkToRAS as number[]);
     slot.colorField = new ColorizeField(
@@ -3431,7 +3127,7 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
         // default off would have left this one site still switching it on at construction.
         contextOpacity: presentationParams(DEFAULT_PRESENTATION).contextOpacity as number,
         ctModulation: presentationParams(DEFAULT_PRESENTATION).ctModulation as number,
-        opacityUnitDistance: VolumeRenderingDisplayableManager.OPACITY_UNIT_MM,
+        opacityUnitDistance: VolumeRenderingDisplayableManager.colorizeUnit(nodeVoxel({ ijkToRAS: slot.image.ijkToRAS })),
       },
     );
     // COLOR AND OPACITY, then flush. The palette starts as all zeros and setSegmentColor writes only
@@ -3448,7 +3144,14 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     // twice does exactly that -- and the arriving field then published itself over a volume nobody
     // is rendering, holding 1,196 MB for the rest of the session. Measured 2026-09-22: the look
     // back on "Surfaces", the rendering `visible: false`, and the tally still at 1196.
-    if (!slot.visible || !slot.colorize) {
+    //
+    // NOT A FRAME OF A SEQUENCE, though (2026-10-16, Ron: the beating heart "seems to flicker"): a frame's build that
+    // finished after the player had moved on was thrown away, so a frame slower to build than one step of play never
+    // kept its colors -- it came back empty on every loop (the 300 and 350 ms phases, checked in the pane), and the 3D
+    // view showed the solid anatomy alone for that step. A frame is on screen again within a second: its field is kept
+    // and published when shown -- WHILE ITS SEQUENCE IS RENDERED AND COLORIZED (critic 2026-10-16, findings 2-3: a build
+    // finishing after the rendering went off kept four frames' fields, about 1 GB, with nothing drawing them).
+    if (!slot.colorize || (!slot.visible && !this.frameWanted(slot, scene))) {
       this.decolorize(slot);
       this.push(slot.image.id, slot);
       this.view?.redraw();
@@ -3456,8 +3159,10 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       slot.segZv = undefined;
       return;
     }
-    this.push(slot.image.id, slot);
-    this.view?.redraw();
+    if (slot.visible) { this.push(slot.image.id, slot); this.view?.redraw(); }
+    // THE OTHER FRAMES NEXT, one after another in the background, so the first loop of play does not wait for each
+    // frame's build as it comes on screen.
+    if (slot.visible && slot.image.sequence) this.scheduleFrameColors(slot.image.sequence as string, scene);
     // THE SAMPLES HAVE DONE THEIR WORK. Both arrays are now textures inside the colorize field, and
     // the statistics above were the last CPU reader. Keeping them meant a colorize build put 2 GB
     // back on the heap it had just been cleared of (measured, 2026-09-22); a rebuild re-reads them
@@ -3467,6 +3172,80 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     forgetDecoded(slot.image.zarr as ZarrDesc);
     if (seg.zarr) forgetDecoded(seg.zarr as ZarrDesc);
     } finally { slot.colorizing = undefined; finish(); }
+  }
+
+  /** The frame of this sequence that is rendered with its colors now, if any (the display node names one frame). */
+  private sequenceShown(seq: string): VrSlot | undefined {
+    for (const s of this.slots.values()) if (s.image.sequence === seq && s.visible && s.colorize) return s;
+    return undefined;
+  }
+  /** A hidden frame whose colors are worth keeping: its sequence is rendered, colorized, and plays. */
+  private frameWanted(slot: VrSlot, scene: LiveScene): boolean {
+    const seq = slot.image.sequence as string | undefined;
+    return !!seq && !!this.sequenceShown(seq) && this.framesPlay(seq, scene);
+  }
+  /** A sequence that PLAYS: indexed by times rising frame by frame (the heart's phases), not by names or repeated values
+   *  (a diffusion scan's b-values) -- the render audit's rule for preparing frames ahead (load-panel.ts), here for colors. */
+  private framesPlay(seq: string, scene: LiveScene): boolean { return sequencePlays(scene.nodes.get(seq)); }
+  /** Passes over a sequence's frames: running, and asked again while running. */
+  private frameColorPass = new Map<string, { again: boolean }>();
+  private frameColorTimer = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * COLOR EVERY FRAME OF A SEQUENCE THAT PLAYS, not only the one on screen, so play never waits for a frame's build
+   * (2026-10-16, the beating heart's flicker). Asked whenever a frame on screen is colored or a segmentation of the
+   * sequence arrives, and run once things have settled (FRAME_COLOR_SETTLE_MS after the last ask): a scene's
+   * segmentations arrive one by one, and a pass started at the first colored every phase with the coronary arteries of
+   * phase 2 (critic 2026-10-16, finding 1). Each frame is built with ITS choice (colorizeChoice, the display node's
+   * colorizeWith included) and the look on screen (the shown frame's transfer function: finding 7), and a frame whose
+   * choice changed since is built again (finding 8). The pass stops, and the hidden frames' fields go, as soon as the
+   * sequence is no longer rendered with its colors (finding 2).
+   *
+   * WHAT IT HOLDS (finding 5): per frame, under the Colored look, its labels (a texture shared with the frames one
+   * labelmap covers; the heart has one SEG per phase, so one each, 133 MB) and the smoothed solid copy (133 MB) --
+   * about 1.3 GB for the heart's five phases. The CT is not copied (the frame's own field is adopted).
+   */
+  private scheduleFrameColors(seq: string, scene: LiveScene): void {
+    const running = this.frameColorPass.get(seq);
+    if (running) { running.again = true; return; }
+    clearTimeout(this.frameColorTimer.get(seq));
+    this.frameColorTimer.set(seq, setTimeout(() => { this.frameColorTimer.delete(seq); void this.colorFrames(seq, scene); }, VolumeRenderingDisplayableManager.FRAME_COLOR_SETTLE_MS));
+  }
+  static readonly FRAME_COLOR_SETTLE_MS = 800;
+  private async colorFrames(seq: string, scene: LiveScene): Promise<void> {
+    const pass = { again: true };
+    this.frameColorPass.set(seq, pass);
+    // SAID ON THE 3D VIEW while it takes (render/working.ts; Ron, 2026-10-17, the pause after the heart loaded): the
+    // phases still being prepared, counted. Opened only when a phase is actually built; quick passes show nothing.
+    let work: Work | undefined, built = 0;
+    const phases = [...this.slots.values()].filter((o) => o.image.sequence === seq).length;
+    try {
+      while (pass.again) {
+        pass.again = false;
+        for (const s of [...this.slots.values()]) {
+          const shown = this.sequenceShown(seq);
+          if (!shown || !this.framesPlay(seq, scene)) break;
+          if (s === shown || s.image.sequence !== seq || !s.segs.size || this.slots.get(s.image.id) !== s) continue;
+          // The look on screen, and the display node's choice of segmentation, are the shown frame's.
+          s.tf = shown.tf; s.tfId = shown.tfId; s.colorize = shown.colorize;
+          const target = this.colorizeChoice({ ...s, vrId: shown.vrId }, scene);
+          if (!target || (s.colorField && !s.colorizeStale && s.colorizeSegId === target.id)) continue;
+          // Its own field first (the CT texture the colorize field adopts); a frame not yet shown has none.
+          if (!s.field) await this.ensureField(s, scene);
+          if (this.slots.get(s.image.id) !== s || !s.field) continue;
+          s.colorizeStale = false;
+          work ??= startWork({ title: "Preparing the series in 3D", unit: "phases", total: Math.max(1, phases - 1) });
+          await this.buildColorize(s, scene, target);
+          // The scene closed meanwhile: nothing more to prepare, and nothing to count (critic 2026-10-17, finding 19).
+          if (!scene.nodes.has(seq)) { pass.again = false; break; }
+          if (this.slots.get(s.image.id) === s && s.colorField) work.step(++built);
+        }
+      }
+    } finally {
+      work?.done();
+      this.frameColorPass.delete(seq);
+      // NOT WANTED ANY MORE: the hidden frames' fields go (the rendering or the colors went off during the pass).
+      if (!this.sequenceShown(seq) || !this.framesPlay(seq, scene)) for (const o of this.slots.values()) if (o.image.sequence === seq && !o.visible && o.colorField) this.decolorize(o);
+    }
   }
 
   private reLUT(only?: VrSlot) {
@@ -3527,13 +3306,16 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       const z = slot.image.zarr as ZarrDesc, key = descKey(z) ?? undefined, range = knownRange(z);
       slot.zv = hasSharedTexture(key) && range
         ? { data: new Float32Array(0), dims: [...(z.shape as number[])].reverse() as [number, number, number], range }
-        : await fetchZarrVolume(this.blobBaseHref, z, this.onBytes);
+        : await samplesAsStored(this.blobBaseHref, z, this.onBytes);
+      // STILL WANTED? The volume (or the whole scene) may have gone during the read: no field for a slot nobody holds
+      // (critic 2026-10-16, finding 10; CONSTRAINTS, held-memory rule 3).
+      if (this.slots.get(slot.image.id) !== slot) { slot.zv = slim(slot.zv); return; }
     }
     const ijkToRAS = rowMul(worldForNode(slot.image, scene.nodes), slot.image.ijkToRAS as number[]);   // apply the transform chain
     slot.effSig = JSON.stringify(ijkToRAS);
     // The same unit distance as the colorize field: the plain grayscale rendering had the identical
     // problem, so the two looked wrong in the same way and for the same reason.
-    slot.field = new ImageField(this.dev, slot.zv.data, slot.zv.dims, [1, 1, 1], this.buildLUT(this.climOf(slot), slot), { clim: this.climOf(slot), ijkToRAS, shade: this.shadeOf(slot), opacityUnitDistance: VolumeRenderingDisplayableManager.PRESET_UNIT_MM, ...textureOpts(slot.image) });
+    slot.field = new ImageField(this.dev, slot.zv.data, slot.zv.dims, [1, 1, 1], this.buildLUT(this.climOf(slot), slot), { clim: this.climOf(slot), ijkToRAS, shade: this.shadeOf(slot), opacityUnitDistance: VolumeRenderingDisplayableManager.presetUnit(nodeVoxel({ ijkToRAS: slot.image.ijkToRAS })), ...textureOpts(slot.image) });
     slot.zv = slim(slot.zv);
     forgetDecoded(slot.image.zarr as ZarrDesc);
     // A segmentation may have arrived before the CT finished streaming; colorize now that it can --
@@ -3604,9 +3386,20 @@ export class TerminologyDisplayableManager implements DisplayableManager {
  * a binding change and not an upload.
  */
 export class SequenceDisplayableManager implements DisplayableManager {
-  interestedTypes = ["sequenceBrowser"];
+  // Segmentations too: the member on screen of a family is watched, so its look is known when it is deleted (lastLook).
+  interestedTypes = ["sequenceBrowser", "segmentation"];
   private shown = new Map<string, string>();   // browser id -> the frame it last put on screen
+  /** True while a step writes the members: those writes are the step's, not the person's look. */
+  private stepping = false;
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
+    if (node.type === "segmentation") {
+      // THE FAMILY'S LOOK AS THE PERSON LEAVES IT, at every change of the member on screen -- its eye, Scenes' 2D/3D
+      // buttons, a structure turned off -- not only at a step: hidden and then deleted, the family came back at the next
+      // step (critic 2026-10-16, tonight's fixes, finding 2).
+      if (this.stepping) return;
+      for (const [key, id] of this.shown) if (id === node.id && key.includes("#")) this.lastLook.set(key, { ...node });
+      return;
+    }
     const seqs = (node.sequences as { sequence: string; proxy?: string }[] | undefined) ?? [];
     const seq = seqs[0] ? scene.nodes.get(seqs[0].sequence) : undefined;
     const items = (seq?.items as { index: string; node: string }[] | undefined) ?? [];
@@ -3648,6 +3441,10 @@ export class SequenceDisplayableManager implements DisplayableManager {
    * so an aorta switched off stays off through the beat), and the one leaving goes dark.
    */
   private stepCompanions(browser: MrsonNode, scene: LiveScene) {
+    this.stepping = true;
+    try { this.stepCompanions0(browser, scene); } finally { this.stepping = false; }
+  }
+  private stepCompanions0(browser: MrsonNode, scene: LiveScene) {
     const seqs = (browser.sequences as { sequence: string }[] | undefined) ?? [];
     for (let k = 1; k < seqs.length; k++) {
       const it = companionItem(scene, browser.id, k);
@@ -3657,7 +3454,10 @@ export class SequenceDisplayableManager implements DisplayableManager {
       const seq = scene.nodes.get(seqs[k].sequence);
       // The display of the member leaving, read BEFORE it goes dark below -- a write lands in
       // `nodes` at once, and the first version copied the darkness onto the member arriving.
-      const from = was && was !== wanted && scene.nodes.get(was) ? { ...scene.nodes.get(was)! } : undefined;
+      // A MEMBER LEAVING THAT NO LONGER EXISTS (deleted) hands over the family's display as it was last seen: without it
+      // the member arriving kept the darkness the join gave it, and the whole family stayed hidden for good (critic
+      // 2026-10-16, step 2, seen in passing).
+      const from = was && was !== wanted ? (scene.nodes.get(was) ? { ...scene.nodes.get(was)! } : this.lastLook.get(key)) : undefined;
       // ONE WRITE PER MEMBER. Each write of a segmentation node rebuilds the Scene list, the
       // Volume Rendering panel and the overlay list of every segmentation; a step wrote up to eight
       // (critic, 2026-09-19, finding 3). The member leaving gets one put with both flags off, the
@@ -3693,10 +3493,14 @@ export class SequenceDisplayableManager implements DisplayableManager {
         scene.write({ op: "patch", id: wanted, path: "#/visible", value: true });
       }
       this.shown.set(key, wanted);
+      const now = scene.nodes.get(wanted);
+      if (now) this.lastLook.set(key, { ...now });
     }
   }
+  /** Each companion's display as last stepped to, for a member leaving that was deleted meanwhile. */
+  private lastLook = new Map<string, MrsonNode>();
   onNodeRemoved(id: string) { this.shown.delete(id); }
-  onSceneClosed() { this.shown.clear(); }
+  onSceneClosed() { this.shown.clear(); this.lastLook.clear(); }
 }
 
 export class ModuleRegistryDisplayableManager implements DisplayableManager {

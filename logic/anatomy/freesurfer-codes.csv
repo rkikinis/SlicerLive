@@ -1,0 +1,62 @@
+type,scheme,code,meaning,match,source,note,ta2,ta2Name,ta2Match,ta2Note,status
+Amygdala,SCT,4958002,Amygdala,exact,DICOM CID 7140,,5549,amygdala,exact,,reviewed
+Brainstem,SCT,15926001,Brainstem structure,exact,SNOMED CT (tx.fhir.org),"Ron 2026-10-20: the whole brain stem (SNOMED 15926001), not CID 7140's 119238007 ""Brain stem part"", a grouping for its parts",5856,brain stem,exact,,reviewed
+Caudate nucleus,SCT,11000004,Caudate nucleus,exact,DICOM CID 7140,,5561,caudate nucleus,exact,,reviewed
+Cerebellar cortex,SCT,25991003,Cerebellar cortex,exact,DICOM CID 7140,,5834,cerebellar cortex,exact,"TA2 5834, Ron 2026-10-20",reviewed
+Cerebellar white matter,SCT,33060004,Cerebellar white matter,exact,DICOM CID 7140,,5841,white matter of cerebellum,exact,"TA2 5841, Ron 2026-10-20 (the arbor vitae, 5789, was the near match proposed)",reviewed
+Cerebral cortex,SCT,40146001,Cerebral cortex,exact,DICOM CID 7140,"the same code is ""Cerebral cortex"" in DICOM CID 7153; Albula's name ""Cerebral cortex"" with this code: fine (Ron 2026-10-20)",5528,cerebral cortex,exact,"TA2 5528, Ron 2026-10-20: 5527 is the pallium, its parent (pallium: cerebral cortex -- allocortex, neocortex -- and claustrum)",reviewed
+Cerebral white matter,SCT,68523003,Cerebral white matter,exact,DICOM CID 7140,,5573,white matter of telencephalon,exact,"TA2 5573, Ron 2026-10-20",reviewed
+Fifth ventricle,SCT,74968005,Cavum septi pellucidi,exact,DICOM CID 7140,"FreeSurfer's 5th-Ventricle is the cavum of the septum pellucidum; Albula shows it as ""Cavum septi pellucidi"" (overrides.ts, Ron)",5648,cavum septum pellucidum,exact,"Ron 2026-10-20: ""Yes cavum septum pellucidum""",reviewed
+Fourth ventricle,SCT,35918002,Fourth ventricle,exact,DICOM CID 7140,,5966,fourth ventricle,exact,,reviewed
+Globus pallidus,SCT,14738005,Globus pallidus,exact,DICOM CID 7140,,5569,globus pallidus,exact,,reviewed
+Hippocampus,SCT,5366008,Hippocampus,exact,DICOM CID 7140,,5518,hippocampus,exact,,reviewed
+Inferior horn of the lateral ventricle,SCT,53118009,Inferior Horn of Lateral Ventricle,exact,DICOM CID 7140,,5645,inferior horn of lateral ventricle,exact,,reviewed
+Lateral ventricle,SCT,66720007,Lateral ventricle,exact,DICOM CID 7140,,5639,lateral ventricle,exact,,reviewed
+Nucleus accumbens,SCT,427667007,Nucleus accumbens,exact,DICOM CID 7140,,5558,nucleus accumbens,exact,,reviewed
+Putamen,SCT,89278009,Putamen,exact,DICOM CID 7140,,5566,putamen,exact,,reviewed
+Thalamus,SCT,42695009,Thalamus,exact,DICOM CID 7153,"Ron 2026-10-20: the whole thalamus (SNOMED 42695009 ""Thalamic structure""), not CID 7140's 119406000 ""Thalamus part"", a grouping for its parts",5678,thalamus,exact,,reviewed
+Third ventricle,SCT,49841001,Third ventricle,exact,DICOM CID 7140,,5769,third ventricle,exact,,reviewed
+Ventral diencephalon,DCM,110700,Ventral Diencephalon,exact,DICOM CID 7140,a DICOM code (no SNOMED concept): FreeSurfer's own region,,,none,"an imaging definition, not one structure (Ron 2026-10-20: ""VDC is a definition due to lack of resolution in neuro imaging""): T1 contrast cannot separate the hypothalamus, subthalamic nucleus, mammillary bodies, geniculate nuclei, the substantia nigra and red nucleus at its border, parts of the basal forebrain, the optic tracts, zona incerta, cerebral peduncles, lenticular fasciculus and medial lemniscus (Neuromorphometrics' definition); so no TA2 term",reviewed
+White matter hypointensities,DCM,110701,White Matter T1 Hypointensity,exact,DICOM CID 7140,FastSurfer works on the T1,,,none,"a finding, not a structure: TA2 has no pathology (Ron 2026-10-20)",reviewed
+Cerebrospinal fluid,SCT,65216001,Cerebrospinal fluid,exact,DICOM CID 7153,,5388,cerebrospinal fluid,exact,,reviewed
+Entorhinal cortex,SCT,3937002,Entorhinal cortex,exact,DICOM CID 7153,,,,none,"TA and TA2, gross anatomy terminologies, do not list the cortex's histological or cytoarchitectonic areas; the entorhinal cortex is in Terminologia Histologica and Terminologia Neuroanatomica, and lies in the anterior parahippocampal gyrus (TA2 5515) -- Paul Neumann, Chair of FIPAT's Anatomical Nomenclature Commission, to Ron, 2026-10-20; TA2 left empty (Ron 2026-10-20)",reviewed
+Insula,SCT,36169008,Insula,exact,DICOM CID 7153,,5502,insula,exact,,reviewed
+Optic chiasm,SCT,244453006,Optic chiasm,exact,DICOM CID 7153,,5668,optic chiasm,exact,,reviewed
+Substantia nigra,SCT,70007007,Substantia nigra,exact,DICOM CID 7153,,5881,substantia nigra,exact,,reviewed
+Choroid plexus,SCT,80621003,Choroid plexus,exact,SNOMED CT (tx.fhir.org),,5654,choroid plexus of lateral ventricle,exact,"TA2 5654, plexus choroideus ventriculi lateralis (Ron 2026-10-20): FreeSurfer's left and right choroid plexus are the lateral ventricles'",reviewed
+Cuneus,SCT,74493001,Cuneus,exact,SNOMED CT (tx.fhir.org),,5485,cuneus,exact,,reviewed
+Frontal pole,SCT,72175008,Frontal pole,exact,SNOMED CT (tx.fhir.org),,5419,frontal pole,exact,,reviewed
+Fusiform gyrus,SCT,33185006,Fusiform gyrus,exact,SNOMED CT (tx.fhir.org),the fusiform gyrus is the lateral occipitotemporal gyrus,5500,fusiform gyrus,exact,,reviewed
+Inferior temporal gyrus,SCT,73516003,Inferior temporal gyrus,exact,SNOMED CT (tx.fhir.org),,5497,inferior temporal gyrus,exact,,reviewed
+Lingual gyrus,SCT,7344002,Lingual gyrus,exact,SNOMED CT (tx.fhir.org),,5487,lingual gyrus,exact,,reviewed
+Middle temporal gyrus,SCT,35305002,Middle temporal gyrus,exact,SNOMED CT (tx.fhir.org),,5495,middle temporal gyrus,exact,,reviewed
+Paracentral lobule,SCT,9898001,Paracentral lobule,exact,SNOMED CT (tx.fhir.org),,5466,paracentral lobule,exact,,reviewed
+Parahippocampal gyrus,SCT,13989007,Parahippocampal gyrus,exact,SNOMED CT (tx.fhir.org),,5515,parahippocampal gyrus,exact,,reviewed
+Postcentral gyrus,SCT,56884009,Postcentral gyrus,exact,SNOMED CT (tx.fhir.org),,5469,postcentral gyrus,exact,,reviewed
+Precentral gyrus,SCT,465006,Precentral gyrus,exact,SNOMED CT (tx.fhir.org),SNOMED's name for the precentral gyrus,5458,precentral gyrus,exact,,reviewed
+Precuneus,SCT,17292004,Precuneus,exact,SNOMED CT (tx.fhir.org),,5479,precuneus,exact,,reviewed
+Superior frontal gyrus,SCT,36181007,Superior frontal gyrus,exact,SNOMED CT (tx.fhir.org),,5456,superior frontal gyrus,exact,,reviewed
+Superior parietal lobule,SCT,16925009,Superior parietal lobule,exact,SNOMED CT (tx.fhir.org),"shown as TA2 and SNOMED name it, ""Superior parietal lobule"", not FreeSurfer's ""superior parietal"" cortex (Ron 2026-10-20: ""yes lobule"")",5476,superior parietal lobule,exact,,reviewed
+Superior temporal gyrus,SCT,30143006,Superior temporal gyrus,exact,SNOMED CT (tx.fhir.org),,5489,superior temporal gyrus,exact,,reviewed
+Supramarginal gyrus,SCT,13926003,Supramarginal gyrus,exact,SNOMED CT (tx.fhir.org),,5473,supramarginal gyrus,exact,,reviewed
+Temporal pole,SCT,34497009,Temporal pole,exact,SNOMED CT (tx.fhir.org),,5420,temporal pole,exact,,reviewed
+Transverse temporal gyrus,SCT,37029000,Transverse temporal gyrus,exact,SNOMED CT (tx.fhir.org),,5491,transverse temporal gyrus,exact,,reviewed
+Inferior parietal lobule,SCT,59024009,Angular gyrus,nearest,SNOMED CT (tx.fhir.org),"the atlas's inferior parietal region is the lobule without the supramarginal gyrus (which has a row of its own), mostly the angular gyrus: coded as the angular gyrus, shown as ""Inferior parietal lobule"" (Ron 2026-10-20: ""51: angular gyrus, rename to lobule"")",5472,angular gyrus,nearest,TA2 5472 (Wikidata P7173),reviewed
+Lateral occipital cortex,SCT,22735005,Structure of lateral occipital gyrus,nearest,SNOMED CT (tx.fhir.org),,5482,lateral occipital gyri,exact,"TA2 5482, gyri occipitales laterales (Ron 2026-10-20)",reviewed
+Lateral orbitofrontal cortex,SCT,279195001,Lateral orbital gyrus,nearest,SNOMED CT (tx.fhir.org),,5464,orbital gyri,parent,,reviewed
+Medial orbitofrontal cortex,SCT,30130006,Structure of gyrus rectus,nearest,SNOMED CT (tx.fhir.org),the atlas's region is the gyrus rectus and the medial orbital gyrus (279194002); one code: which?; Ron 2026-10-20: gyrus rectus,5462,straight gyrus,exact,the gyrus rectus,reviewed
+Banks of the superior temporal sulcus,SCT,5001007,Structure of superior temporal sulcus,nearest,SNOMED CT (tx.fhir.org),the cortex lining the sulcus,5494,superior temporal sulcus,near,,reviewed
+Pericalcarine cortex,SCT,113300000,Area striata structure,nearest,SNOMED CT (tx.fhir.org),the primary visual cortex around the calcarine sulcus,5486,calcarine sulcus,near,Wikidata names it calcarine fissure,reviewed
+Pars opercularis,SCT,1179133003,"Structure of Brodmann area 44, opercular",nearest,SNOMED CT (tx.fhir.org),or the parent: inferior frontal gyrus 5336001; Ron 2026-10-20: Brodmann areas (what neuroscientists use),5452,opercular part of inferior frontal gyrus,exact,,reviewed
+Pars triangularis,SCT,1179134009,"Structure of Brodmann area 45, triangular",nearest,SNOMED CT (tx.fhir.org),or the parent: inferior frontal gyrus 5336001; Ron 2026-10-20: Brodmann areas (what neuroscientists use),5450,triangular part of inferior frontal gyrus,exact,,reviewed
+Pars orbitalis,SCT,1179142005,"Structure of Brodmann area 47, orbital",nearest,SNOMED CT (tx.fhir.org),or the parent: inferior frontal gyrus 5336001; Ron 2026-10-20: Brodmann areas (what neuroscientists use),5448,orbital part of inferior frontal gyrus,exact,,reviewed
+Caudal middle frontal gyrus,SCT,74528000,Structure of middle frontal gyrus,parent,SNOMED CT (tx.fhir.org),SNOMED does not divide the gyrus; caudal and rostral share the code,5454,middle frontal gyrus,parent,,reviewed
+Rostral middle frontal gyrus,SCT,74528000,Structure of middle frontal gyrus,parent,SNOMED CT (tx.fhir.org),SNOMED does not divide the gyrus; caudal and rostral share the code,5454,middle frontal gyrus,parent,,reviewed
+Caudal anterior cingulate cortex,SCT,25221002,Structure of cingulate gyrus,parent,SNOMED CT (tx.fhir.org),"SNOMED divides the cingulate by Brodmann area (24, 32, 23, 31) rather than as the atlas does; Ron 2026-10-20: the cingulate gyrus, not Brodmann areas",5513,cingulate gyrus,parent,,reviewed
+Rostral anterior cingulate cortex,SCT,25221002,Structure of cingulate gyrus,parent,SNOMED CT (tx.fhir.org),"as above; Ron 2026-10-20: the cingulate gyrus, not Brodmann areas",5513,cingulate gyrus,parent,,reviewed
+Posterior cingulate cortex,SCT,25221002,Structure of cingulate gyrus,parent,SNOMED CT (tx.fhir.org),"as above; Ron 2026-10-20: the cingulate gyrus, not Brodmann areas",5513,cingulate gyrus,parent,,reviewed
+Isthmus of the cingulate gyrus,SCT,25221002,Structure of cingulate gyrus,parent,SNOMED CT (tx.fhir.org),"no SNOMED concept for the isthmus found; Ron 2026-10-20: the cingulate gyrus, not Brodmann areas",5514,isthmus of cingulate gyrus,exact,,reviewed
+Cerebellar exterior,SCT,113305005,Cerebellar structure,parent,SNOMED CT (tx.fhir.org),FreeSurfer's outer layer of the cerebellum,5788,cerebellum,parent,,reviewed
+Vessel,SCT,59820001,Blood vessel structure,parent,SNOMED CT (tx.fhir.org),,,,none,,reviewed
+Non-white-matter hypointensities,,,,none,,no DICOM or SNOMED concept found: written as Anatomical structure,,,none,,reviewed
+Undetermined,,,,none,,FreeSurfer's unlabeled voxels: written as Anatomical structure,,,none,,reviewed

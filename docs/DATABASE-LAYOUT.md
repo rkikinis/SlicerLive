@@ -82,7 +82,8 @@ then this is the index.
   written and indexed in one request, and are taken back out if the index refuses them. Each made object records what it
   was made from (the record store, below).
 
-What Albula reads: CT and MR images (classic and enhanced multi-frame), segmentations, surfaces, tractography, and the
+What Albula reads: CT and MR images (classic and enhanced multi-frame), segmentations, tractography (surfaces: the
+reader stays in `logic/`, but since 2026-10-21 no app path loads them -- they are an export only), and the
 pixel encodings DICOM allows (uncompressed, RLE, JPEG, JPEG-LS, JPEG 2000, HTJ2K; `logic/codecs/`). What Albula
 writes:
 
@@ -90,7 +91,7 @@ writes:
 |---|---|---|
 | a segmentation (what the app saves) | **Label Map Segmentation**, the dataset deflated: one label number per voxel | `logic/export-dicom-seg.ts` |
 | a segmentation, Slicer's form (no app path writes it today; tests do) | **Segmentation (SEG)**, one bit per voxel per structure | `logic/export-dicom-seg.ts` |
-| surface models (only from Generate Surface Models) | **Surface Segmentation** | `logic/export-dicom-surface.ts` |
+| surface models: none since 2026-10-22 (Ron: "only segmentations go into the db; stl are exports only"). The writer and reader stay in `logic/` for DICOM parity; no app path calls them | **Surface Segmentation** | `logic/export-dicom-surface.ts` |
 | an image volume (from a file, a crop) | **CT / MR / PET / NM Image**, one file per slice, the voxels unchanged | `logic/export-dicom-image.ts` |
 | fiber tracts (the diffusion extension) | **Tractography Results** | `tracts-dicom.ts` in `rkikinis/albula-diffusion` |
 | a diffusion scan converted from NIfTI or NRRD | **Enhanced MR Image** | `export-dicom-dwi.ts` in `rkikinis/albula-diffusion` |

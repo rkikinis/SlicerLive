@@ -110,7 +110,7 @@ const GYRUS_WORDS: Record<string, string> = {
   parstriangularis: "Pars triangularis", parsorbitalis: "Pars orbitalis",
   lateralorbitofrontal: "Lateral orbitofrontal cortex", medialorbitofrontal: "Medial orbitofrontal cortex",
   precentral: "Precentral gyrus", paracentral: "Paracentral lobule", frontalpole: "Frontal pole",
-  superiorparietal: "Superior parietal cortex", inferiorparietal: "Inferior parietal cortex",
+  superiorparietal: "Superior parietal lobule", inferiorparietal: "Inferior parietal lobule",
   supramarginal: "Supramarginal gyrus", postcentral: "Postcentral gyrus", precuneus: "Precuneus",
   superiortemporal: "Superior temporal gyrus", middletemporal: "Middle temporal gyrus",
   inferiortemporal: "Inferior temporal gyrus", bankssts: "Banks of the superior temporal sulcus",
@@ -150,6 +150,10 @@ const LEGACY_ALIAS = new Set([218]);   // Amygdala, beside Left-Amygdala (18) an
 
 const structures: Record<string, Entry> = {};
 const byLabel: Record<string, string> = {};
+
+// EVERY COLOR FREESURFER'S (Ron, 2026-09-20). Albula's own choices are color-scheme versions, not edits of this table:
+// CSF's light blue (Ron, 2026-10-20) is v4 in palettes.ts, so the earlier versions keep FreeSurfer's gray (critic
+// 2026-10-20, finding 11).
 
 for (const line of (await Deno.readTextFile(SRC)).split("\n")) {
   const bare = line.split("#")[0].trim();

@@ -60,14 +60,16 @@ export class CardField implements Field {
   setBillboard(center: Vec3, u: Vec3, v: Vec3, n: Vec3, hu: number, hv: number, halfThick: number, cornerMm?: number) {
     this.c = center; this.u = u; this.v = v; this.n = n; this.hu = hu; this.hv = hv; this.ht = halfThick;
     if (cornerMm !== undefined) this.cornerMm = cornerMm;
-    if (this.inkFrontMm === 0) this.inkFrontMm = Math.max(0.5, halfThick);   // default: ink across the front half
+    if (this.inkFrontMm === 0) this.inkFrontMm = halfThick;   // default: ink across the front half (no 0.5 mm floor: any scale)
   }
   setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
   get texture(): GPUTexture { return this.tex; }
 
   uniformFloats() { return 24; }       // center(4) u(4) v(4) n(4) params(4) tint(4)
   aabb(): [Vec3, Vec3] { return this.box; }
-  sampleStep(): number { return Math.max(0.4, this.ht * 0.5); }   // a few samples through the slab
+  // A few samples through the slab, at any scale: the 0.4 mm floor never bound on the 4.75 mm cards (scene-cards.ts)
+  // and was a step a hundred thousand voxels long on a microscope's. A slab of no thickness is left out (marchStep).
+  sampleStep(): number { return this.ht * 0.5; }
 
   structMembers(s: number): string {
     return [

@@ -22,6 +22,8 @@
 // ACCESSIBILITY IS A CONSTRAINT, NOT A POLISH STEP. Ron: "the user interface be friendly for people
 // with poor fine motor control." So every move has a NON-DRAG path first: select rows, then choose
 // a destination from a menu. Drag, when it lands, is the fast path on top — never the only one.
+import { shownMember } from "../../logic/sequences.ts";
+import { afterPress, pressedIn } from "./press-guard.ts";
 import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
@@ -34,6 +36,7 @@ import { createSegmentation } from "../../logic/segmentation-editor.ts";
 import { openMergeWindow } from "./merge-segmentations.ts";
 import { segmentationsOffScheme, useCurrentColors } from "../../logic/scheme-colors.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
+import { isBrainResult } from "../../logic/import-jobs/brain-structures-rule.ts";
 import { type AnatomyNode, buildSegmentTree, leaves, type SceneSegment } from "../../logic/anatomy/hierarchy.ts";
 import { definitionFor } from "../../logic/anatomy/definitions.ts";
 import { addTerm, mintCode, newTerminology, proposeColour, terminologies, terminology, type TerminologySource, toColorTableCsv } from "../../logic/anatomy/terminology.ts";
@@ -144,10 +147,20 @@ export function registerSegmentationsPanel(
     let set = closedBy.get(rootId);
     if (!set) {
       const groups = (live.nodes.get(rootId) as unknown as { mergedGroups?: { labels: number[] }[] } | undefined)?.mergedGroups ?? [];
-      set = closedFromGroups(tree, groups) ?? (leaves(tree).length <= OPEN_AT_ARRIVAL_MAX ? new Set<string>() : new Set(overviewOf(tree)));
+      set = closedFromGroups(tree, groups) ?? (leaves(tree).length <= OPEN_AT_ARRIVAL_MAX || arrivesOpen(rootId) ? new Set<string>() : new Set(overviewOf(tree)));
       closedBy.set(rootId, set);
     }
     return set;
+  };
+  /**
+   * THE BRAIN'S STRUCTURES ARRIVE OPEN, every parcel in its own color (Ron, 2026-10-20: "The initial presentation should
+   * have the segmentations hierarchy configured in such a way that the freesurfer parcels are colorized" -- the overview
+   * folded FastSurfer's 95 under Central nervous system, one gray -- and "tree fully open", until his own example of the
+   * arrival folding).
+   */
+  const arrivesOpen = (rootId: string): boolean => {
+    const n = live.nodes.get(rootId) as { name?: string; model?: string; origin?: { task?: string } } | undefined;
+    return isBrainResult(n?.name) || /^fastsurfer:/.test(String(n?.model ?? n?.origin?.task ?? ""));
   };
   /** The chosen segmentation's set — what the rows and the buttons in this render act on. */
   let closed = new Set<string>();
@@ -234,6 +247,7 @@ export function registerSegmentationsPanel(
       }));
 
   const setSegmentVisible = (segId: string, labelValues: number[], visible: boolean) => {
+    segId = shownMember(live, segId);   // the phase on screen now, for a playing series (logic/sequences.ts)
     const n = live.nodes.get(segId);
     if (!n) return;
     const want = new Set(labelValues);
@@ -252,6 +266,7 @@ export function registerSegmentationsPanel(
    */
   const SEE_THROUGH = 0.4;
   const setSegmentOpacity = (segId: string, labelValues: number[], opacity: number) => {
+    segId = shownMember(live, segId);   // the phase on screen now, for a playing series (logic/sequences.ts)
     const n = live.nodes.get(segId);
     if (!n) return;
     const want = new Set(labelValues);
@@ -313,6 +328,9 @@ export function registerSegmentationsPanel(
       const own = `${path} ${n.name.toLowerCase()}`;
       if (!n.children.length) { if (!ws.length || ws.every((w) => own.includes(w))) out.push(n); return; }
       if (ws.length && ws.every((w) => own.includes(w))) { for (const l of leaves([n])) out.push(l); return; }   // a matching group brings all its leaves
+      // A STRUCTURE THAT IS ALSO A PARENT (the lateral ventricle, parent of its inferior horn) is one of the structures too:
+      // "Hide all" left both lateral ventricles on (2026-10-21, PAT29's FastSurfer brain).
+      if (n.labelValue !== undefined && (!ws.length || ws.every((w) => own.includes(w)))) out.push(n);
       for (const c of n.children) walk(c, own);
     };
     for (const n of nodes) walk(n, "");
@@ -632,16 +650,18 @@ export function registerSegmentationsPanel(
       // on; showing puts 3D back as it was, so a segmentation that was slices-only stays slices-only.
       eye.addEventListener("click", (e) => {
         e.stopPropagation();
-        const node = live.nodes.get(r.id);
-        if (shown) {
+        // The phase on screen NOW and its state now: a playing series moves on between drawing the row and the click.
+        const id = shownMember(live, r.id);
+        const node = live.nodes.get(id);
+        if (node?.visible !== false) {
           const was3D = (node?.visible3D as boolean | undefined) ?? true;
-          live.write({ op: "patch", id: r.id, path: "#/visible3DBeforeHide", value: was3D });
-          live.write({ op: "patch", id: r.id, path: "#/visible3D", value: false });
-          live.write({ op: "patch", id: r.id, path: "#/visible", value: false });
+          live.write({ op: "patch", id, path: "#/visible3DBeforeHide", value: was3D });
+          live.write({ op: "patch", id, path: "#/visible3D", value: false });
+          live.write({ op: "patch", id, path: "#/visible", value: false });
         } else {
           const back = (node?.visible3DBeforeHide as boolean | undefined) ?? (node?.visible3D as boolean | undefined) ?? true;
-          live.write({ op: "patch", id: r.id, path: "#/visible", value: true });
-          live.write({ op: "patch", id: r.id, path: "#/visible3D", value: back });
+          live.write({ op: "patch", id, path: "#/visible", value: true });
+          live.write({ op: "patch", id, path: "#/visible3D", value: back });
         }
         render();
       });
@@ -798,11 +818,15 @@ export function registerSegmentationsPanel(
     allBtn.type = "button";
     allBtn.className = "sl-tool sl-anat-all";
     let act = showHideAllState([], false);
+    // THE EYE, AS IN DIFFUSION (Ron, 2026-10-21: "I like the eye icon. Its compact and intuitive"): at the head of the
+    // eye column, the same control in both modules; its tooltip says what the click does ("Hide all", "Show these 24").
+    allBtn.style.cssText = "background:none;border:none;padding:0 2px;cursor:pointer;color:inherit;font-size:14px;min-width:0;width:22px;height:22px;flex:none";
     const updateAll = () => {
       const f = filter.trim().toLowerCase();
       act = showHideAllState(matchingLeaves(tree, f), f.length > 0);
-      allBtn.textContent = act.label;
-      allBtn.title = act.title;
+      allBtn.textContent = act.show ? "🚫" : "👁";
+      allBtn.title = `${act.label}: ${act.title.charAt(0).toLowerCase()}${act.title.slice(1)}`;
+      allBtn.setAttribute("aria-label", act.label);
       allBtn.disabled = act.labels.length === 0;
     };
     updateAll();
@@ -844,9 +868,9 @@ export function registerSegmentationsPanel(
     // On one line with the filter, because the filter is what scopes it.
     const findRow = document.createElement("div");
     findRow.className = "sl-anat-findrow";
+    findRow.appendChild(allBtn);
     findRow.appendChild(find);
     findRow.appendChild(foldBtn);
-    findRow.appendChild(allBtn);
     treeSec.appendChild(findRow);
 
     const list = document.createElement("div");
@@ -900,20 +924,23 @@ export function registerSegmentationsPanel(
   function schemeRow(off: { id: string; name: string; differ: number }[]): HTMLElement {
     const row = document.createElement("div");
     row.className = "sl-row sl-scheme-row";
-    const say = document.createElement("span");
-    say.className = "sl-hint";
     const segs = off.reduce((n, o) => n + o.differ, 0);
-    say.textContent = `${off.length === 1 ? "One segmentation keeps the colors it" : `${off.length} segmentations keep the colors they`} arrived with: ${segs} structure${segs === 1 ? " differs" : "s differ"} from colors v${paletteVersion()}.`;
-    say.title = off.map((o) => `${o.name}: ${o.differ}`).join("\n");
+    // NO FINE PRINT ON THE FACE (Ron, 2026-10-20: "I don't understand this: One segmentation keeps the colors it arrived
+    // with: 1 structure differs from colors v2. This kind of text should be in the tooltip"): one button, its words
+    // plain, the account in its tooltip.
     const use = document.createElement("button");
-    use.textContent = "Use the current colors";
-    use.title = `Color ${off.length === 1 ? "it" : "them"} with the current scheme, v${paletteVersion()} (Settings › General › Colors). Nothing else changes; saving keeps the new colors.`;
+    use.textContent = "Use Albula's colors";
+    // WHAT THE PERSON GETS FIRST (MODULE-DESIGN-RULES: "The first sentence says what the person sees or gets"; critic
+    // 2026-10-20, finding 16), then why the button is there. A save writes a new series; the file itself never changes.
+    use.title = `Shows ${off.length === 1 ? "this segmentation" : `these ${off.length} segmentations`} in Albula's colors (Settings › General › Colors, scheme v${paletteVersion()}).` +
+      ` ${off.length === 1 ? "It was" : "They were"} saved with other colors for ${segs} structure${segs === 1 ? "" : "s"} (${off.map((o) => `${o.name}: ${o.differ}`).join("; ")}).` +
+      ` Nothing else changes; the saved file keeps its own colors (saving again writes a new one).`;
     use.addEventListener("click", () => {
       const n = off.reduce((k, o) => k + useCurrentColors(live, o.id), 0);
-      status(`Colors: ${n} structure${n === 1 ? "" : "s"} now in the colors of v${paletteVersion()}`);
+      status(`Colors: ${n} structure${n === 1 ? "" : "s"} now in Albula's colors`);
       render();
     });
-    row.append(say, use);
+    row.append(use);
     return row;
   }
 
@@ -989,7 +1016,12 @@ export function registerSegmentationsPanel(
     // AI panel's paint-first wait needed for the same reason, and the same lesson: a window nobody
     // is looking at is still a window that must be correct when it is looked at again.
     let done = false;
-    const run = () => { if (done) return; done = true; pending = false; if (root) render(); };
+    const run = () => {
+      if (done) return; done = true; pending = false;
+      // Not under a press: a playing series rewrites the segmentations at every step (press-guard.ts).
+      if (pressedIn(root)) { afterPress(schedule); return; }
+      if (root) render();
+    };
     requestAnimationFrame(run);
     setTimeout(run, 250);
   };

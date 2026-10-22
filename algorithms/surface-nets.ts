@@ -379,6 +379,10 @@ export function surfaceNets(
   let li = 0;
   const labelList: number[] = [];
   for (let l = 1; l <= maxLab; l++) if (buckets[l]) labelList.push(l);
+  // A MIRRORING GRID (its ijk -> RAS matrix has a negative determinant: slices stored head to foot, a NIfTI in LAS, a
+  // FreeSurfer-conformed LIA volume) turns every face's winding around when the points are placed, so the winding is
+  // chosen the other way here (critic 2026-10-21, surfaces export, finding 1: every face pointed inward on such grids).
+  const mirror = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]) < 0;
   for (const label of labelList) {                      // ascending, as the sorted Map was
     const qs = buckets[label]!;
     const indices = new Uint32Array(qs.length * 6);
@@ -398,7 +402,7 @@ export function surfaceNets(
       // Wind so the face points AWAY from this label: the quad's own order faces from a to b, so the
       // label on the b side takes it reversed. Without this every second parcel renders inside-out.
       const o = t * 4;
-      const fwd = qa[t] === label;
+      const fwd = (qa[t] === label) !== mirror;
       const l0 = local(qv[o + (fwd ? 0 : 3)]), l1 = local(qv[o + (fwd ? 1 : 2)]);
       const l2 = local(qv[o + (fwd ? 2 : 1)]), l3 = local(qv[o + (fwd ? 3 : 0)]);
       indices[w++] = l0; indices[w++] = l1; indices[w++] = l2;

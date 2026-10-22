@@ -7,6 +7,9 @@ export interface Mosaic {
   n: number; rows: number; columns: number; perRow: number;
   /** Each slice's ImagePositionPatient (LPS), in tile order. */
   positions: [number, number, number][];
+  /** True when the file declares neither SpacingBetweenSlices nor SliceThickness, so the slices were put 1 mm apart:
+   *  a guess, carried to the volume's geometry as "assumed" rather than laundered into positions that look measured. */
+  spacingNotDeclared?: true;
 }
 
 /**
@@ -33,11 +36,15 @@ export function siemensMosaic(ds: Record<string, unknown>, raw: Raw): Mosaic | u
   // with empty items, which gave NaN positions: critic, 2026-09-29, finding 7).
   const csaNormal = t.get("SliceNormalVector")?.map(Number);
   const normal = (csaNormal && csaNormal.length >= 3 && csaNormal.slice(0, 3).every(Number.isFinite) ? csaNormal : [rowDir[1] * colDir[2] - rowDir[2] * colDir[1], rowDir[2] * colDir[0] - rowDir[0] * colDir[2], rowDir[0] * colDir[1] - rowDir[1] * colDir[0]]);
-  const spacing = num(ds.SpacingBetweenSlices) ?? num(ds.SliceThickness) ?? 1;
+  // THE SPACING IS THE FILE'S, OR SAID TO BE A GUESS. It was 1 mm silently: the positions below then looked measured, and
+  // the series reader reported a spacing "derived from slice positions" that nobody had declared ("absent means
+  // unknown", DUCKN-WORKING-COPY.md; Ron: "People use slicer from microscopy to astrophysics"). A 0 is not a spacing.
+  const declared = [num(ds.SpacingBetweenSlices), num(ds.SliceThickness)].find((x) => x !== undefined && x !== 0);
+  const spacing = declared ?? 1;
   const dc = ps[1] * (C - columns) / 2, dr = ps[0] * (R - rows) / 2;
   const p0 = [0, 1, 2].map((k) => ipp[k] + rowDir[k] * dc + colDir[k] * dr);
   const positions = Array.from({ length: n }, (_, s) => [0, 1, 2].map((k) => p0[k] + s * spacing * normal[k]) as [number, number, number]);
-  return { n, rows, columns, perRow, positions };
+  return { n, rows, columns, perRow, positions, ...(declared === undefined ? { spacingNotDeclared: true as const } : {}) };
 }
 
 /** Tile s of a mosaic's pixels. */

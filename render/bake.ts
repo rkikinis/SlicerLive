@@ -219,6 +219,8 @@ export class ColorizeBaker {
   /** (Re)colorize into `out` with `palette` (256*4 f32: rgb + presence*opacity) and Gaussian
    *  `sigmaVoxels` (0 = crisp, for the 2D slice overlay). In place — reuses everything resident. */
   bakeInto(out: GPUTexture, palette: Float32Array, sigmaVoxels = 1.5) {
+    // Counted for the session log's "play" line (render/demos/slicer-app.ts): what was baked while a sequence played.
+    { const g = globalThis as unknown as { __colorizeBakes?: number }; g.__colorizeBakes = (g.__colorizeBakes ?? 0) + 1; }
     const dev = this.dev, [gx, gy, gz] = this.g, [dx, dy, dz] = this.dims;
     const palData = new Float32Array(256 * 4);
     palData.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));

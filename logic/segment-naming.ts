@@ -31,9 +31,11 @@
 // (a dental crown or implant). A liver lesion is a finding, not the alimentary system.
 import { SEGMENTER_STRUCTURES } from "./anatomy/catalogue.ts";
 import freesurferJson from "./anatomy/freesurfer.json" with { type: "json" };
+import freesurferCodes from "./anatomy/freesurfer-codes.json" with { type: "json" };
 import { classify, type SegmentGroup, type SegmentStats } from "./segment-groups.ts";
 import { type ConflatedPart, type NameOverride, OVERRIDES } from "./anatomy/overrides.ts";
 import { KNOWN_STRUCTURES } from "./anatomy/known-structures.ts";
+import { mappingVersions } from "./anatomy/catalogue.ts";
 import { vesselShade } from "./anatomy/vessel-colour.ts";
 import { paletteRgb } from "./anatomy/palettes.ts";
 import { ecosystemOf } from "./task-name.ts";
@@ -157,7 +159,16 @@ const FROM_SEGMENTER = SEGMENTER_STRUCTURES as unknown as Record<string, NamedSt
  * FreeSurfer-family result carries -- when it carries one at all. See FREESURFER_BY_LABEL for the
  * ones that do not.
  */
-const FROM_FREESURFER = freesurferJson.structures as unknown as Record<string, NamedStructure>;
+const FROM_FREESURFER = withFreesurferCodes(freesurferJson.structures as unknown as Record<string, NamedStructure>);
+/** THE CODES THEY ARE WRITTEN WITH (anatomy/freesurfer-codes.csv, Ron's reviewed rows; 2026-10-20): by the kind of
+ *  structure, both sides alike -- the side goes in the laterality modifier. */
+function withFreesurferCodes(st: Record<string, NamedStructure>): Record<string, NamedStructure> {
+  const codes = (freesurferCodes as { codes: Record<string, { code: string; meaning: string }> }).codes;
+  return Object.fromEntries(Object.entries(st).map(([k, v]) => {
+    const c = codes[(v as { type?: string }).type ?? ""];
+    return [k, c ? { ...v, code: c.code, codeMeaning: c.meaning } as NamedStructure : v];
+  }));
+}
 
 /**
  * FreeSurfer label VALUE -> its key, because a name is not always there to look up.
@@ -209,10 +220,13 @@ export function lookupStructure(label: string | undefined | null, context?: stri
 export function codesFor(label: string | undefined | null, context?: string): { code?: string; type?: string; mod?: string; category?: string } {
   const st = lookupStructure(label, context);
   if (!st) return {};
-  const c = st as NamedStructure & { type?: string; mod?: string; category?: string };
+  const c = st as NamedStructure & { type?: string; mod?: string; category?: string; codeMeaning?: string };
+  // The code's own meaning where the table gives one (FreeSurfer's structures: "Structure of superior frontal gyrus" for
+  // 36181007), else the type's.
+  const meaning = c.code ? c.codeMeaning ?? c.type : c.type;
   return {
     ...(c.code ? { code: c.code } : {}),
-    ...(c.type ? { type: c.type } : {}),
+    ...(meaning ? { type: meaning } : {}),
     ...(c.mod ? { mod: c.mod } : {}),
     ...(c.category ? { category: c.category } : {}),
   };
@@ -237,6 +251,26 @@ const FREESURFER_NUMBERING = new Set(["fastsurfer", "freesurfer"]);
  *  the colon -- so every task a package publishes is covered. */
 export function usesFreesurferNumbering(task: string): boolean {
   return FREESURFER_NUMBERING.has(ecosystemOf(task));
+}
+
+/**
+ * WHICH TABLES CODED A SEGMENTATION'S STRUCTURES, for its SEG to name (critic 2026-10-20, finding 3: a FastSurfer result
+ * named the harmonized and MOOSE tables, which code nothing of it). A FreeSurfer-numbered task is coded from
+ * freesurfer-codes.json, named by how many rows were reviewed and a digest of them -- so two SEGs coded before and after
+ * a review differ in their files; anything else (a hand-drawn segmentation included) from the general tables. A merge
+ * ("ts:total + fastsurfer:asegdkt") names every table any of its tasks used.
+ */
+export function codeTablesFor(task: string | undefined): string[] {
+  const tasks = (task ?? "").split(/\s*\+\s*/).filter((t) => t.includes(":"));
+  const fs = tasks.some(usesFreesurferNumbering), other = !tasks.length || tasks.some((t) => !usesFreesurferNumbering(t));
+  return [...(fs ? [freesurferCodesVersion()] : []), ...(other ? mappingVersions() : [])];
+}
+/** "freesurfer-codes 10 reviewed 1a2b3c4d": the reviewed rows' count and an FNV-1a digest of the table as built. */
+export function freesurferCodesVersion(): string {
+  const codes = (freesurferCodes as { codes: Record<string, unknown> }).codes;
+  let h = 0x811c9dc5;
+  for (const ch of new TextEncoder().encode(JSON.stringify(codes))) h = Math.imul(h ^ ch, 0x01000193) >>> 0;
+  return `freesurfer-codes ${Object.keys(codes).length} reviewed ${h.toString(16).padStart(8, "0")}`;
 }
 
 /**

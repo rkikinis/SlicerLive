@@ -3,9 +3,10 @@
 // the slice/3D views in the layout area are SlicerLive's own WebGPU views kept in sync over the
 // mrson channel + LiveSync (WS A). Query params: ?host=, ?gui=ws://..., ?ws=ws://..., ?http=...,
 // ?nativeMenus=1 (host provides menus; hide the streamed menubar).
+import { sizeClass, startWork } from "../working.ts";
 import { initSceneControl, keyLabel, markSceneClean, SHORTCUTS, sceneControl, sceneDirty, sceneIdentityChanged } from "./scene-control.ts";
 import { openFloatingWindow } from "./floating-window.ts";
-import { setPaletteVersion } from "../../logic/anatomy/palettes.ts";
+import { schemeAtStart, setPaletteVersion } from "../../logic/anatomy/palettes.ts";
 import { setShadingVersion, shadingVersion } from "../shading-versions.ts";
 import { initDevice } from "../device.ts";
 import { type AuditResult, auditWords } from "./audit-words.ts";
@@ -28,38 +29,37 @@ import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
 import { registerCropPanel } from "./crop-panel.ts";
 import { registerSegEditorPanel } from "./seg-editor-panel.ts";
-import { registerSurfaceModelsPanel } from "./surface-models-panel.ts";
 import { registerTransformsPanel } from "./transforms-panel.ts";
 import { registerSequencesPanel } from "./sequences-panel.ts";
+import { mountJobsLine } from "./jobs-line.ts";
 import { mountSequenceToolbar } from "./sequence-toolbar.ts";
 import { SequencePlayer } from "../../logic/playback.ts";
 import { currentFrames } from "../../logic/sequences.ts";
-import { renderSavePane } from "./save-panel.ts";
+import { EVERYTHING_3D, renderSavePane } from "./save-panel.ts";
 import { registerAiSegPanel } from "./ai-seg-panel.ts";
 import { registerQueuedModules } from "./extension-modules.ts";
 import { registerSegmentationsPanel } from "./segmentations-panel.ts";
 import { exportVolume, exportSegmentation, type ExportFormat } from "../../logic/export.ts";
 import { worldMatrix, hardenImageIjkToRAS, hardenPoints, withTranslation, IDENTITY4 } from "../../logic/transforms.ts";
-import { createSegmentation, addSegment, applyEffect, computeStats, paintStroke, commitPaint, markEdited } from "../../logic/segmentation-editor.ts";
+import { createSegmentation, addSegment, applyEffect, computeStats, paintStroke, commitPaint, drawFill, markEdited } from "../../logic/segmentation-editor.ts";
 import { LocalBlobStore, loadVolumeIntoScene, setIngestTimers } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
-import { CATEGORIES, type RunProvenance, segmentationToDicomSeg } from "../../logic/export-dicom-seg.ts";
-import { surfacesToDicomSurface } from "../../logic/export-dicom-surface.ts";
-import { meshesFromStoredSeries } from "../../logic/readers/dicom-surface.ts";
-import { dicomIO } from "../../logic/dicom-io.ts";
-import type { LabelMesh } from "../../algorithms/surface-nets.ts";
+import { type RunProvenance, segmentationToDicomSeg } from "../../logic/export-dicom-seg.ts";
+import { sceneSurfaceFile, surfaceFile, type ExportSegment } from "../surface-export.ts";
+import { plainFileStem } from "../../logic/writers/surface-files.ts";
 import { type ExportSubject, toStoredPixels, volumeToDicomSeries } from "../../logic/export-dicom-image.ts";
 import { looksLikeHounsfield } from "../window-level-preset.ts";
 import type { MrsonNode } from "../mrson.ts";
 import { codesFor } from "../../logic/segment-naming.ts";
 import { recallExportDir, rememberExportDir } from "../../logic/export-dir.ts";
 import type { LiveScene as LiveSceneT } from "../livescene.ts";
-import { setLoadTimers, setStoredSurfaceLoader, setSurfaceProgressReporter } from "../livescene.ts";
+import { setLoadTimers } from "../livescene.ts";
 import { fetchZarrVolumeNative } from "../zarr.ts";
 import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
 import type { SegmentCodes } from "../../logic/readers/dicom-seg.ts";
 import { openSettingsDialog, pictureDefaults, SETTING_DEFAULTS } from "./settings-dialog.ts";
 import { writeScene } from "../../logic/scene/write.ts";
+import { collectExtensionState, restoreExtensionState } from "../../logic/scene/extensions.ts";
 import { applySceneState } from "./scene-restore.ts";
 import { BUILD_ID } from "../build-id.ts";
 import { noteMs, span, spanSync } from "./load-profile.ts";
@@ -347,7 +347,7 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
     if (max > 255) throw new Error(`this segmentation uses label values up to ${max}; a DICOM SEG from this application holds at most 255 structures`);
   }
   const labels = zv.data instanceof Uint8Array ? zv.data : Uint8Array.from(zv.data as ArrayLike<number>);
-  const segments = ((seg.segments as { labelValue: number; name?: string; color?: number[]; fileCodes?: SegmentCodes }[] | undefined) ?? [])
+  const segments = ((seg.segments as { labelValue: number; name?: string; structure?: string; color?: number[]; fileCodes?: SegmentCodes }[] | undefined) ?? [])
     .map((sg) => ({
       labelValue: sg.labelValue,
       name: sg.name ?? `Segment ${sg.labelValue}`,
@@ -360,7 +360,9 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
       // 2026-09-20) rather than the writer's generic "Anatomical structure": nothing is invented,
       // and nothing the file carried is lost on a round trip (the 09-17 critic's finding 2, the
       // way Mike asked for it on 09-19/20).
-      ...codesFromCatalogueOrFile(sg.name, seg.terminology as string | undefined, sg.fileCodes),
+      // BY THE STRUCTURE'S KEY when the segment has one (a FastSurfer result's third ventricle is not TotalSegmentator's,
+      // whatever the two are called; critic 2026-10-20, finding 6), else by its name.
+      ...codesFromCatalogueOrFile(sg.structure ?? sg.name, seg.terminology as string | undefined, sg.fileCodes),
     }));
   const out = await segmentationToDicomSeg(labels, zv.dims as [number, number, number], segments, instances, {
     seriesDescription: (seg.name as string) ?? "Segmentation",
@@ -371,12 +373,15 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
     // A frame of a sequence: its own images out of a series that holds every frame.
     instanceNumbers: (src.origin as { instanceNumbers?: number[] } | undefined)?.instanceNumbers,
     sopInstanceUIDs: (src.origin as { sopInstanceUIDs?: string[] } | undefined)?.sopInstanceUIDs,
+    // From a multi-frame file: which frame of it each slice is.
+    frameNumbers: (src.origin as { frameNumbers?: number[] } | undefined)?.frameNumbers,
     onProgress: (p) => onStatus(
       p.total ? `DICOM SEG — ${p.phase} (${p.done}/${p.total})` : `DICOM SEG — ${p.phase}…`,
     ),
   });
   const saved = await saveDicomArtefactAndForget(
     { bytes: out.bytes, filename: out.filename, index: out.index, kind: "DICOM SEG",
+      intoDb: decodeURIComponent(/\/_db\/([^/]+)\//.exec((src.origin as { fromDatabase?: string } | undefined)?.fromDatabase ?? "")?.[1] ?? "") || undefined,
       what: `${out.segments} segments, ${out.frames} frames${out.unlistedVoxels ? ` — NOTE: ${out.unlistedVoxels.toLocaleString()} voxels carry a label no structure is named for and are not in the file` : ""}`, subdir: "SlicerAlbula-SEG" },
     onStatus,
   );
@@ -417,300 +422,75 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
 }
 
 
-/**
- * The series a segmentation's stored surfaces hang off: the SEG's own, or the images' if the SEG is
- * not in the database itself.
- *
- * ONE FUNCTION BECAUSE THE SAVE AND THE LOAD MUST AGREE, and they did not. The save wrote
- * `org.seriesInstanceUID ?? imageSeries` and the load asked for
- * `org.seriesInstanceUID ?? org.savedSeriesInstanceUID`. Those look interchangeable and are not: a
- * segmentation LOADED from DICOM has `seriesInstanceUID`, while one produced here and then saved has
- * `savedSeriesInstanceUID` -- "saved as", not "loaded from". So for the ordinary path, segment a
- * study and save it, the save parented the surfaces to the IMAGES and the load looked under the SEG,
- * and nothing was ever found. Silently: an empty answer means "extract", which is what it does
- * anyway, so the round trip would have looked like it simply did not work.
- */
-function surfaceParentSeries(live: LiveSceneT, segId: string): string | undefined {
-  const seg = live.nodes.get(segId);
-  if (!seg) return undefined;
-  // THE SEG JUST WRITTEN WINS over the one this was loaded from. A segmentation loaded from the
-  // database and saved again has both: `seriesInstanceUID` (loaded from) and, a moment later,
-  // `savedSeriesInstanceUID` (written). The surfaces saved with it belong to the new SEG -- with
-  // the old one first, Ron's re-save on 2026-09-17 nested its new surfaces under the 09-10 SEG
-  // in the browser, and the new SEG, loaded later, found no surfaces and extracted again in
-  // silence (second critic, finding 3).
-  const org = seg.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
-  if (org?.savedSeriesInstanceUID || org?.seriesInstanceUID) return org.savedSeriesInstanceUID ?? org.seriesInstanceUID;
-  const src = live.nodes.get(((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0] ?? "");
-  const srcOrg = src?.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
-  return srcOrg?.savedSeriesInstanceUID ?? srcOrg?.seriesInstanceUID;
-}
+// (surfaceParentSeries, where stored surfaces hung under their SEG, went with the DICOM surfaces save, 2026-10-22.)
+
+// THE READ-BACK OF STORED SURFACES FOR DRAWING (loadStoredSurfaces) IS GONE with the drawing of surface models (Ron,
+// 2026-10-21, option B). The reader stays, for DICOM parity: logic/readers/dicom-surface.ts.
+
+// THE DICOM SURFACES SAVE IS GONE TOO (Ron, 2026-10-22: "For now only segmentations go into the db. stl are exports
+// only"): surface models leave Albula as STL or OBJ files only. The writer and the reader stay in logic/ (DICOM parity),
+// with their tests; no app path calls them.
 
 /**
- * Read a segmentation's surfaces back out of the DICOM database, if they were saved there.
+ * SAVE A SEGMENTATION TO THE DICOM DATABASE: the SEG, and nothing else.
  *
- * The other half of `exportSurfacesAsDicom`, and the point of the pair. Ron: "Is there a meaningful
- * way to round trip the surfaces through the dicom data base, so I don't need to recreate everytime
- * I am starting a new version." A writer without a reader saves nothing.
+ * ONE FUNCTION BECAUSE THERE ARE SEVERAL SAVE BUTTONS: the Save panel (`__exportNode`), the dialog the AI module
+ * raises after a run (`__exportSegAsDicom`) and the Segment Editor's save all come here.
  *
- * The renderer calls this when a segmentation given surface models (Generate Surface Models) first needs
- * them, before it starts extracting.
- * Returning null means "extract" and is the ordinary answer for a segmentation nobody has saved
- * surfaces for; it is not an error and does not say anything on screen.
- *
- * MATCHED BY NAME, on purpose. What comes back has surface numbers, which are sequence positions,
- * and no label values -- Surface Number and Segment Number must run contiguously from 1 and a label
- * value does neither. `surfacesToMeshes` joins them to this segmentation's segments by name and
- * DROPS a surface that matches nothing, because a mesh drawn under the wrong label takes that
- * label's color and that label's visibility, which is a wrong answer that looks like a right one.
- *
- * That also makes this safe across a re-run: segment the same study again and the labelmap can
- * renumber, but the names are the same, so stored surfaces still land on the right segments. If the
- * SEGMENTATION itself changed -- different structures, a different network -- the names that no
- * longer exist drop out and the rest still match, which is the behavior worth having.
+ * It wrote the segmentation's surfaces as well, once (Ron, 2026-09-17: "By default, the user should just say save
+ * segmentation and that should save everything"), and from 2026-09-24 only for a segmentation given surface models,
+ * waiting up to 90 s for them to be built. Since 2026-10-21 (Ron, option B) surface models are an export of their
+ * own, made on demand as STL or OBJ files in Save › Files (and since 2026-10-22 never into the database): the SEG save
+ * waits for nothing.
  */
-async function loadStoredSurfaces(live: LiveSceneT, segId: string): Promise<LabelMesh[] | null> {
-  const seg = live.nodes.get(segId);
-  if (!seg) return null;
-  // Only something that IS in the database can have surfaces stored against it: the link is a
-  // provenance edge, and a scene-only segmentation on a scene-only volume has no series to parent to.
-  const parent = surfaceParentSeries(live, segId);
-  if (!parent) return null;
-
-  const g = globalThis as unknown as {
-    __dicomDerivedSeries?: (parentSeriesUID: string, kind: string) => Promise<ArrayBuffer[] | null>;
-  };
-  // TIMED IN PHASES into the session log: Ron's whole-body surfaces took 5 s to appear (fetch 1.6,
-  // parse 4.5, then 6.5 s of drawing copies in a worker; 2026-09-18 21:20). The cache that answered
-  // that is gone (Ron, 2026-09-24): surfaces now come only from Generate Surface Models.
-  const tFetch = performance.now();
-  const files = await g.__dicomDerivedSeries?.(parent, "surface") ?? null;
-  const sourceBytes = files?.reduce((n, b) => n + b.byteLength, 0) ?? 0;
-  if (!files?.length) return null;
-
-  // The SHARED library, not a fresh import: logic/dicom-io.ts owns which dcmjs this build uses and how
-  // it is loaded, and a second copy pinned to a different version is how a reader and a writer stop
-  // agreeing about a VR.
-  const dcm = await dicomIO();
-  const segments = ((seg.segments as { labelValue: number; name?: string }[] | undefined) ?? [])
-    .map((sg) => ({ labelValue: sg.labelValue, name: sg.name }));
-  const tParse = performance.now();
-  const datasets = files.map((bytes) => dcm.naturalize(dcm.readFile(bytes).dict));
-  const tMesh = performance.now();
-  // Everything that decides WHETHER these are the right surfaces lives in the reader, where it is
-  // testable without a database. This function's job is the plumbing around it.
-  const meshes = meshesFromStoredSeries(datasets, segments, parent);
-  const tEnd = performance.now();
-  const mb = sourceBytes / 1048576;
-  void fetch("/_log", { method: "POST", body: `stored surfaces: fetch ${((tParse - tFetch) / 1000).toFixed(2)}s (${mb.toFixed(0)} MB) · parse ${((tMesh - tParse) / 1000).toFixed(2)}s · meshes ${((tEnd - tMesh) / 1000).toFixed(2)}s`, keepalive: true }).catch(() => {});
-  return meshes.length ? meshes : null;
-}
-
-/**
- * Save a segmentation's extracted SURFACES as DICOM Surface Segmentation (66.5).
- *
- * Ron: "Is this a once per data set? If yes can it be saved in dicom format as a child?" It is once
- * per dataset, and this is the child: the surfaces name the SEG they came from, so a reader can tell
- * when the segmentation has been re-run underneath them.
- *
- * THE SURFACES MUST ALREADY EXIST. They are built for a segmentation given surface models, and extraction
- * is 2.5 s on a brain and 17 s on a whole-body CT -- so this saves what is on screen rather than
- * quietly doing that work again inside a save. If they are not there, it says so instead.
- */
-async function exportSurfacesAsDicom(live: LiveSceneT, segId: string, onStatus: (m: string) => void = () => {}): Promise<{ filename: string; size: number; note?: string }> {
-  const seg = live.nodes.get(segId);
-  if (!seg) throw new Error("no such segmentation");
-  const g = globalThis as unknown as {
-    __segmentationSurfaces?: (id: string) => { label: number; positions: Float32Array; normals: Float32Array; indices: Uint32Array }[] | null;
-    __dicomSourceInstances?: (uid: string) => Promise<ArrayBuffer[] | null>;
-  };
-  const surfaces = g.__segmentationSurfaces?.(segId) ?? null;
-  if (!surfaces?.length) {
-    throw new Error(
-      `"${seg.name}" has no surface models — make them in Generate Surface Models first`,
-    );
-  }
-  // The SEG this was derived from, and the images it sits in. Both are needed: the first is the
-  // provenance, the second the frame of reference.
-  const org = seg.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string; sopInstanceUID?: string; savedSopInstanceUID?: string; sopClassUID?: string; savedSopClassUID?: string } | undefined;
-  const src = live.nodes.get(((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0] ?? "");
-  const srcOrg = src?.origin as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string } | undefined;
-  const imageSeries = srcOrg?.seriesInstanceUID ?? srcOrg?.savedSeriesInstanceUID;
-  if (!imageSeries) {
-    throw new Error(
-      `the volume "${src?.name ?? "?"}" is not in the DICOM database, so there is no frame of ` +
-      `reference for a surface to sit in — put it in the database first`,
-    );
-  }
-  const instances = await g.__dicomSourceInstances?.(imageSeries) ?? null;
-  if (!instances?.length) throw new Error("the series this came from could not be read from the DICOM database");
-
-  // THE SAME CODES THE SEG CARRIES. The surfaces are the segmentation's structures in another
-  // form, and they were leaving without their SNOMED identity -- every one coded as the generic
-  // type -- while the SEG beside them said "Kidney, Right". Same lookup, same terminology context.
-  const segments = ((seg.segments as { labelValue: number; name?: string; color?: number[] }[] | undefined) ?? [])
-    .map((sg) => {
-      const c = codesFor(sg.name, seg.terminology as string | undefined);
-      const parsed = /^([A-Za-z0-9_.-]+):(.+)$/.exec(c.code ?? "");
-      const cat = CATEGORIES[c.category ?? "Anatomical Structure"] ?? CATEGORIES["Anatomical Structure"];
-      return {
-        labelValue: sg.labelValue,
-        name: sg.name ?? `Segment ${sg.labelValue}`,
-        color: sg.color ? [sg.color[0], sg.color[1], sg.color[2]] as [number, number, number] : undefined,
-        algorithmName: (seg.origin as { task?: string } | undefined)?.task,
-        categoryCode: { code: cat.CodeValue, scheme: "SCT", meaning: cat.CodeMeaning },
-        ...(parsed ? { typeCode: { code: parsed[2], scheme: parsed[1], meaning: c.type ?? sg.name ?? "" } } : {}),
-      };
-    });
-  onStatus("DICOM surfaces — encoding…");
-  const out = await surfacesToDicomSurface(surfaces, segments, instances, {
-    seriesDescription: `surfaces of ${(seg.name as string) ?? "segmentation"}`,
-    algorithmName: (seg.origin as { task?: string } | undefined)?.task,
-    // Only when the SEG itself came from DICOM. A scene-only segmentation has no instance to name,
-    // and inventing one would be a false claim about where this came from.
-    // SAVED-AS COUNTS TOO. This asked only for `sopInstanceUID`/`seriesInstanceUID`, which a
-    // segmentation has when it was LOADED from DICOM -- and one produced here and then saved has the
-    // `saved*` pair instead. So on the ordinary path, segment a study and save both, the surfaces
-    // named no SEG at all and the reader had nothing to check the provenance edge against.
-    // A SERIES AND AN INSTANCE THAT BELONG TOGETHER: the saved pair when there is one, else the
-    // loaded pair -- never one of each. A loaded SEG records its series and not its instance, so
-    // mixing "loaded series" with "saved instance" named a file that does not exist (second
-    // critic, finding 3).
-    ...(org?.savedSopInstanceUID && org?.savedSeriesInstanceUID
-      // The SEG's OWN class: the label map (…66.7) since 2026-09-18, the binary form before; a
-      // surfaces file naming the wrong one was the 09-18 critic's finding 1.
-      ? { derivedFrom: { sopClassUID: org.savedSopClassUID ?? "1.2.840.10008.5.1.4.1.1.66.4", sopInstanceUID: org.savedSopInstanceUID, seriesInstanceUID: org.savedSeriesInstanceUID } }
-      : org?.sopInstanceUID && org?.seriesInstanceUID
-      ? { derivedFrom: { sopClassUID: org.sopClassUID ?? "1.2.840.10008.5.1.4.1.1.66.4", sopInstanceUID: org.sopInstanceUID, seriesInstanceUID: org.seriesInstanceUID } }
-      : {}),
-    onProgress: (p) => onStatus(p.total ? `DICOM surfaces — ${p.phase} (${p.done ?? 0}/${p.total})` : `DICOM surfaces — ${p.phase}…`),
-  });
-  const name = (seg.name as string) ?? "segmentation";
-  const saved = await saveDicomArtefactAndForget(
-    {
-      bytes: out.bytes,
-      filename: `surfaces-${out.sopInstanceUID}.dcm`,
-      index: {
-        sopInstanceUID: out.sopInstanceUID, seriesInstanceUID: out.seriesInstanceUID,
-        // THE REAL STUDY, not "". indexInstances validates every uid it is given and refuses a
-        // non-uid outright, so the empty strings that were here made the database route throw on
-        // EVERY surface save. The fallback then wrote a bare file and reported that as a save, so
-        // surfaces were written and never indexed: Ron, after doing exactly this, "No surface mesh
-        // listed in the dicom db, none loaded." The object always carried the right values -- they
-        // come from the source images and a test asserts it -- they were simply not passed on.
-        studyInstanceUID: out.studyInstanceUID, modality: "SEG", seriesNumber: 1000,
-        seriesDescription: `surfaces of ${name}`, frameOfReferenceUID: out.frameOfReferenceUID,
-        seriesDate: out.seriesDate, seriesTime: out.seriesTime,
-        displayedSize: `${out.triangles} tri`, numberOfFrames: 0,
-        // The SAME expression the loader uses, via the same function. See surfaceParentSeries.
-        derivedFrom: { parentSeriesUID: surfaceParentSeries(live, segId) ?? imageSeries, kind: "surface", label: `surfaces of ${name}` },
-      },
-      kind: "DICOM surfaces",
-      what: `${out.surfaces} surfaces, ${out.triangles.toLocaleString()} triangles`,
-      subdir: "SlicerAlbula-SEG",
-    },
-    onStatus,
-  );
-  return saved;
-}
-
-/**
- * SAVE A SEGMENTATION, WHICH MEANS ITS SURFACES TOO.
- *
- * Ron: "By default, the user should just say save segmentation and that should save everything." The
- * surfaces are not a second artifact to remember; they are the same segmentation in the form the 3D
- * view needs, and the round trip only pays off if they are in the database to be found later.
- *
- * ONE FUNCTION BECAUSE THERE ARE TWO SAVE BUTTONS. The Save panel goes through `__exportNode`, and
- * the dialog the AI module raises after a run goes through `__exportSegAsDicom` -- and only the first
- * one had been taught to write the surfaces. So the button people actually use, the one that appears
- * by itself the moment a run finishes, wrote the SEG alone; the surfaces were then missing on the
- * next load and extracted again, which is exactly what the round trip is for. Ron saw the symptom
- * ("it offers to save, but the surface net has not yet been generated") before either of us saw this.
- *
- * ORDER IS NOT INCIDENTAL: the SEG save is what tells the scene the segmentation now has a series of
- * its own, and the surfaces hang off that series. Written the other way round they parent to the
- * images and the load can never find them.
- *
- * A failed surface save does not fail the save. The segmentation is in the database, which is what
- * was asked for, and its surfaces rebuild from it in seconds.
- */
+// ON THE 3D VIEW while it saves (render/working.ts; Ron, 2026-10-17: "tell the user that you are working"): which
+// segmentation, and the usual time of a save on this Mac once measured.
 async function saveSegmentation(
   live: LiveSceneT,
   id: string,
   status: (m: string) => void,
 ): Promise<{ filename: string; size: number; note?: string }> {
-  // THE SURFACES ARE ASKED FOR HERE, so every save gets them however the 3D view happens to be set.
-  //
-  // They used to exist only as a side effect of drawing the segmentation, and a source volume that
-  // colorizes it suppresses exactly that -- which is what a fresh run leaves behind. So a run's own
-  // save found nothing to write and the round trip never had anything to find. Extraction is 2.8 s
-  // on this study and about 15 s on a whole-body CT, both well inside the wait below.
-  const g = globalThis as unknown as {
-    __ensureSurfaces?: (i: string) => boolean;
-    __segmentationSurfaces?: (i: string) => unknown[] | null;
-  };
-  const have = () => (g.__segmentationSurfaces?.(id)?.length ?? 0) > 0;
-  // TIMED, stage by stage, into the status line and so the session log: Ron, 2026-09-17, "it's
-  // more the speed of loading, viewing and saving" -- and no save had ever been timed.
+  // Timed per size of segmentation: a whole-body one and a vessel tree are not the same work (critic 2026-10-17, finding 6).
+  const dims = (live.nodes.get(id)?.dims as number[] | undefined) ?? [];
+  const work = startWork({ title: `Saving ${String(live.nodes.get(id)?.name ?? "the segmentation")} to the DICOM database`, timeKey: `save:segmentation:${sizeClass(dims.reduce((a, b) => a * b, 1))}` });
+  let ok = false;
+  try { const r = await saveSegmentation0(live, id, status); ok = !/NOT (saved|indexed)/.test(r.note ?? ""); return r; }
+  finally { work.done(ok); }
+}
+async function saveSegmentation0(
+  live: LiveSceneT,
+  id: string,
+  status: (m: string) => void,
+): Promise<{ filename: string; size: number; note?: string }> {
+  // TIMED into the status line and so the session log: Ron, 2026-09-17, "it's more the speed of loading, viewing and
+  // saving" -- and no save had ever been timed.
   const t0 = performance.now();
-  let tSurfacesBuilt = t0;
-  // SURFACES ONLY FOR A SEGMENTATION GIVEN SURFACE MODELS (Generate Surface Models; Ron, 2026-09-24: "SEG
-  // only", surface models behind a firewall). Otherwise the SEG alone, and no waiting for a build.
-  if (live.nodes.get(id)?.surfaceModels !== true) {
-    const seg = await exportSegAsDicom(live, id, status);
-    if (seg.indexed === false || /NOT (saved|indexed)/.test(seg.note ?? "")) status(`not saved — ${seg.note ?? "the segmentation was refused"}`);
-    else status(`saved in ${((performance.now() - t0) / 1000).toFixed(1)}s — the segmentation (${(seg.size / 1048576).toFixed(0)} MB)`);
-    return seg;
-  }
-  // THE WAIT ENDS WHEN THERE IS NOTHING TO WAIT FOR: surfaces held (even none, for a segmentation with no
-  // labeled structures) or the build failed. It waited out the whole 90 s for both (critic, 2026-09-24,
-  // round 2, finding 3).
-  const settled = () => {
-    const st = (globalThis as unknown as { __surfaceState?: (i: string) => { building: boolean; held: boolean; failed?: string } | null }).__surfaceState?.(id);
-    return have() || (!!st && !st.building && (st.held || !!st.failed));
-  };
-  if (!have()) {
-    g.__ensureSurfaces?.(id);
-    const budget = Date.now() + 90_000;
-    while (!settled() && Date.now() < budget) {
-      status("saving — building the 3D surfaces first…");
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    tSurfacesBuilt = performance.now();
-  }
   const seg = await exportSegAsDicom(live, id, status);
-  const tSeg = performance.now();
-  const secs = (a: number, b: number) => ((b - a) / 1000).toFixed(1) + "s";
-  const mb = (n: number) => (n / 1048576).toFixed(0) + " MB";
-  // NO SURFACES WITHOUT THEIR SEGMENTATION IN THE INDEX. A SEG the index refused (taken back by the
-  // server) must not be followed by a surfaces series parented to the CT with no SEG to own it --
-  // the shape of the 09-10 round-trip bug, and a message that said "not saved" and "saved" in one
-  // breath (critic, 2026-09-18 evening, finding 2). Only the native route reports `indexed`; the
-  // browser download paths never index, and there the surfaces still go where the SEG went.
-  // "NOT indexed" IS THE SAME REFUSAL AS "NOT saved", and the test read only the second word, so a
-  // SEG written-but-not-indexed by the second index path let its surfaces through (critic
-  // 2026-09-22, 1.7). The two sentences are written at two places and must both be caught here.
-  if (seg.indexed === false || /NOT (saved|indexed)/.test(seg.note ?? "")) {
-    status(`not saved — ${seg.note ?? "the segmentation was refused"}`);
-    return { ...seg, note: `${seg.note ?? "the segmentation was refused"} · its surfaces were not written` };
-  }
-  const hasSurfaces = have();
-  if (!hasSurfaces) {
-    status(`saved in ${secs(t0, tSeg)} — segmentation ${mb(seg.size)} ${secs(tSurfacesBuilt, tSeg)}${tSurfacesBuilt > t0 ? ` · surfaces build ${secs(t0, tSurfacesBuilt)}` : ""} · no 3D surfaces`);
-    return { ...seg, note: `${seg.note ?? ""} · no 3D surfaces — the segmentation is saved without them`.trim() };
-  }
-  try {
-    const surf = await exportSurfacesAsDicom(live, id, status);
-    const tSurf = performance.now();
-    // The caller writes its own line over this one, so the measurement Ron asks for has to travel
-    // in the note as well, not only in the status line and the session log (critic 1.9).
-    const took = secs(t0, tSurf);
-    status(`saved in ${secs(t0, tSurf)} — ${tSurfacesBuilt > t0 ? `surfaces build ${secs(t0, tSurfacesBuilt)} · ` : ""}segmentation ${mb(seg.size)} ${secs(tSurfacesBuilt, tSeg)} · surfaces ${mb(surf.size)} ${secs(tSeg, tSurf)}`);
-    return { ...seg, note: `${seg.note ?? ""}, with its 3D surfaces — ${took} in all`.trim() };
-  } catch (e) {
-    return { ...seg, note: `${seg.note ?? ""} · the segmentation is saved; its surfaces are NOT: ${(e as Error).message}`.trim() };
-  }
+  // "NOT indexed" IS THE SAME REFUSAL AS "NOT saved" (critic 2026-09-22, 1.7): both sentences are caught.
+  if (seg.indexed === false || /NOT (saved|indexed)/.test(seg.note ?? "")) status(`not saved — ${seg.note ?? "the segmentation was refused"}`);
+  else status(`saved in ${((performance.now() - t0) / 1000).toFixed(1)}s — the segmentation (${(seg.size / 1048576).toFixed(0)} MB)`);
+  return seg;
+}
+
+/**
+ * A FILE AT THE TOP OF DOWNLOADS (critic 2026-10-21, surfaces export, finding 3): the app's window has no working blob
+ * download (dicom-architecture.md, step 2), so Save › Files handed the bytes to a download that went nowhere and said
+ * "Saved ✓". The app's server writes them where pictures go (desktop/pictures.ts, streamed); a browser with no such
+ * route (the headless server) gets the ordinary download. A refusal throws: nothing is said to be saved that was not.
+ */
+async function toDownloads(filename: string, parts: readonly Uint8Array[], mime: string): Promise<{ name: string; path?: string }> {
+  const ext = /\.(surfaces\.stl|surfaces\.obj|stl|obj|seg\.nrrd|nrrd|nii\.gz|nii|png|csv)$/i.exec(filename)?.[0] ?? "";
+  const name = `${plainFileStem(filename.slice(0, filename.length - ext.length))}${ext.toLowerCase()}`;
+  const body = new Blob(parts as BlobPart[], { type: mime });
+  const r = await fetch(`/_picture/${encodeURIComponent(name)}`, { method: "POST", body }).catch(() => null);
+  // The name written: "<name> 2" when one of that name was there already (desktop/pictures.ts).
+  if (r?.ok) { const path = ((await r.json().catch(() => ({}))) as { path?: string }).path; return { name: path?.split("/").pop() ?? name, path }; }
+  if (r && r.status !== 404 && r.status !== 405) throw new Error(`${name} was not saved: ${((await r.json().catch(() => ({}))) as { error?: string }).error ?? `the server said ${r.status}`}`);
+  // No such route here: the browser's own download.
+  if (typeof document === "undefined") throw new Error(`${name} could not be saved: this window has no way to write a file`);
+  const url = URL.createObjectURL(body); const a = document.createElement("a"); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  return { name };
 }
 
 /**
@@ -728,7 +508,7 @@ class NativeSaveRefused extends Error {}
  *  a lookup that raced the write would otherwise have refilled it with the table as it was before
  *  (critic, 2026-09-22, finding 6). */
 async function saveDicomArtefactAndForget(
-  art: { bytes: Uint8Array; filename: string; index: unknown; kind: string; what: string; subdir: string },
+  art: { bytes: Uint8Array; filename: string; index: unknown; kind: string; what: string; subdir: string; /** the database id to write into (the source's own), when it is registered */ intoDb?: string },
   onStatus: (m: string) => void,
 ): Promise<{ filename: string; size: number; note?: string; indexed?: boolean; dbId?: string }> {
   try {
@@ -739,7 +519,7 @@ async function saveDicomArtefactAndForget(
 }
 
 async function saveDicomArtefact(
-  art: { bytes: Uint8Array; filename: string; index: unknown; kind: string; what: string; subdir: string },
+  art: { bytes: Uint8Array; filename: string; index: unknown; kind: string; what: string; subdir: string; /** the database id to write into (the source's own), when it is registered */ intoDb?: string },
   onStatus: (m: string) => void,
   // `indexed` is reported as a FIELD and not left to be read out of `note`. Callers act on it -- a
   // SEG that reached the index has a series of its own and the scene has to be told -- and parsing
@@ -762,7 +542,10 @@ async function saveDicomArtefact(
   // which is both the no-click path and the one place Slicer will be pointed at anyway.
   try {
     const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null);
-    const cur = (dbs?.databases ?? []).find((d: { current?: boolean; exists?: boolean }) => d.current && d.exists) ??
+    // BESIDE ITS SOURCE (critic 2026-10-15, render-audit-fixes finding 2): a segmentation drawn on a scan from one database is
+    // written into that database even when the window shows another, so the SEG and the images it references stay together.
+    const cur = (art.intoDb ? (dbs?.databases ?? []).find((d: { id?: string; exists?: boolean }) => d.id === art.intoDb && d.exists) : undefined) ??
+      (dbs?.databases ?? []).find((d: { current?: boolean; exists?: boolean }) => d.current && d.exists) ??
       (dbs?.databases ?? []).find((d: { exists?: boolean }) => d.exists);
     if (cur) {
       // THE INDEX RECORD TRAVELS WITH THE BYTES (server feature "write-index"), so the server writes
@@ -901,14 +684,16 @@ function codesFromCatalogueOrFile(name: string | undefined, context: string | un
 async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available"); return; }
   await appSettings.catch(() => null);           // the store is small; the defaults below read it
-  // Settings › Surfaces › "Build surfaces on the graphics card": read once, published where the
-  // extraction can see it (render/livescene.ts). The dialog sets the same global when it changes.
-  (globalThis as unknown as { __gpuSurfaces?: boolean }).__gpuSurfaces =
-    appSettingsNow?.getBool("Surfaces", "onGpu", SETTING_DEFAULTS.Surfaces.onGpu) ?? false;
   // Settings › For developers: the step-by-step controls (theme.css, .sl-dev-step).
   document.documentElement.classList.toggle("sl-dev", appSettingsNow?.getBool("Developer", "steps", SETTING_DEFAULTS.Developer.steps) ?? false);
   // Settings › General › Colors: the color scheme version new colors come from (logic/anatomy/palettes.ts).
-  setPaletteVersion(appSettingsNow?.getNumber("Colors", "scheme", SETTING_DEFAULTS.Colors.scheme) ?? SETTING_DEFAULTS.Colors.scheme);
+  {
+    const saved = appSettingsNow?.getNumber("Colors", "scheme", SETTING_DEFAULTS.Colors.scheme) ?? SETTING_DEFAULTS.Colors.scheme;
+    const at = schemeAtStart(saved);
+    if (at.moved) { appSettingsNow?.set("Colors", "scheme", at.version); status(`Colors: version ${saved} was for a picture; back to version ${at.version}`); }
+    else if (at.unknown) status(`Colors: version ${saved} is not one this Albula knows; it shows version ${at.version} and keeps your setting`);
+    setPaletteVersion(at.version);
+  }
   setShadingVersion(appSettingsNow?.getNumber("View3D", "shading", SETTING_DEFAULTS.View3D.shading) ?? SETTING_DEFAULTS.View3D.shading);
   // For the pane and the critic: set the shading version in this window, or ask it.
   (globalThis as unknown as { __shading?: (v?: number) => number }).__shading = (v?: number) => { if (typeof v === "number") setShadingVersion(v); return shadingVersion(); };
@@ -948,11 +733,14 @@ async function main() {
     // SAY IT WHEN THE GPU STOPS. render/device.ts detects a lost device and an uncaptured error;
     // without this they reach only the console, and the console is not where someone whose images
     // have just vanished is looking. Ron lost an evening to exactly that silence.
+    let gpuCensusSaid = false;
     (globalThis as unknown as { __onGpuFailure?: (w: string, d: string) => void }).__onGpuFailure =
       (what, detail) => {
         const sh = shell;
         if (!sh) return;
         sh.setStatus(`${what} — the views have stopped drawing. Reload the window. (${detail})`);
+        // WHICH SURFACE, once (2026-10-16: the first glasses failure with the series field could not be placed).
+        if (!gpuCensusSaid) { gpuCensusSaid = true; const cc = (globalThis as unknown as { __canvasCensus?: () => string }).__canvasCensus?.(); if (cc) void fetch("/_log", { method: "POST", body: `at the first graphics failure, canvases: ${cc}` }).catch(() => {}); }
         void sh.confirm({
           title: "The views have stopped drawing",
           ok: "Reload now",
@@ -978,7 +766,7 @@ async function main() {
             if (v) {
               const w = await writeScene(v.live.nodes.values(), {
                 producer: `SlicerAlbula ${BUILD_ID}`, origin: v.live.origin, name: "what was on screen",
-                layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 },
+                layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 }, extensions: collectExtensionState(),
               });
               const scene = (globalThis as unknown as { __currentScene?: () => unknown }).__currentScene?.() ?? null;
               if (!w.empty) sessionStorage.setItem("albula-restore-scene", JSON.stringify({ doc: w.doc, notSaved: w.fixable.map((f) => f.name), scene }));
@@ -1008,27 +796,57 @@ async function main() {
    * segmentations, and the colorize path reads them constantly), and any volume whose texture is
    * not up — the chunks are what the texture is made FROM, so they go only once it exists.
    */
+  // WHEN VOXELS WERE LAST READ BACK: nothing is given back within READ_BACK_HOLD_MS of it, so a tool working on a volume
+  // (Grow from seeds, a threshold, an export) is not made to read it again between two of its steps.
+  let lastReadBack = -Infinity;
+  const READ_BACK_HOLD_MS = 30_000;
   store.setOnMiss(async (hash) => {
     const g = globalThis as unknown as { __restoreVolumeChunks?: (h: string) => Promise<boolean> };
-    return await g.__restoreVolumeChunks?.(hash) ?? false;
+    const ok = await g.__restoreVolumeChunks?.(hash) ?? false;
+    if (ok) lastReadBack = performance.now();
+    return ok;
   });
-  let trimmed = new Set<string>();
+  // A VOLUME READ BACK IS GIVEN BACK AGAIN (critic 2026-10-15, render-audit-fixes finding 4: the store gave a volume back
+  // once, so after the first statistics or edit the 864 MB stayed for the session). The question each time is whether
+  // its pieces are in the store, not whether it was ever given back; `said` only keeps the status line to once a volume.
+  let said = new Set<string>();
   const trimStore = () => {
+    if (performance.now() - lastReadBack < READ_BACK_HOLD_MS) return;
+    const keptPieces = () => {
+      const k = new Set<string>();
+      for (const m of views.live.nodes.values()) {
+        const mz = (m.zarr as { chunkHashes?: Record<string, string> } | undefined)?.chunkHashes;
+        if (!mz || (m.type === "image" && !m.labelmap && (m.origin as { fromCopy?: boolean } | undefined)?.fromCopy)) continue;
+        for (const h of Object.values(mz)) k.add(h);
+      }
+      return k;
+    };
+    let keep: Set<string> | undefined;
     for (const n of views.live.nodes.values()) {
       if (n.type !== "image" || n.labelmap) continue;
       const z = n.zarr as { chunkHashes?: Record<string, string>; compressor?: string } | undefined;
-      if (!z?.chunkHashes || trimmed.has(n.id as string)) continue;
+      if (!z?.chunkHashes) continue;
+      const hashes = Object.values(z.chunkHashes);
+      if (!hashes.some((h) => store.has(h))) continue;
+      // ONLY A VOLUME THAT CAME FROM A CURRENT WORKING COPY (2026-10-15, checked in the pane: a CT whose copy was out of
+      // date was given back, and getting its voxels again rebuilt the series from DICOM -- the 09-22 path, the page past
+      // 7 GB). Its pieces come back from the copy in about a second; anything else keeps them.
+      if (!(n.origin as { fromCopy?: boolean } | undefined)?.fromCopy) continue;
       // Only when the texture exists: `hasSharedTexture` is the same question the field asks
       // before it decides it needs no samples at all.
       if (!hasSharedTexture(descKey(n.zarr as ZarrDesc) ?? undefined)) continue;
-      const freed = store.release(new Set(Object.values(z.chunkHashes)));
-      trimmed.add(n.id as string);
-      if (freed > 8 * 1048576) {
+      // NOT a piece that something which keeps its pieces names as well (an all-zero edge piece of a CT has the same name
+      // as one of a cropped volume or a labelmap, which are never given back and could not be read again).
+      const kept = keep ??= keptPieces();
+      const freed = store.release(hashes.filter((h) => !kept.has(h)));
+      const first = !said.has(n.id as string);
+      said.add(n.id as string);
+      if (first && freed > 8 * 1048576) {
         status(`gave back ${Math.round(freed / 1048576)} MB: ${String(n.name ?? n.id)} is on the GPU, and its voxels come back from the database if they are wanted`);
       }
     }
     // A volume that has gone takes its entry with it, or this set grows for the session.
-    trimmed = new Set([...trimmed].filter((id) => views.live.nodes.has(id)));
+    said = new Set([...said].filter((id) => views.live.nodes.has(id)));
   };
   // NOT AUTOMATIC YET, and the measurement is why. Giving the chunks back is instant and frees
   // 864 MB (store 867 MB -> 3 MB, measured 2026-09-22). Getting them back is not the 2.1 s I
@@ -1039,7 +857,12 @@ async function main() {
   // What it needs before it can be switched on: a recovery that rebuilds only the chunks asked
   // for, from the slices they cover, instead of reconstructing the series. Until then the store
   // keeps the volume, and `__trimStore()` does it by hand for whoever measures the next attempt.
-  const TRIM_AUTOMATICALLY = false;
+  //
+  // SWITCHED ON 2026-10-15 (render-audit, finding 2: 868 MB of C3N-01524's CT held for the whole session beside the same
+  // voxels on the card): every grayscale series now has a duckn working copy, and the recovery takes its pieces as they
+  // are -- the whole CT back in about a second, not the 45 s of a rebuild from DICOM.
+  const TRIM_AUTOMATICALLY = true;
+
   if (TRIM_AUTOMATICALLY) setInterval(trimStore, 5000);
 
   Object.assign(globalThis, {
@@ -1052,6 +875,8 @@ async function main() {
   const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, connect: wantPeer, onStatus: status, onNotify: (n) => { shell?.notify({ title: n.title, body: n.body, actions: n.actions }); }, startup: () => ({ drawing: appSettingsNow?.getBool("View3D", "drawing", SETTING_DEFAULTS.View3D.drawing), lighting: appSettingsNow?.get("View3D", "lighting") ?? SETTING_DEFAULTS.View3D.lighting }), onFrame: () => hook?.frameRendered(),
     onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }); },
     onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); },
+    // DRAW: the outline drawn on a slice, filled into the structure being edited, then saved into the scene as a stroke is.
+    onNativeDraw: (segId, segment, points, normal) => { void drawFill(views.live, segId, points, { segment, normal }).then(async (n) => { await commitPaint(views.live, store, segId); const m = n ? `Draw: ${n.toLocaleString()} voxels filled` : "Draw: the outline holds no voxel centers on this slice"; status(m); shell?.setStatus(m); }); },
     // CLICK TO OUTLINE (render/click-outline-tool.ts): a click outlines; null (a right-click, Esc) ends the tool.
     onClickOutline: (ras, sign) => { if (ras) void clickOutline.click(ras, sign); else endClickOutline(); } });
   const clickOutline = createClickOutline({
@@ -1060,6 +885,36 @@ async function main() {
     confirm: (o) => shell ? shell.confirm(o) : Promise.resolve(false),
     marks: (points) => (globalThis as unknown as { __setClickMarks?: (p: typeof points) => void }).__setClickMarks?.(points),
   });
+
+  // WHAT PLAY DOES, every 2 s while a sequence plays, into the session log (Ron, 2026-10-16, build 12:32: "it takes like
+  // 30 sec until the beating heart stabilizes. Then it was steady" -- and the log had nothing to say what those 30 s
+  // were): the steps made, the longest wait between two, and what was built meanwhile -- colored 3D fields of frames
+  // (the volume rendering's, render/livescene.ts) and colored slice overlays (render/bake.ts bakeInto).
+  {
+    let steps = 0, worst = 0, lastAt = 0, lastSel = -1, fields0 = 0, bakes0 = 0, quiet = 0;
+    const g = globalThis as unknown as { __colorizeFields?: number; __colorizeBakes?: number };
+    const fieldsBuilt = () => g.__colorizeFields ?? 0;
+    views.live.subscribe((c) => {
+      if (c.type !== "sequenceBrowser" || c.kind !== "upsert") return;
+      const n = views.live.nodes.get(c.id);
+      if (n?.playbackActive !== true || n.selectedItemNumber === lastSel) return;
+      lastSel = n.selectedItemNumber as number;
+      const now = performance.now();
+      if (lastAt) worst = Math.max(worst, now - lastAt);
+      lastAt = now; steps++;
+    });
+    setInterval(() => {
+      if (!steps) { if (++quiet > 1) lastAt = 0; fields0 = fieldsBuilt(); bakes0 = g.__colorizeBakes ?? 0; const gs0 = (globalThis as unknown as { __gpuScope?: { takePictureTimes(): string; takeCounts(): string } }).__gpuScope; gs0?.takeCounts(); gs0?.takePictureTimes(); return; }
+      quiet = 0;
+      const f = fieldsBuilt(), b = g.__colorizeBakes ?? 0;
+      // AND WHAT THE CARD DID MEANWHILE (render/gpu-scope.ts): series steps rebound against 3D compositions, and the time of
+      // each kind of picture on the card -- the 3D view, the slices, the glasses.
+      const gs = (globalThis as unknown as { __gpuScope?: { takePictureTimes(): string; takeCounts(): string } }).__gpuScope;
+      const cnt = gs?.takeCounts() ?? "", pics = gs?.takePictureTimes() ?? "";
+      void fetch("/_log", { method: "POST", body: `play: ${steps} steps in 2 s, the longest ${Math.round(worst)} ms between two · built meanwhile: ${f - fields0} colored 3D fields of frames, ${b - bakes0} colored slice overlays${cnt ? ` · ${cnt}` : ""}${pics ? ` · ${pics}` : ""}` }).catch(() => {});
+      fields0 = f; bakes0 = b; steps = 0; worst = 0;
+    }, 2000);
+  }
   /** The tool off: the outline stays as an ordinary edit, the marks go, the editor's button is no longer yellow. */
   const endClickOutline = () => {
     clickOutline.stop();
@@ -1517,11 +1372,11 @@ async function main() {
     registerMarkupsPanel(sh, { live: views.live, onStatus: status });
     registerCropPanel(sh, { live: views.live, store, status });
     registerSegEditorPanel(sh, { live: views.live, store, onStatus: status });
-    registerSurfaceModelsPanel(sh, { live: views.live, onStatus: status });
     registerTransformsPanel(sh, { live: views.live, onStatus: status });
     // One player for the scene; its transport lives in the top bar, in every module.
     const player = new SequencePlayer(views.live);
     mountSequenceToolbar(sh, { live: views.live, player });
+    mountJobsLine(sh);   // the extensions' import-time work, while it runs (jobs-line.ts)
     registerSequencesPanel(sh, { live: views.live, player, onStatus: status });
     // Segmentations is WHAT YOU HAVE; AI segmentations is one way to make it. So the tree comes
     // first and the producer after, and Save last -- it saves what the tree lists.
@@ -1547,7 +1402,7 @@ async function main() {
     // The observed range lives on the display node's threshold (ingest.ts), as applyVrPreset
     // reads it; a sample says its modality itself. (Critic, finding 4: the guess read fields that
     // do not exist and offered every CT as MR.)
-    const dispNode = [...live.nodes.values()].find((n) => n.type === "scalarVolumeDisplay" && ((img.refs as Record<string, string[]> | undefined)?.display ?? []).includes(n.id));
+    const dispNode = [...views.live.nodes.values()].find((n) => n.type === "scalarVolumeDisplay" && ((img.refs as Record<string, string[]> | undefined)?.display ?? []).includes(n.id));
     const range = dispNode?.threshold as [number, number] | undefined;
     const sampleModality = typeof org.sample === "string" ? SAMPLE_DATA.find((d) => d.name === org.sample)?.modality : undefined;
     const guess = sampleModality ?? (looksLikeHounsfield(range, org.modality as string | undefined) ? "CT" : "MR");
@@ -1583,6 +1438,20 @@ async function main() {
 Object.assign(globalThis, {
       // A sequence's frames: the one on screen stands for it, as in the Scene list (five rows of
       // one series were a list to get lost in, and the frames came from the database anyway).
+      // WHAT IS SHOWN IN 3D, for Save › Files › "Everything shown in 3D" (Ron, 2026-10-22): the segmentations the solid
+      // look DRAWS, read from its own list (critic 2026-10-22, finding 6: the same test written again here missed a third
+      // voxel grid, more than 255 structures on a scan, and opacity 0) -- a series by its current frame only -- each with
+      // the structures it shows (visible, opacity above 0).
+      __segmentationsShownIn3D: () => {
+        const current = currentFrames(views.live);
+        const drawn = new Set(((globalThis as unknown as { __solidGroups?: () => { segmentations: string[] }[] }).__solidGroups?.() ?? []).flatMap((gr) => gr.segmentations));
+        return [...views.live.nodes.values()]
+          .filter((n) => n.type === "segmentation" && drawn.has(n.id as string) && (!n.sequence || current.has(n.id)))
+          // Structures SHOWN, strictly: a segmentation whose structures are all hidden shows nothing (structuresToExport's
+          // "all when none is shown" is for a file of one segmentation, asked for by name).
+          .map((n) => ({ id: n.id as string, structures: ((n.segments as (ExportSegment & { opacity?: number })[] | undefined) ?? []).filter((sg) => sg.labelValue > 0 && sg.labelValue < 256 && sg.visible !== false && (sg.opacity ?? 1) > 0).length }))
+          .filter((x) => x.structures > 0);
+      },
       __savableNodes: () => {
         const current = currentFrames(views.live);
         return [...views.live.nodes.values()]
@@ -1666,14 +1535,29 @@ Object.assign(globalThis, {
         }
         return n ? { id: n.id, name: n.name as string, seriesInstanceUID: (n.origin as { seriesInstanceUID?: string }).seriesInstanceUID } : null;
       },
-      __exportNode: async (id: string, format: string) => {
+      __exportNode: async (id: string, format: string, opts?: { closed?: boolean }) => {
+        // EVERYTHING SHOWN IN 3D, one STL or OBJ (Ron, 2026-10-22).
+        if (id === EVERYTHING_3D && (format === "stl" || format === "obj")) {
+          const shown = ((globalThis as unknown as { __segmentationsShownIn3D?: () => { id: string }[] }).__segmentationsShownIn3D?.() ?? []).map((x) => x.id);
+          const f = await sceneSurfaceFile(views.live, shown, format, status, { closed: opts?.closed !== false });
+          const where = await toDownloads(f.filename, f.chunks, f.mime);
+          return { filename: where.name, size: f.size, note: `${f.note}${where.path ? ` · in ${where.path}` : ""}` };
+        }
         const n = views.live.nodes.get(id);
         if (n?.type === "segmentation" && format === "dicom-seg") return await saveSegmentation(views.live, id, status);
+        // SURFACE MODELS, MADE FOR THIS SAVE (render/surface-export.ts; Ron, 2026-10-21, option B). "STL (the surfaces)"
+        // fell through to the .seg.nrrd below and saved one, named .seg.nrrd: there was no STL writer.
+        if (n?.type === "segmentation" && (format === "stl" || format === "obj")) {
+          const f = await surfaceFile(views.live, id, format, status, { closed: opts?.closed !== false });
+          const where = await toDownloads(f.filename, f.chunks, f.mime);
+          return { filename: where.name, size: f.size, note: `${f.note}${where.path ? ` · in ${where.path}` : ""}` };
+        }
+        if (n?.type === "segmentation" && format !== "nrrd" && format !== "nrrd-gz") throw new Error(`a segmentation cannot be saved as "${format}"`);
         // With the question "whose is it?" for a volume from a file, as Crop and Save scene ask (A14).
         if (n?.type === "image" && format === "dicom") return await exportVolumeAsDicom(views.live, id, status, askSubjectFor);
         const r = n?.type === "segmentation" ? await exportSegmentation(views.live, id, format === "nrrd-gz" ? "nrrd-gz" : "nrrd") : await exportVolume(views.live, id, format as ExportFormat);
-        try { const blob = new Blob([r.bytes], { type: r.mime }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = r.filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); } catch { /* headless / no DOM download */ }
-        return { filename: r.filename, size: r.bytes.byteLength };
+        const where = await toDownloads(r.filename, [r.bytes], r.mime);
+        return { filename: where.name, size: r.bytes.byteLength, ...(where.path ? { note: `in ${where.path}` } : {}) };
       },
     });
     {
@@ -1742,15 +1626,6 @@ Object.assign(globalThis, {
       for (const c of comps) views.live.write(others.length ? { op: "patch", id: c.id, path: "#/refs/background", value: [others[others.length - 1].id] } : { op: "del", id: c.id });
       for (const n of r.nodes) views.live.write({ op: "del", id: n.id });
     });
-    // Surface extraction is tens of seconds on a whole-body study and it runs in a worker, so without
-    // this the window has nothing to say while it works -- and nothing to say when it fails, which it
-    // did, silently, leaving the coarse SDF up looking like a finished picture.
-    setSurfaceProgressReporter((msg) => sh.setStatus(msg));
-    // ...and before it extracts, let it ask the DICOM database whether this was already done. The
-    // renderer holds the hook and the application supplies it, because only the application knows
-    // what a DICOM database is.
-    // Timed and COUNTED (load-profile.ts): if this runs twice per segmentation, the profile says so.
-    setStoredSurfaceLoader((segId) => span("surfaces from the database", () => loadStoredSurfaces(views.live, segId)));
     // THE DECODE IN A WORKER IS MEASURABLY SLOWER, so it is not installed. Built and tried on
     // 2026-09-22 (Ron: the decode was the largest single-threaded phase, so a worker was the
     // obvious move): the decode went from 3.6 s to 8.3 s for four segmentations and the whole load
@@ -1852,9 +1727,12 @@ Object.assign(globalThis, {
       const defaultName = proposedSceneName();
       const name = o.name ?? (o.asNew || !currentScene_ ? defaultName : currentScene_.name);
       const previousV = o.asNew ? 0 : (currentScene_?.v ?? 0);
+      // THE EXTENSIONS' OWN STATE (logic/scene/extensions.ts): the Diffusion module's tracts and maps, which no node holds.
+      const ext = collectExtensionState();
+      if (ext.failed.length) shell?.notify({ title: "Part of what an extension shows is not in the scene", body: ext.failed.map((f) => f.replace(/&/g, "&amp;").replace(/</g, "&lt;")).join("<br>") });
       const w = await writeScene(views.live.nodes.values(), {
         producer: `SlicerAlbula ${BUILD_ID}`, origin: views.live.origin, name, previousV,
-        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 },
+        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 }, extensions: ext,
       });
       const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       // NOTHING LOADED NAMES A STUDY: views and a camera are not a scene, and a file like that lists
@@ -1976,7 +1854,7 @@ Object.assign(globalThis, {
     // the document a saved scene is, without saving it anywhere -- null when nothing from the database is loaded.
     (globalThis as unknown as { __sceneForGlasses?: () => Promise<Record<string, unknown> | null> }).__sceneForGlasses = async () => {
       const w = await writeScene(views.live.nodes.values(), { producer: `SlicerAlbula ${BUILD_ID}`, origin: views.live.origin, name: "glasses", previousV: 0,
-        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 } });
+        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 }, extensions: collectExtensionState() });
       return w.empty ? null : w.doc as unknown as Record<string, unknown>;
     };
     // THIS IS THE GLASSES WINDOW (?glasses; desktop/main.ts --glasses-window): open the main window's scene, then the
@@ -2006,12 +1884,16 @@ Object.assign(globalThis, {
       }
       shell?.setStatus(loadedNow.ok ? "glasses window: the scene is open" : `glasses window: the scene did not open (${loadedNow.error ?? "no reason given"})`);
       if (!loadedNow.ok) return;
-      let loaded = seriesOf(r.scene), busy = Promise.resolve();
+      let loaded = seriesOf(r.scene), loadedExt = JSON.stringify(r.scene.extensions ?? null), busy = Promise.resolve();
       g.__glassesScene = (d) => {
         busy = busy.then(async () => {
           const want = seriesOf(d);
-          if (same(want, loaded)) applySceneState(views.live, d);
+          // What an extension shows (its block in the document: the Diffusion module's tracts, names and map) follows too
+          // (critic 2026-10-21, finding 2) -- only when that block changed: a restore adds tracts and may track again.
+          const ext = JSON.stringify(d.extensions ?? null);
+          if (same(want, loaded)) { applySceneState(views.live, d); if (ext !== loadedExt) await restoreExtensionState(d); }
           else { g.__closeSceneData?.(); await g.__loadSceneDoc?.(d); loaded = want; }
+          loadedExt = ext;
         }).catch(() => {});
       };
       await g.__glassesStart?.(p.get("screen") ?? "");

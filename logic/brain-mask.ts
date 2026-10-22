@@ -11,11 +11,12 @@
 // a volume that left the scene. A repeat after that asks the server, which answers from its own cache in about 0.1 s.
 //
 // WAITING (finding 3): a server that stops answering ends the wait in seconds; a job queued behind another is said as
-// such; a job that makes no progress for two minutes is given up. The messages are for a person: the server's own
+// such; a job that makes no progress for two minutes is a stuck server (a restart is offered, or made by the import job). The messages are for a person: the server's own
 // error text goes to the console, not to the screen (finding 15).
 import type { LiveScene } from "../render/livescene.ts";
 import { exportVolume } from "./export.ts";
-import { isFinished, job, result, serverStatus, submitVolume, type HaversackTransport } from "./haversack.ts";
+import { serverStatus, type HaversackTransport } from "./haversack.ts";
+import { runHaversackTask } from "./haversack-run.ts";
 import { parseNrrdSeg } from "../render/nrrd.ts";
 
 export interface BrainMask { dims: [number, number, number]; ijkToRAS: number[]; data: Uint8Array }
@@ -23,16 +24,7 @@ export interface BrainMask { dims: [number, number, number]; ijkToRAS: number[];
  *  failed or stalled. `message` is a phrase that completes "…because ___". */
 export type BrainMaskResult = { ok: true; mask: BrainMask; cached: boolean; seconds: number } | { ok: false; reason: "no-server" | "no-synthstrip" | "stuck" | "failed"; message: string };
 
-const TASK = "synthstrip:mask", POLL_MS = 800, STALL_MS = 2 * 60 * 1000, GONE_MS = 10 * 1000, KEEP = 2;
-/** True only when the server's job list reads and shows no job running (haversack: GET jobs → { jobs: [{ state }] }). */
-async function nothingRunning(transport: HaversackTransport): Promise<boolean> {
-  const r = await transport.fetch(`${transport.base ?? "/_haversack/"}jobs`, { cache: "no-store" }).catch(() => null);
-  if (!r?.ok) return false;
-  const j = await r.json().catch(() => null) as { jobs?: { state?: string }[] } | null;
-  return Array.isArray(j?.jobs) && !j!.jobs!.some((x) => x.state === "running");
-}
-/** A job still QUEUED after this long is taken as a stuck server (Ron's demo, 2026-10-06: idle, it never started one). */
-const QUEUED_STUCK_MS = 3 * 60 * 1000;
+const TASK = "synthstrip:mask", KEEP = 2;
 const kept: { key: string; nodeId: string; mask: BrainMask }[] = [];
 
 /** What identifies a volume's voxels and place: its geometry and its stored voxels (the zarr reference). */
@@ -45,51 +37,23 @@ function keyOf(live: LiveScene, nodeId: string): string | undefined {
  *  ("running 40%", "waiting for the segmentation server: it is busy with another job"). */
 export async function synthstripBrainMask(live: LiveScene, nodeId: string, onProgress?: (line: string) => void,
   /** The server and the upload, replaceable for tests (brain-mask.test.ts). */
-  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number; queuedStuckMs?: number } = {}): Promise<BrainMaskResult> {
-  const pollMs = deps.pollMs ?? POLL_MS, goneMs = deps.goneMs ?? GONE_MS;
+  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number; queuedStuckMs?: number; stallMs?: number } = {}): Promise<BrainMaskResult> {
   const transport: HaversackTransport = deps.transport ?? { fetch: (...a) => fetch(...a) };
   const key = keyOf(live, nodeId) ?? nodeId;
   for (let i = kept.length - 1; i >= 0; i--) if (kept[i].nodeId === nodeId && kept[i].key !== key) kept.splice(i, 1);   // moved or replaced
   const have = kept.find((k) => k.key === key);
   if (have) return { ok: true, mask: have.mask, cached: true, seconds: 0 };
-  const t0 = performance.now();
-  // Is the task there? Asked before the upload, as the AI panel does. No answer at all: the server is not running.
-  const res = await transport.fetch(`${transport.base ?? "/_haversack/"}tasks/${encodeURIComponent(TASK)}`, { cache: "no-store" }).catch(() => null);
-  if (!res || res.status === 0 || res.status >= 500) return { ok: false, reason: "no-server", message: "the segmentation server is not running" };
-  if (!res.ok) return { ok: false, reason: "no-synthstrip", message: "the segmentation server on this Mac cannot find the brain on an MRI (it runs without SynthStrip)" };
-  onProgress?.("sending the MRI to the segmentation server");
-  const nrrd = deps.upload ? await deps.upload() : await exportVolume(live, nodeId, "nrrd-gz");
-  const sub = await submitVolume(transport, { task: TASK, bytes: nrrd.bytes, filename: nrrd.filename });
-  if (!sub.ok) { console.warn("SynthStrip submit:", sub.message); return { ok: false, reason: "failed", message: "the segmentation server refused the MRI" }; }
-  let last = "", lastMoved = "", lastChange = Date.now(), goneSince = 0, cached = false;
-  for (;;) {
-    const j = await job(transport, sub.jobId);
-    if (j.state === "unknown") {
-      goneSince ||= Date.now();
-      if (Date.now() - goneSince > goneMs) { console.warn("SynthStrip job", sub.jobId, j.error); return { ok: false, reason: "no-server", message: "the segmentation server stopped answering" }; }
-    } else goneSince = 0;
-    const line = j.state === "queued" ? "waiting for the segmentation server: it is busy with another job"
-      : j.state === "running" ? `running${j.progress !== undefined ? ` ${Math.round(j.progress * 100)}%` : ""}` : j.state === "unknown" ? "waiting for the segmentation server to answer" : j.state;
-    if (line !== last) { onProgress?.(line); last = line; }
-    const moved = `${j.state}:${j.progress ?? ""}:${j.stage ?? ""}`;
-    if (moved !== lastMoved) { lastMoved = moved; lastChange = Date.now(); }
-    if (isFinished(j.state)) {
-      if (j.state !== "succeeded") { console.warn("SynthStrip job", sub.jobId, j.state, j.error); return { ok: false, reason: "failed", message: "finding the brain on the MRI failed on the segmentation server" }; }
-      cached = j.cached === true;
-      break;
-    }
-    // A running job that has not moved for two minutes is stalled. A queued one waits for another job to finish -- but
-    // not forever: still queued after three minutes, the server is taken as stuck (it was, idle, at Ron's demo), and the
-    // panel offers to restart it instead of waiting on.
-    if (j.state === "running" && Date.now() - lastChange > STALL_MS) return { ok: false, reason: "failed", message: "finding the brain on the MRI made no progress for two minutes" };
-    // STUCK = our job queued for three minutes AND nothing running on the server (critic 2026-10-06, finding 12: one job
-    // runs at a time, so a job behind a long FastSurfer is queued for long on a healthy server). A job list that cannot be
-    // read is not taken as idle: the wait goes on.
-    if (j.state === "queued" && Date.now() - lastChange > (deps.queuedStuckMs ?? QUEUED_STUCK_MS) && await nothingRunning(transport)) return { ok: false, reason: "stuck", message: "the segmentation server has not started the job in three minutes although it runs nothing else: it seems stuck" };
-    await new Promise((r) => setTimeout(r, pollMs));
+  // THE RUN, by the one runner of a server task (logic/haversack-run.ts, where these waiting rules now live).
+  const run = await runHaversackTask({
+    task: TASK, what: "finding the brain on the MRI", transport, onProgress,
+    upload: deps.upload ?? (() => exportVolume(live, nodeId, "nrrd-gz")),
+    pollMs: deps.pollMs, goneMs: deps.goneMs, queuedStuckMs: deps.queuedStuckMs, stallMs: deps.stallMs,
+  });
+  if (!run.ok) {
+    if (run.reason === "no-task") return { ok: false, reason: "no-synthstrip", message: "the segmentation server on this Mac cannot find the brain on an MRI (it runs without SynthStrip)" };
+    return { ok: false, reason: run.reason, message: run.message };
   }
-  const bytes = await result(transport, sub.jobId);
-  if (!bytes) return { ok: false, reason: "failed", message: "the segmentation server's answer could not be fetched" };
+  const { bytes, cached } = run, t0 = performance.now() - run.seconds * 1000;
   const seg = await parseNrrdSeg(bytes), layer = seg.layers[0];
   if (!layer) return { ok: false, reason: "failed", message: "the segmentation server's answer held no brain" };
   const data = new Uint8Array(layer.length);

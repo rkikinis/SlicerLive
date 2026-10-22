@@ -33,6 +33,24 @@ import { join } from "jsr:@std/path@1";
  */
 const DEFAULT_PORT = Number((globalThis as { Deno?: { env?: { get(k: string): string | undefined } } }).Deno?.env?.get("HAVERSACK_PORT")) || 8790;
 
+/** The work a restart stopped, for half an hour (GET /_jobs carries it; render/demos/jobs-line.ts says it). */
+let lastRestart: { at: number; stopped: string[] } | undefined;
+export const restartNotice = (): { at: number; stopped: string[] } | undefined =>
+  lastRestart && Date.now() - lastRestart.at < 30 * 60_000 ? lastRestart : undefined;
+/** The server's running and queued jobs, each as "<task>" or "<task> on <input>"; [] when it does not answer. */
+async function busyJobs(port: number): Promise<string[]> {
+  try {
+    const { token } = tokenFor(port);
+    const r = await fetch(`http://127.0.0.1:${port}/v1/jobs`, { headers: token ? { authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return [];
+    const j = await r.json() as { jobs?: Record<string, unknown>[] };
+    return (j.jobs ?? []).filter((x) => /^(running|started|queued|pending)$/i.test(String(x.state ?? x.status ?? ""))).map((x) => {
+      const task = String(x.task ?? x.task_id ?? "a segmentation"), input = x.filename ?? x.input_name ?? x.source;
+      return typeof input === "string" && input ? `${task} on ${input}` : task;
+    });
+  } catch { return []; }
+}
+
 /**
  * The token from haversack's token file.
  *
@@ -147,6 +165,10 @@ export async function handleHaversackRequest(req: Request): Promise<Response | n
   // then starts a new one, so a server that answers afterward is the new one (critic 2026-10-06, finding 13).
   if (url.pathname === "/_haversack/_restart" && req.method === "POST") {
     const port = Number(url.searchParams.get("_port") ?? DEFAULT_PORT) || DEFAULT_PORT;
+    // WHAT THE RESTART WILL STOP, asked before it happens (Ron, 2026-10-15: "restart but notify, if an ongoing
+    // segmentation gets killed"): the server's running and queued jobs, by task, kept as the notice GET /_jobs carries
+    // (restartNotice) and the top bar says.
+    const busy = await busyJobs(port);
     const text = async (cmd: string, args: string[]) => new TextDecoder().decode((await new Deno.Command(cmd, { args, stdout: "piped", stderr: "null" }).output()).stdout);
     const alive = async (pid: number) => (await text("/bin/ps", ["-o", "pid=", "-p", String(pid)])).trim() !== "";
     const pids = (await text("/usr/sbin/lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"])).trim().split(/\s+/).filter(Boolean).map(Number);
@@ -163,7 +185,8 @@ export async function handleHaversackRequest(req: Request): Promise<Response | n
     const res = await handleHaversackRequest(new Request(new URL(`/_haversack/_start?_port=${port}`, url.origin), { method: "POST" }));
     const body = (res ? await res.json() : {}) as { started?: boolean; note?: string; error?: string };
     if (!body.started) return Response.json({ restarted: false, stopped: ours, error: body.error ?? body.note ?? "it did not start" }, { status: 500 });
-    return Response.json({ restarted: true, stopped: ours, ...body });
+    if (busy.length) lastRestart = { at: Date.now(), stopped: busy };
+    return Response.json({ restarted: true, stopped: ours, interrupted: busy, ...body });
   }
   if (url.pathname === "/_haversack/_start" && req.method === "POST") {
     const port = Number(url.searchParams.get("_port") ?? DEFAULT_PORT) || DEFAULT_PORT;

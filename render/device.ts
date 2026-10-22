@@ -40,7 +40,8 @@ export async function initDevice(): Promise<Gpu> {
   // not enough for a pipeline that carries its own working state: the GPU surface extraction
   // (algorithms/surface-nets-gpu.ts) binds fifteen. Metal allows 31 here; asking for the adapter's
   // maximum costs nothing and fails nothing, and a device that offers only eight would simply get
-  // eight -- the extraction is the only thing that needs more, and it checks.
+  // eight -- the extraction is the only thing that needs more, and it checks. (Since 2026-10-21 the app does not run the
+  // GPU extraction: surfaces are an export made on the processor. Kept raised for it and for the tests; harmless.)
   raise("maxStorageBuffersPerShaderStage");
 
   const device = await adapter.requestDevice({ requiredFeatures: want, requiredLimits });

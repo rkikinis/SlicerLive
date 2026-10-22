@@ -54,8 +54,12 @@ export class SlicePlaneField implements Field {
    * A slab of thickness T is guaranteed a sample when the step is T -- whatever the phase, a sample
    * landing just short of the slab puts the next one inside it. This asked for halfThick, which
    * samples every slab twice. Measured, that second sample is worth 18 pixels in 262,000: 0.01%.
+   *
+   * No floor of 0.5 mm any more: the default slab (0.5 mm half-thick) never reached it, and on a microscope's grid it
+   * made the step a hundred thousand voxels and the slab was stepped over (scene-scale.ts). A slab of no thickness asks
+   * for no step; the renderer leaves it out (marchStep).
    */
-  sampleStep(): number { return Math.max(0.5, this.halfThick * 2); }
+  sampleStep(): number { return this.halfThick * 2; }
 
   aabb(): [Vec3, Vec3] {
     // corners of the quad ± the slab thickness along the normal

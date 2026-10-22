@@ -5,6 +5,7 @@
 //   deno test -A --no-check logic/crop.test.ts
 
 import { assert, assertEquals } from "jsr:@std/assert";
+import { SCALES } from "../render/scale-fixtures.ts";
 import { type Box, boundingBoxOf, boxAroundData, boxAxis, boxCorners, boxPlanePolygon, cropVolume, cutBox, cutBoxAtPlane, invertAffine, voxelRangeFor, volumeAlignedBox } from "./crop.ts";
 
 /** A 4x4 with 1 mm spacing and the origin at the RAS point given. */
@@ -125,6 +126,30 @@ Deno.test("boxAroundData finds the object and pads it, and says so when there is
   assertEquals(b.size, [4, 4, 4]);
   assertEquals(boxAroundData(new Int16Array(8) as unknown as { length: number; [i: number]: number }, [2, 2, 2], identityAt(0, 0, 0)), null);
 });
+
+// THE DEFAULT PADDING IS VOXELS OF THE VOLUME (Ron, 2026-10-20: "did you forget about scales? from astrophysics to
+// electron microscope"): 10 mm on a clinical grid, as before; 2.5 to 40 voxels on any other.
+Deno.test("boxAroundData pads by 10 mm on a clinical grid, as before", () => {
+  const d = new Int16Array(64 * 64 * 64);
+  d[32 + 64 * (32 + 64 * 32)] = 1000;
+  for (const v of [0.3, 0.7, 1, 3]) {
+    const m = [v, 0, 0, 0, 0, v, 0, 0, 0, 0, v, 0, 0, 0, 0, 1];
+    const b = boxAroundData(d as unknown as { length: number; [i: number]: number }, [64, 64, 64], m)!;
+    // One voxel padded 10 mm each way, clipped to the volume's last voxel (63 * v from its first).
+    const want = Math.min(32 * v + 10, 63 * v) - Math.max(32 * v - 10, 0);
+    assert(Math.abs(b.size[0] - want) < 1e-9, `on ${v} mm voxels: ${b.size[0]} mm, want ${want}`);
+  }
+});
+for (const [what, v] of SCALES) {
+  Deno.test(`boxAroundData pads by a sane number of voxels: ${what}`, () => {
+    const d = new Int16Array(128 * 128 * 128);
+    d[64 + 128 * (64 + 128 * 64)] = 1000;
+    const m = [v, 0, 0, 1e3 * v, 0, v, 0, 0, 0, 0, v, 0, 0, 0, 0, 1];
+    const b = boxAroundData(d as unknown as { length: number; [i: number]: number }, [128, 128, 128], m)!;
+    const padVoxels = b.size[0] / v / 2;
+    assert(padVoxels >= 2.5 - 1e-9 && padVoxels <= 40 + 1e-9, `${padVoxels} voxels of padding`);
+  });
+}
 
 // THE BOX IN THE SLICE VIEWS. Ron: "When you look at slicers cropping tool, it lives in all viewers,
 // 2D and 3D." Slicer draws the box's INTERSECTION with each slice (vtkSlicerROIRepresentation2D),

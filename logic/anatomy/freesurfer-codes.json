@@ -1,0 +1,300 @@
+{
+ "generatedBy": "logic/anatomy/build-freesurfer-codes.ts from freesurfer-codes.csv (reviewed rows only)",
+ "codes": {
+  "Amygdala": {
+   "code": "SCT:4958002",
+   "meaning": "Amygdala",
+   "match": "exact"
+  },
+  "Brainstem": {
+   "code": "SCT:15926001",
+   "meaning": "Brainstem structure",
+   "match": "exact"
+  },
+  "Caudate nucleus": {
+   "code": "SCT:11000004",
+   "meaning": "Caudate nucleus",
+   "match": "exact"
+  },
+  "Cerebellar cortex": {
+   "code": "SCT:25991003",
+   "meaning": "Cerebellar cortex",
+   "match": "exact"
+  },
+  "Cerebellar white matter": {
+   "code": "SCT:33060004",
+   "meaning": "Cerebellar white matter",
+   "match": "exact"
+  },
+  "Cerebral cortex": {
+   "code": "SCT:40146001",
+   "meaning": "Cerebral cortex",
+   "match": "exact"
+  },
+  "Cerebral white matter": {
+   "code": "SCT:68523003",
+   "meaning": "Cerebral white matter",
+   "match": "exact"
+  },
+  "Fifth ventricle": {
+   "code": "SCT:74968005",
+   "meaning": "Cavum septi pellucidi",
+   "match": "exact"
+  },
+  "Fourth ventricle": {
+   "code": "SCT:35918002",
+   "meaning": "Fourth ventricle",
+   "match": "exact"
+  },
+  "Globus pallidus": {
+   "code": "SCT:14738005",
+   "meaning": "Globus pallidus",
+   "match": "exact"
+  },
+  "Hippocampus": {
+   "code": "SCT:5366008",
+   "meaning": "Hippocampus",
+   "match": "exact"
+  },
+  "Inferior horn of the lateral ventricle": {
+   "code": "SCT:53118009",
+   "meaning": "Inferior Horn of Lateral Ventricle",
+   "match": "exact"
+  },
+  "Lateral ventricle": {
+   "code": "SCT:66720007",
+   "meaning": "Lateral ventricle",
+   "match": "exact"
+  },
+  "Nucleus accumbens": {
+   "code": "SCT:427667007",
+   "meaning": "Nucleus accumbens",
+   "match": "exact"
+  },
+  "Putamen": {
+   "code": "SCT:89278009",
+   "meaning": "Putamen",
+   "match": "exact"
+  },
+  "Thalamus": {
+   "code": "SCT:42695009",
+   "meaning": "Thalamus",
+   "match": "exact"
+  },
+  "Third ventricle": {
+   "code": "SCT:49841001",
+   "meaning": "Third ventricle",
+   "match": "exact"
+  },
+  "Ventral diencephalon": {
+   "code": "DCM:110700",
+   "meaning": "Ventral Diencephalon",
+   "match": "exact"
+  },
+  "White matter hypointensities": {
+   "code": "DCM:110701",
+   "meaning": "White Matter T1 Hypointensity",
+   "match": "exact"
+  },
+  "Cerebrospinal fluid": {
+   "code": "SCT:65216001",
+   "meaning": "Cerebrospinal fluid",
+   "match": "exact"
+  },
+  "Entorhinal cortex": {
+   "code": "SCT:3937002",
+   "meaning": "Entorhinal cortex",
+   "match": "exact"
+  },
+  "Insula": {
+   "code": "SCT:36169008",
+   "meaning": "Insula",
+   "match": "exact"
+  },
+  "Optic chiasm": {
+   "code": "SCT:244453006",
+   "meaning": "Optic chiasm",
+   "match": "exact"
+  },
+  "Substantia nigra": {
+   "code": "SCT:70007007",
+   "meaning": "Substantia nigra",
+   "match": "exact"
+  },
+  "Choroid plexus": {
+   "code": "SCT:80621003",
+   "meaning": "Choroid plexus",
+   "match": "exact"
+  },
+  "Cuneus": {
+   "code": "SCT:74493001",
+   "meaning": "Cuneus",
+   "match": "exact"
+  },
+  "Frontal pole": {
+   "code": "SCT:72175008",
+   "meaning": "Frontal pole",
+   "match": "exact"
+  },
+  "Fusiform gyrus": {
+   "code": "SCT:33185006",
+   "meaning": "Fusiform gyrus",
+   "match": "exact"
+  },
+  "Inferior temporal gyrus": {
+   "code": "SCT:73516003",
+   "meaning": "Inferior temporal gyrus",
+   "match": "exact"
+  },
+  "Lingual gyrus": {
+   "code": "SCT:7344002",
+   "meaning": "Lingual gyrus",
+   "match": "exact"
+  },
+  "Middle temporal gyrus": {
+   "code": "SCT:35305002",
+   "meaning": "Middle temporal gyrus",
+   "match": "exact"
+  },
+  "Paracentral lobule": {
+   "code": "SCT:9898001",
+   "meaning": "Paracentral lobule",
+   "match": "exact"
+  },
+  "Parahippocampal gyrus": {
+   "code": "SCT:13989007",
+   "meaning": "Parahippocampal gyrus",
+   "match": "exact"
+  },
+  "Postcentral gyrus": {
+   "code": "SCT:56884009",
+   "meaning": "Postcentral gyrus",
+   "match": "exact"
+  },
+  "Precentral gyrus": {
+   "code": "SCT:465006",
+   "meaning": "Precentral gyrus",
+   "match": "exact"
+  },
+  "Precuneus": {
+   "code": "SCT:17292004",
+   "meaning": "Precuneus",
+   "match": "exact"
+  },
+  "Superior frontal gyrus": {
+   "code": "SCT:36181007",
+   "meaning": "Superior frontal gyrus",
+   "match": "exact"
+  },
+  "Superior parietal lobule": {
+   "code": "SCT:16925009",
+   "meaning": "Superior parietal lobule",
+   "match": "exact"
+  },
+  "Superior temporal gyrus": {
+   "code": "SCT:30143006",
+   "meaning": "Superior temporal gyrus",
+   "match": "exact"
+  },
+  "Supramarginal gyrus": {
+   "code": "SCT:13926003",
+   "meaning": "Supramarginal gyrus",
+   "match": "exact"
+  },
+  "Temporal pole": {
+   "code": "SCT:34497009",
+   "meaning": "Temporal pole",
+   "match": "exact"
+  },
+  "Transverse temporal gyrus": {
+   "code": "SCT:37029000",
+   "meaning": "Transverse temporal gyrus",
+   "match": "exact"
+  },
+  "Inferior parietal lobule": {
+   "code": "SCT:59024009",
+   "meaning": "Angular gyrus",
+   "match": "nearest"
+  },
+  "Lateral occipital cortex": {
+   "code": "SCT:22735005",
+   "meaning": "Structure of lateral occipital gyrus",
+   "match": "nearest"
+  },
+  "Lateral orbitofrontal cortex": {
+   "code": "SCT:279195001",
+   "meaning": "Lateral orbital gyrus",
+   "match": "nearest"
+  },
+  "Medial orbitofrontal cortex": {
+   "code": "SCT:30130006",
+   "meaning": "Structure of gyrus rectus",
+   "match": "nearest"
+  },
+  "Banks of the superior temporal sulcus": {
+   "code": "SCT:5001007",
+   "meaning": "Structure of superior temporal sulcus",
+   "match": "nearest"
+  },
+  "Pericalcarine cortex": {
+   "code": "SCT:113300000",
+   "meaning": "Area striata structure",
+   "match": "nearest"
+  },
+  "Pars opercularis": {
+   "code": "SCT:1179133003",
+   "meaning": "Structure of Brodmann area 44, opercular",
+   "match": "nearest"
+  },
+  "Pars triangularis": {
+   "code": "SCT:1179134009",
+   "meaning": "Structure of Brodmann area 45, triangular",
+   "match": "nearest"
+  },
+  "Pars orbitalis": {
+   "code": "SCT:1179142005",
+   "meaning": "Structure of Brodmann area 47, orbital",
+   "match": "nearest"
+  },
+  "Caudal middle frontal gyrus": {
+   "code": "SCT:74528000",
+   "meaning": "Structure of middle frontal gyrus",
+   "match": "parent"
+  },
+  "Rostral middle frontal gyrus": {
+   "code": "SCT:74528000",
+   "meaning": "Structure of middle frontal gyrus",
+   "match": "parent"
+  },
+  "Caudal anterior cingulate cortex": {
+   "code": "SCT:25221002",
+   "meaning": "Structure of cingulate gyrus",
+   "match": "parent"
+  },
+  "Rostral anterior cingulate cortex": {
+   "code": "SCT:25221002",
+   "meaning": "Structure of cingulate gyrus",
+   "match": "parent"
+  },
+  "Posterior cingulate cortex": {
+   "code": "SCT:25221002",
+   "meaning": "Structure of cingulate gyrus",
+   "match": "parent"
+  },
+  "Isthmus of the cingulate gyrus": {
+   "code": "SCT:25221002",
+   "meaning": "Structure of cingulate gyrus",
+   "match": "parent"
+  },
+  "Cerebellar exterior": {
+   "code": "SCT:113305005",
+   "meaning": "Cerebellar structure",
+   "match": "parent"
+  },
+  "Vessel": {
+   "code": "SCT:59820001",
+   "meaning": "Blood vessel structure",
+   "match": "parent"
+  }
+ }
+}

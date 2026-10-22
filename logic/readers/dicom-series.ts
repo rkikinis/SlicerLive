@@ -58,6 +58,9 @@ export interface DicomInstance {
   echoTime?: number;
   /** Frame Content › StackID: which stack of a multi-stack file this frame belongs to. */
   stackId?: string;
+  /** A Siemens mosaic tile whose file declared no slice spacing: its position along the normal is a 1 mm guess
+   *  (siemens-mosaic.ts), and the volume's geometry says so. */
+  spacingNotDeclared?: true;
   /** The instance's (or the frame's) whole header, when parseInstances was asked for it: `json` the record in the DICOM
    *  JSON Model (every attribute, private and binary ones included), `tags` Michael Halle's keyword view of it. */
   header?: { json: DicomJson; tags: Record<string, unknown> };
@@ -323,6 +326,12 @@ export function reconstructSeries(instances: DicomInstance[]): Volume {
     : s0.sliceThickness
     ? { origin: "acquired", mechanism: "SliceThickness (single slice, no positions to difference)", spaceUnit: "mm", anatomical: true, centering: "cell" }
     : { origin: "assumed", mechanism: "1 mm (single slice, no SliceThickness)", spaceUnit: "mm", anatomical: true, centering: "cell" };
+  // POSITIONS THAT WERE THEMSELVES A GUESS (a mosaic with no spacing declared) make the spacing a guess too.
+  if (nz > 1 && slices.some((s) => s.spacingNotDeclared)) {
+    spacingFrom.origin = "assumed";
+    spacingFrom.mechanism = "1 mm between slices (a mosaic declaring neither SpacingBetweenSlices nor SliceThickness)";
+    spacingFrom.spacingNotDeclared = [2];
+  }
   const sliceSpacing = nz > 1 ? dot(sub(p1, p0), normal) / (nz - 1) : (s0.sliceThickness || 1);
   // AND EVERY SLICE IN BETWEEN IS CHECKED against that grid. First-to-last gives the right spacing
   // for a regular series and a wrong VOLUME for one with a gap or an overlap: the slices in between
@@ -659,6 +668,7 @@ export async function parseInstances(buffers: ArrayBuffer[], opts: { headers?: b
       pixelSpacing: (ds.PixelSpacing as number[]).map(Number) as [number, number],
       imageOrientationPatient: (ds.ImageOrientationPatient as number[]).map(Number),
       imagePositionPatient: mosaic ? mosaic.positions[k] : (ds.ImagePositionPatient as number[]).map(Number) as [number, number, number],
+      ...(mosaic?.spacingNotDeclared ? { spacingNotDeclared: true as const } : {}),
       // THE FILE'S TEXT decides: dcmjs reads a malformed DS such as "1,5" as 15 (critic, 2026-09-25, finding 5). The
       // standard's decimal mark is a period; anything else is not a thickness this reader will guess at.
       sliceThickness: (() => {

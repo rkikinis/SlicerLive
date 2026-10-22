@@ -22,6 +22,8 @@ import type { LiveScene } from "../livescene.ts";
 import type { LocalBlobStore } from "../../logic/ingest.ts";
 import { lookupStructure } from "../../logic/segment-naming.ts";
 import { invalidatePaintCache } from "../../logic/segmentation-editor.ts";
+import { nodeVoxel, sceneVoxel, voxelOrUnit } from "../scene-scale.ts";
+import { lengthText } from "../length-text.ts";
 import { defaultTarget } from "../../logic/click-outline.ts";
 
 interface Hooks {
@@ -52,14 +54,6 @@ function originWords(n: Obj): string {
   if (o.seriesInstanceUID || o.savedSeriesInstanceUID) return "from the database";
   if (o.task) return "AI result, not saved";
   return "new, not saved";
-}
-
-/** The voxel size of a volume (the smallest spacing), from its ijkToRAS. */
-function spacingOf(img: Obj | undefined): number {
-  const m = img?.ijkToRAS as number[] | undefined;
-  if (!m || m.length < 12) return 1;
-  const col = (j: number) => Math.hypot(m[j], m[4 + j], m[8 + j]);
-  return Math.min(col(0), col(1), col(2)) || 1;
 }
 
 export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene; store: LocalBlobStore; onStatus?: (s: string) => void }): void {
@@ -241,7 +235,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     if (segId && !n) segId = "";
     const segs = segsOf(segId);
     if (segs.length && !segs.some((s) => s.labelValue === active)) active = segs[0].labelValue;
-    const sp = segId ? spacingOf(sourceOf(segId)) : 1;
+    // THE BRUSH'S VOXEL: the source volume's grid, else the segmentation's own, else the scene's; 1 only in an empty
+    // scene (scene-scale.ts voxelOrUnit). A fixed 1 mm when the source had no grid made the brush 14 mm on a
+    // microscope's stack (critic 2026-10-20, section 11).
+    const sp = voxelOrUnit(segId ? nodeVoxel(sourceOf(segId)) : undefined, nodeVoxel(n), sceneVoxel(live.nodes.values() as Iterable<Obj>));
     const edited = n?.edited === true;
     const o = (n?.origin ?? {}) as Obj;
     const tool = g().__segTool?.() ?? { activeEffect: "", diameterMm: 8, sphere: false };
@@ -256,9 +253,9 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     st.innerHTML = `<div class="sl-row"><input type="search" class="sl-search sl-se-find" placeholder="" title="Type a structure's name" value="${escapeHtml(filter)}"><button class="sl-seg-new" title="Add a structure to this segmentation">+ Structure</button></div><div class="sl-seg-list">${structures()}</div>`;
     const tl = shell.section(root, "Tools", { open: true, note: segs.length ? `acting on: ${escapeHtml(segs.find((s) => s.labelValue === active)?.name ?? "")}` : "" });
     tl.innerHTML = `
-      <div class="sl-row"><button class="sl-eff-paint${tool.activeEffect === "paint" ? " sl-primary" : ""}">Paint</button><button class="sl-eff-erase${tool.activeEffect === "erase" ? " sl-primary" : ""}">Erase</button><label><input type="checkbox" class="sl-brush-sphere"${tool.sphere ? " checked" : ""}> Sphere</label></div>
+      <div class="sl-row"><button class="sl-eff-paint${tool.activeEffect === "paint" ? " sl-primary" : ""}">Paint</button><button class="sl-eff-erase${tool.activeEffect === "erase" ? " sl-primary" : ""}">Erase</button><button class="sl-eff-draw${String(tool.activeEffect).toLowerCase() === "draw" ? " sl-primary" : ""}" title="Fills a region you outline on a slice">Draw</button><label><input type="checkbox" class="sl-brush-sphere"${tool.sphere ? " checked" : ""}> Sphere</label></div>
       <div class="sl-row"><label>Brush</label><input class="sl-brush-vox" type="range" min="1" max="60" step="1" value="${brushVox}"><span class="sl-brush-v">${brushVox} voxels</span></div>
-      <div class="sl-row"><span class="sl-hint sl-brush-mm">≈ ${(brushVox * sp).toFixed(1)} mm on this ${sp.toFixed(2)} mm grid</span></div>
+      <div class="sl-row"><span class="sl-hint sl-brush-mm">≈ ${lengthText(brushVox * sp, 1, sp)} on this ${lengthText(sp, 2, sp)} grid</span></div>
       <div class="sl-row"><button class="sl-se-undo"${u ? "" : " disabled"} title="Put back the segmentation as it was before the last change">↶ Undo</button><button class="sl-se-redo"${rd ? "" : " disabled"} title="Do the undone change again">↷ Redo</button><span class="sl-hint">${u ? `${u} change${u === 1 ? "" : "s"}` : ""}</span></div>
       <div class="sl-row"><label>Threshold</label><input class="sl-th-lo" type="number" placeholder="low" style="width:70px"><input class="sl-th-hi" type="number" placeholder="high" style="width:70px"><button class="sl-eff-th">Apply</button><button class="sl-eff-auto">Auto</button></div>
       <div class="sl-row"><label>Islands</label><button class="sl-eff-largest" title="Keep the largest connected piece of this structure; remove the rest">Keep largest</button><button class="sl-eff-small" title="Remove pieces smaller than 10 voxels">Remove small</button></div>
@@ -305,7 +302,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     onEffect($(".sl-eff-sub"), "logical", () => ({ logical: "subtract", other: num(".sl-other") }));
     onEffect($(".sl-eff-int"), "logical", () => ({ logical: "intersect", other: num(".sl-other") }));
     { const sb = $<HTMLButtonElement>(".sl-eff-stats"); sb.addEventListener("click", () => void runAction(sb, async () => { const stt = await g().__segmentStats(segId); $(".sl-seg-stats").innerHTML = stt.map((x) => `<div class="sl-hint">${escapeHtml(segsOf(segId).find((s) => s.labelValue === x.labelValue)?.name ?? `Segment ${x.labelValue}`)}: ${x.voxels.toLocaleString()} voxels, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); }, { busyLabel: "Counting…", doneLabel: "Done ✓" }).catch(() => {})); }
-    const setTool = async (t: string) => { const id = await ensureSeg(); if (!id) return; if (String(g().__segTool().activeEffect).toLowerCase() === "clickoutline") g().__clickOutlineEnd(); const cur = g().__segTool().activeEffect; g().__setSegTool(id, cur === t ? "" : t, { diameterMm: brushVox * sp, sphere: ($(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); status(cur === t ? "Brush off" : `${t === "paint" ? "Paint" : "Erase"}: drag in a slice view`); render(); };
+    const setTool = async (t: string) => { const id = await ensureSeg(); if (!id) return; if (String(g().__segTool().activeEffect).toLowerCase() === "clickoutline") g().__clickOutlineEnd(); const cur = g().__segTool().activeEffect; g().__setSegTool(id, cur === t ? "" : t, { diameterMm: brushVox * sp, sphere: ($(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); status(cur === t ? (t === "draw" ? "Draw off" : "Brush off") : t === "draw" ? "Draw: click around the region in a slice view; double-click to fill" : `${t === "paint" ? "Paint" : "Erase"}: drag in a slice view`); render(); };
     // CLICK TO OUTLINE (render/click-outline-tool.ts): the button starts and ends it; changing "Into:" while it is on
     // moves it to that structure (Ron, 2026-10-03: "user defines the structure with tumor as default … option to have a
     // new structure").
@@ -322,7 +319,8 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     });
     $(".sl-eff-paint").addEventListener("click", () => setTool("paint"));
     $(".sl-eff-erase").addEventListener("click", () => setTool("erase"));
-    $(".sl-brush-vox").addEventListener("input", (e) => { brushVox = Number((e.target as HTMLInputElement).value); ($(".sl-brush-v") as HTMLElement).textContent = `${brushVox} voxels`; ($(".sl-brush-mm") as HTMLElement).textContent = `≈ ${(brushVox * sp).toFixed(1)} mm on this ${sp.toFixed(2)} mm grid`; syncTool(); });
+    $(".sl-eff-draw").addEventListener("click", () => setTool("draw"));
+    $(".sl-brush-vox").addEventListener("input", (e) => { brushVox = Number((e.target as HTMLInputElement).value); ($(".sl-brush-v") as HTMLElement).textContent = `${brushVox} voxels`; ($(".sl-brush-mm") as HTMLElement).textContent = `≈ ${lengthText(brushVox * sp, 1, sp)} on this ${lengthText(sp, 2, sp)} grid`; syncTool(); });
     $(".sl-brush-sphere").addEventListener("change", () => { const cur = g().__segTool(); if (cur.activeEffect) g().__setSegTool(segId, cur.activeEffect, { diameterMm: brushVox * sp, sphere: ($(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); });
     $(".sl-se-undo").addEventListener("click", () => step(undo, redo));
     $(".sl-se-redo").addEventListener("click", () => step(redo, undo));
@@ -344,6 +342,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     tip: "Change any segmentation by hand: paint, erase, threshold, smooth, islands",
     help: `<p>Changes a segmentation by hand. Choose which one at the top, or press <b>Edit</b> on its row in
       Segmentations. The others in the scene are left as they are.</p>
+      <p><b>Draw</b> outlines a region on one slice and fills it: click around the region, or drag to trace its edge;
+      a double-click, Enter or a right-click fills it into the structure chosen above. Backspace takes the last point
+      back, Esc drops the outline. An outline belongs to its slice: moving the slice, turning the view or choosing
+      another tool or segmentation before it is filled clears it. Draw on the next slice to make the region thicker.</p>
       <p><b>Saving never changes the original.</b></p>
       <svg viewBox="0 0 420 150" width="100%" role="img" aria-label="How saving works">
         <g font-size="10" font-family="system-ui, sans-serif">

@@ -723,14 +723,14 @@
    "labelValue": 1007
   },
   "ctx-lh-inferiorparietal": {
-   "name": "Inferior parietal cortex, left",
+   "name": "Inferior parietal lobule, left",
    "system": "Parietal lobe",
    "rgb": [
     220,
     60,
     220
    ],
-   "type": "Inferior parietal cortex",
+   "type": "Inferior parietal lobule",
    "mod": "Left",
    "freesurfer": "ctx-lh-inferiorparietal",
    "labelValue": 1008
@@ -996,14 +996,14 @@
    "labelValue": 1028
   },
   "ctx-lh-superiorparietal": {
-   "name": "Superior parietal cortex, left",
+   "name": "Superior parietal lobule, left",
    "system": "Parietal lobe",
    "rgb": [
     20,
     180,
     140
    ],
-   "type": "Superior parietal cortex",
+   "type": "Superior parietal lobule",
    "mod": "Left",
    "freesurfer": "ctx-lh-superiorparietal",
    "labelValue": 1029
@@ -1165,14 +1165,14 @@
    "labelValue": 2007
   },
   "ctx-rh-inferiorparietal": {
-   "name": "Inferior parietal cortex, right",
+   "name": "Inferior parietal lobule, right",
    "system": "Parietal lobe",
    "rgb": [
     220,
     60,
     220
    ],
-   "type": "Inferior parietal cortex",
+   "type": "Inferior parietal lobule",
    "mod": "Right",
    "freesurfer": "ctx-rh-inferiorparietal",
    "labelValue": 2008
@@ -1438,14 +1438,14 @@
    "labelValue": 2028
   },
   "ctx-rh-superiorparietal": {
-   "name": "Superior parietal cortex, right",
+   "name": "Superior parietal lobule, right",
    "system": "Parietal lobe",
    "rgb": [
     20,
     180,
     140
    ],
-   "type": "Superior parietal cortex",
+   "type": "Superior parietal lobule",
    "mod": "Right",
    "freesurfer": "ctx-rh-superiorparietal",
    "labelValue": 2029

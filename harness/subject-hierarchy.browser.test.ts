@@ -29,8 +29,8 @@ Deno.test({ name: "data: Subject Hierarchy lists all node types + operations; Sa
       "Add Data holds the load routes",
     );
     assert(
-      await cdp.evalJson<number>(`document.querySelectorAll('.sl-dropzone').length`) > 0,
-      "and the drop target is visible, not a footnote",
+      await cdp.evalJson<boolean>(`document.body.innerText.includes("or drop them on the views")`),
+      "and the section says files can be dropped (the drop box went 2026-10-14, Ron's proposal 1)",
     );
     await cdp.eval<void>(`await window.__shell.showPanel("sampledata");`);
     assert(await cdp.evalJson<number>(`document.querySelectorAll('.sl-samples .sl-row button').length`) > 0, "Sample Data panel has sample buttons");

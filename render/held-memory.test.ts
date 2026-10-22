@@ -55,8 +55,12 @@ Deno.test("a colorize build that is no longer wanted does not publish itself", (
   const i = src.indexOf("private async buildColorize");
   assert(i > 0, "buildColorize is gone; this test needs rewriting against whatever replaced it");
   const body = src.slice(i, src.indexOf("private reLUT", i));
-  assert(/if \(!slot\.visible \|\| !slot\.colorize\)[\s\S]{0,200}decolorize/.test(body),
+  // A hidden frame of a sequence is kept only while its sequence is rendered with its colors and plays (frameWanted,
+  // 2026-10-16: the beating heart's frames keep their colors between steps; critic findings 2-3 the same day).
+  assert(/if \(!slot\.colorize \|\| \(!slot\.visible && !this\.frameWanted\(slot, scene\)\)\)[\s\S]{0,200}decolorize/.test(body),
     "buildColorize no longer checks, before publishing, that the rendering is still on — the 1,196 MB leak of 2026-09-22");
+  const wanted = src.slice(src.indexOf("private frameWanted("), src.indexOf("private frameWanted(") + 400);
+  assert(/sequenceShown\(seq\)/.test(wanted) && /framesPlay\(/.test(wanted), "a hidden frame's colors are kept without asking whether its sequence is still rendered and plays");
 });
 
 Deno.test("the window can say what it is holding, and say whether it should be", () => {

@@ -7,6 +7,7 @@
 
 import type { Field } from "./fields.ts";
 import type { Vec3 } from "./mat4.ts";
+import { glyphStep, screenPad } from "./fiducial-field.ts";
 
 const MAX = 256; // segments per field (uniform array size, fixed at WGSL-generation time)
 
@@ -23,6 +24,8 @@ export interface CapsuleOpts {
   screenSpace?: boolean;
   /** GHOST compositing: the segment dims what's in front so it shines through the volume. */
   ghost?: boolean;
+  /** The finest voxel of the data shown (scene units), as FiducialOpts.voxel. Also setVoxel. */
+  voxel?: number;
 }
 
 export class CapsuleField implements Field {
@@ -42,8 +45,10 @@ export class CapsuleField implements Field {
   private kd: number;
   private ks: number;
   private light: Vec3;
+  private dataVoxel: number | undefined;
 
   constructor(segments: Segment[] = [], opts: CapsuleOpts = {}) {
+    this.setVoxel(opts.voxel);
     this.setSegments(segments);
     this.sh = opts.shininess ?? 40;
     this.ka = opts.kAmbient ?? 0.35;
@@ -70,9 +75,11 @@ export class CapsuleField implements Field {
     }
   }
   get count(): number { return this.n; }
+  /** The data's voxel changed; takes effect at the next build or syncUniforms. */
+  setVoxel(v: number | undefined) { this.dataVoxel = v !== undefined && Number.isFinite(v) && v > 0 ? v : undefined; }
 
   uniformFloats(): number { return 12 + MAX * 4 * 3; } // params + params2 + light + segA + segB + colors
-  sampleStep(): number { return 1.0; }
+  sampleStep(): number { return glyphStep(this.dataVoxel); }   // fiducial-field.ts
 
   aabb(): [Vec3, Vec3] {
     if (this.n === 0) return [[-1, -1, -1], [1, 1, 1]];
@@ -86,7 +93,7 @@ export class CapsuleField implements Field {
     }
     if (this.screen) {
       const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
-      const m = Math.max(40, diag * 0.15);
+      const m = screenPad(diag, this.dataVoxel);   // fiducial-field.ts: a margin that follows the data's scale
       for (let a = 0; a < 3; a++) { lo[a] -= m; hi[a] += m; }
     }
     return [lo, hi];
