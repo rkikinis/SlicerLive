@@ -37,7 +37,7 @@ function keyOf(live: LiveScene, nodeId: string): string | undefined {
  *  ("running 40%", "waiting for the segmentation server: it is busy with another job"). */
 export async function synthstripBrainMask(live: LiveScene, nodeId: string, onProgress?: (line: string) => void,
   /** The server and the upload, replaceable for tests (brain-mask.test.ts). */
-  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number; queuedStuckMs?: number; stallMs?: number } = {}): Promise<BrainMaskResult> {
+  deps: { transport?: HaversackTransport; upload?: () => Promise<{ bytes: Uint8Array; filename: string }>; pollMs?: number; goneMs?: number; queuedStuckMs?: number; stallMs?: number; installStallMs?: number } = {}): Promise<BrainMaskResult> {
   const transport: HaversackTransport = deps.transport ?? { fetch: (...a) => fetch(...a) };
   const key = keyOf(live, nodeId) ?? nodeId;
   for (let i = kept.length - 1; i >= 0; i--) if (kept[i].nodeId === nodeId && kept[i].key !== key) kept.splice(i, 1);   // moved or replaced
@@ -47,7 +47,7 @@ export async function synthstripBrainMask(live: LiveScene, nodeId: string, onPro
   const run = await runHaversackTask({
     task: TASK, what: "finding the brain on the MRI", transport, onProgress,
     upload: deps.upload ?? (() => exportVolume(live, nodeId, "nrrd-gz")),
-    pollMs: deps.pollMs, goneMs: deps.goneMs, queuedStuckMs: deps.queuedStuckMs, stallMs: deps.stallMs,
+    pollMs: deps.pollMs, goneMs: deps.goneMs, queuedStuckMs: deps.queuedStuckMs, stallMs: deps.stallMs, installStallMs: deps.installStallMs,
   });
   if (!run.ok) {
     if (run.reason === "no-task") return { ok: false, reason: "no-synthstrip", message: "the segmentation server on this Mac cannot find the brain on an MRI (it runs without SynthStrip)" };

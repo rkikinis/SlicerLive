@@ -10,7 +10,8 @@ export interface BidsKindContext {
   /** The file names in one folder of the session, sorted (none when the folder is absent). */
   files(folder: string): Promise<string[]>;
   readText(path: string): Promise<string | undefined>;
-  /** The study every object of the session joins (same patient, study and frame of reference). */
+  /** The study every object of the session joins (same patient and study). Its frameOfReferenceUID is the session's
+   *  first T1's only (bids.ts FRAME_RULE): a kind gives each of ITS series the frame `frameOf` returns. */
   study: {
     patientName: string; patientID: string; studyInstanceUID: string; frameOfReferenceUID: string; studyDescription: string;
     comments: string; extra: Record<string, unknown>; studyDate: string; studyTime: string;
@@ -19,6 +20,11 @@ export interface BidsKindContext {
   };
   /** A UID derived from the dataset, subject, session and these parts: the same on every run with the same code. */
   uid(...parts: string[]): Promise<string>;
+  /** The frame of reference of one series, from its source file's name without extension (SDK 21; bids.ts FRAME_RULE 2:
+   *  BIDS does not say which scans share the scanner's coordinates, so each series has its own). */
+  frameOf(stem: string): Promise<string>;
+  /** bids.ts FRAME_RULE: a kind puts it in its series' UIDs when it moved its series to their own frame. */
+  frameRule: number;
   nextSeriesNumber(): number;
   /** Fields of a BIDS sidecar not to keep in an object: who and where, not how the scan was made. */
   sidecarLeftOut: string[];

@@ -141,17 +141,22 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
       node[k] = v;
     }
     if (n.type === "image") {
-      // THE INSTANCE LIST, COMPACT. One instance names the frame of a sequence as surely as all
-      // 533 (the SEG reader finds its frame by one), and a digest of the sorted list names the
-      // exact set; the full list was 160 KB of a 190 KB file on the first save (2026-09-20).
+      // THE INSTANCE LIST, IN STEVE'S DESCRIPTOR FORM (profile version 2): `kind` and every instance in slice order, which
+      // his spec makes normative ("the author's geometric order, so slice order is never re-guessed",
+      // mrson/schema/bulk.schema.json). Version 1 kept the first instance only (the full list was 160 KB of a 190 KB file
+      // on the first save, 2026-09-20); his validator refuses that form. A digest of the sorted list still names the set.
       const uids = ((org.sopInstanceUIDs ?? org.savedSopInstanceUIDs) as string[] | undefined) ?? [];
-      // From a multi-frame file every volume shares the uid; its frame numbers tell them apart (logic/instance-key.ts).
+      // From a multi-frame file every volume shares the uid; its frame numbers tell them apart (logic/instance-key.ts). Then
+      // `instances` and `frameNumbers` go slice for slice, the same length, so which frame of which file each slice is stays
+      // readable when a volume's frames come from more than one file (the critic, 2026-10-29, finding 5).
       const frames = org.sopInstanceUIDs ? (org.frameNumbers as number[] | undefined) : undefined;
+      const multiFrame = !!(frames?.length === uids.length && uids.length);
       const keys = instanceKeys({ sopInstanceUIDs: uids, frameNumbers: frames });
       node.dicom = {
+        kind: "dicom-series",
         seriesInstanceUID: org.savedSeriesInstanceUID ?? org.seriesInstanceUID, studyInstanceUID: org.studyInstanceUID ?? org.savedStudyInstanceUID,
-        sopInstanceUIDs: uids.slice(0, 1), instanceCount: uids.length,
-        ...(frames?.length === uids.length && uids.length ? { frameNumbers: frames.slice(0, 1) } : {}),
+        instances: uids, instanceCount: uids.length,
+        ...(multiFrame ? { frameNumbers: frames } : {}),
         ...(uids.length ? { instancesDigest: await sha256Hex([...keys].sort().join("\n")) } : {}),
         ...(org.frameOfReferenceUID ? { frameOfReferenceUID: org.frameOfReferenceUID } : {}),
         ...(org.modality ? { modality: org.modality } : {}),
@@ -162,12 +167,17 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
       if (typeof org.frameLabel === "string") node.frameLabel = org.frameLabel;
       { const st = (org.studyInstanceUID ?? org.savedStudyInstanceUID) as string | undefined; if (typeof st === "string") { studyUID ??= st; if (!studies.includes(st)) studies.push(st); } }
       if (n.sequence) node.sequence = mapRef(n.sequence);
-      // Steve's ZarrDesc without the hashes: the shape and dtype say what to expect.
-      const z = n.zarr as Obj | undefined; if (z) node.zarr = { shape: z.shape, dtype: z.dtype };
+      // The shape and dtype say what to expect. Not under `zarr`: Steve's schema reads a `zarr` field as "the voxels are
+      // here" and asks for its chunks (profile version 2).
+      const z = n.zarr as Obj | undefined; if (z) node.voxelShape = { shape: z.shape, dtype: z.dtype };
     }
     if (n.type === "segmentation") {
       const segStudy = (org.studyInstanceUID ?? org.savedStudyInstanceUID) as string | undefined;
-      node.dicom = { seriesInstanceUID: org.savedSeriesInstanceUID ?? org.seriesInstanceUID, ...(segStudy ? { studyInstanceUID: segStudy } : {}), ...(org.savedSopClassUID ?? org.sopClassUID ? { sopClassUID: org.savedSopClassUID ?? org.sopClassUID } : {}) };
+      // Steve's descriptor (profile version 2): `kind` and the SEG's one instance, as saved, else as loaded. An instance not
+      // known (a segmentation cache record of 10-20/21 lacks it; the critic, 2026-10-29, finding 4) is left out and the
+      // scene still saves: Albula finds a segmentation by its series; Steve's validator then names the gap.
+      const segInstance = (org.savedSeriesInstanceUID ? org.savedSopInstanceUID : org.sopInstanceUID) as string | undefined;
+      node.dicom = { kind: "dicom-seg", seriesInstanceUID: org.savedSeriesInstanceUID ?? org.seriesInstanceUID, ...(segStudy ? { studyInstanceUID: segStudy } : {}), ...(org.savedSopClassUID ?? org.sopClassUID ? { sopClassUID: org.savedSopClassUID ?? org.sopClassUID } : {}), ...(segInstance ? { instances: [segInstance] } : {}) };
       if (typeof segStudy === "string") { studyUID ??= segStudy; if (!studies.includes(segStudy)) studies.push(segStudy); }
       if (typeof org.task === "string") node.model = org.task;
       const src = ((n.refs as Obj | undefined)?.source as string[] | undefined)?.[0];
@@ -177,7 +187,12 @@ export async function writeScene(nodes: Iterable<MrsonNode>, o: WriteOptions): P
       node.segments = ((n.segments as Obj[]) ?? []).map((sg) => {
         const { fileColor: _fc, ...rest } = sg;
         const c = sg.color as number[] | undefined;
-        return { id: `s${sg.labelValue}`, ...rest, ...(c && c.length === 3 ? { color: [...c, 1] } : {}) };
+        // EVERY SEGMENT NAMED (Steve's schema requires `name`; 341 of 26 scenes' segments had none, 2026-10-28): the name
+        // it carries, else the structure's or the file's label, else its number.
+        const st = sg.structure as Obj | string | undefined;
+        // A structure given as a bare key ("heart_myocardium") comes after the file's own label: it is a key, not a name.
+        const name = [sg.name, typeof st === "object" ? st?.meaning ?? st?.name : undefined, sg.fileLabel, typeof st === "string" ? st : undefined].find((x) => typeof x === "string" && x.trim()) as string | undefined;
+        return { id: `s${sg.labelValue}`, ...rest, name: name ?? `Segment ${sg.labelValue}`, ...(c && c.length === 3 ? { color: [...c, 1] } : {}) };
       });
       if (n.sequence) node.sequence = mapRef(n.sequence);
     }

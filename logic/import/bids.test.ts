@@ -6,7 +6,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import dcmjs from "../dcmjs.ts";
 import { dicomIO, setDicomLibrary } from "../dicom-io.ts";
-import { buildBidsSubject, readBidsDataset, sidecarToDicom } from "./bids.ts";
+import { buildBidsSubject, derivedUid, FRAME_RULE, IMAGE_RULE, readBidsDataset, sidecarToDicom } from "./bids.ts";
 import { parseInstances, volumesOfSeries } from "../readers/dicom-series.ts";
 import { dciodvfy, HAS_DCIODVFY } from "../test-dicom.ts";
 
@@ -193,5 +193,31 @@ Deno.test("BIDS: whole numbers times the NIfTI's value scale are written exactly
     assertEquals([Number(d.RescaleSlope), Number(d.RescaleIntercept)], [0.5, 0]);
     assert(!/rounded/.test(String(d.DerivationDescription ?? "")), "exact: no rounding stated");
     assert(objects.some((o) => o.role === "seg-tumor"), "the mask has its T1 to be drawn on");
+  } finally { await Deno.remove(root, { recursive: true }); }
+});
+
+Deno.test("BIDS frame rule 2: the session's first T1 keeps its frame and UIDs; another anatomical series has its own frame and new UIDs", async () => {
+  const root = await makeDataset();
+  try {
+    // A FLAIR beside the T1: same session, but BIDS does not say it shares the T1's scanner coordinates.
+    const t1Path = `${root}/sub-01/ses-pre/anat/sub-01_ses-pre_T1w.nii`;
+    Deno.writeFileSync(`${root}/sub-01/ses-pre/anat/sub-01_ses-pre_FLAIR.nii`, Deno.readFileSync(t1Path));
+    const ds = await readBidsDataset(root);
+    const { objects } = await buildBidsSubject(ds, "01", "pre", opts);
+    const t1 = objects.find((o) => o.role === "T1w")!, flair = objects.find((o) => o.role === "FLAIR")!, seg = objects.find((o) => o.role === "seg-tumor")!;
+    const key = ds.doi ?? ds.name;
+    // The T1 exactly as frame rule 1 made it: its series UID and the session's frame (nothing drawn on it is orphaned).
+    assertEquals(t1.seriesInstanceUID, await derivedUid(key, "sub-01", "ses-pre", "sub-01_ses-pre_T1w", `image rule ${IMAGE_RULE}`, "series"));
+    const sessionFrame = await derivedUid(key, "sub-01", "ses-pre", "frame of reference");
+    assert(t1.files.every((f) => f.index.frameOfReferenceUID === sessionFrame), "the T1 keeps the session's frame");
+    assertEquals(seg.files[0].index.frameOfReferenceUID, sessionFrame, "its mask too");
+    // The FLAIR: its own frame, and the rule in its UIDs (a new object; --replace-older removes the rule-1 one).
+    const flairFrame = await derivedUid(key, "sub-01", "ses-pre", "sub-01_ses-pre_FLAIR", "frame of reference");
+    assert(flair.files.every((f) => f.index.frameOfReferenceUID === flairFrame), "the FLAIR has its own frame");
+    assert(flairFrame !== sessionFrame);
+    assertEquals(flair.seriesInstanceUID, await derivedUid(key, "sub-01", "ses-pre", "sub-01_ses-pre_FLAIR", `image rule ${IMAGE_RULE}`, `frame rule ${FRAME_RULE}`, "series"));
+    const io = await dicomIO();
+    const inFile = (io.naturalize(io.readFile(flair.files[0].bytes.slice().buffer as ArrayBuffer).dict) as Record<string, unknown>).FrameOfReferenceUID;
+    assertEquals(inFile, flairFrame, "the file says the same frame as its index row");
   } finally { await Deno.remove(root, { recursive: true }); }
 });

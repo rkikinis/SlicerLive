@@ -116,3 +116,21 @@ for (const [name, file] of [["philips_dti", "2201_WIP_DTI_S2MB2.dcm"], ["xa30_dw
     },
   });
 }
+
+// THE DUCKN VIEW (dicom-spec 1.0, as haversack writes it; Ron, 2026-10-27: "follow Mike's lead"): what the array states
+// itself, the file meta, stored-value units and private elements never appear in it; the rest does, sequences included.
+Deno.test("ducknView leaves out what duckn states, the file meta, stored-value units and private elements", async () => {
+  const { ducknView } = await import("./dicom-tags.ts");
+  const v = ducknView({
+    Modality: "CT", KVP: 120, WindowCenter: [40], TransferSyntaxUID: "1.2.840.10008.1.2.1", MediaStorageSOPClassUID: "x",
+    Rows: 512, Columns: 512, PixelSpacing: [0.8, 0.8], ImagePositionPatient: [0, 0, 0], SliceThickness: 3,
+    RescaleIntercept: -1024, RescaleSlope: 1, RescaleType: "HU", BitsStored: 12, PixelPaddingValue: -2000,
+    "00130010": "CTP", "00131010": "PROJECT", OverlayRows: 512,
+    AnatomicRegionSequence: [{ CodeValue: "T-28000", "00290010": "SIEMENS" }],
+    SharedFunctionalGroupsSequence: [{ PixelMeasuresSequence: [{ PixelSpacing: [1, 1] }], MRImageFrameTypeSequence: [{ FrameType: ["ORIGINAL"] }] }],
+    PerFrameFunctionalGroupsSequence: [{ PlanePositionSequence: [{ ImagePositionPatient: [0, 0, 0] }] }],
+  });
+  assertEquals(Object.keys(v).sort(), ["AnatomicRegionSequence", "KVP", "Modality", "SharedFunctionalGroupsSequence", "WindowCenter"]);
+  assertEquals(v.AnatomicRegionSequence, [{ CodeValue: "T-28000" }]);
+  assertEquals(v.SharedFunctionalGroupsSequence, [{ MRImageFrameTypeSequence: [{ FrameType: ["ORIGINAL"] }] }]);
+});

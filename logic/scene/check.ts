@@ -5,7 +5,7 @@
 // required field present and of the right shape, every ref resolving to a node in the file, and
 // -- when a database is at hand -- every series the file names present in it. Plain functions,
 // so the rebuild's tests run them and the loader refuses a file that fails them with the list.
-import { ENVELOPE, type FieldSpec, type Kind, MRSON_VERSION, NODE_TYPES, PROFILE_ID } from "./profile.ts";
+import { ENVELOPE, type FieldSpec, type Kind, MRSON_VERSION, NODE_TYPES, PROFILE_ID, PROFILES_READ } from "./profile.ts";
 
 export interface SceneProblem { where: string; what: string }
 
@@ -48,7 +48,7 @@ export function checkScene(doc: unknown): SceneProblem[] {
   const d = doc as Obj;
   checkFields("file", d, ENVELOPE, out);
   if (typeof d.mrson === "number" && d.mrson !== MRSON_VERSION) out.push({ where: "file", what: `mrson ${d.mrson} is not the ${MRSON_VERSION} this application reads` });
-  if (Array.isArray(d.extensionsUsed) && !d.extensionsUsed.includes(PROFILE_ID)) out.push({ where: "file", what: `extensionsUsed does not name ${PROFILE_ID}` });
+  if (Array.isArray(d.extensionsUsed) && !PROFILES_READ.some((p) => (d.extensionsUsed as unknown[]).includes(p))) out.push({ where: "file", what: `extensionsUsed does not name ${PROFILE_ID}` });
   const src = d.source as Obj | undefined;
   if (src && typeof src === "object") {
     if (typeof src.producer !== "string") out.push({ where: "file", what: "source.producer (the build that wrote it) is missing" });
@@ -87,7 +87,8 @@ export function checkScene(doc: unknown): SceneProblem[] {
     if (type === "image" || type === "segmentation") {
       const dcm = n.dicom as Obj | undefined;
       if (dcm && typeof dcm.seriesInstanceUID !== "string") out.push({ where, what: "dicom.seriesInstanceUID is missing: the node cannot be found again" });
-      if (type === "image" && dcm && !(Array.isArray(dcm.sopInstanceUIDs) && dcm.sopInstanceUIDs.length)) out.push({ where, what: "dicom.sopInstanceUIDs is empty: a frame of a sequence cannot be told from the others" });
+      const named = Array.isArray(dcm?.instances) ? dcm!.instances : dcm?.sopInstanceUIDs;   // version 2, version 1
+      if (type === "image" && dcm && !(Array.isArray(named) && named.length)) out.push({ where, what: "dicom.instances is empty: a frame of a sequence cannot be told from the others" });
     }
     if (type === "segmentation") for (const [i, sg] of ((n.segments as Obj[] | undefined) ?? []).entries()) {
       if (typeof sg?.id !== "string") out.push({ where, what: `segments[${i}] has no id (the core requires one)` });

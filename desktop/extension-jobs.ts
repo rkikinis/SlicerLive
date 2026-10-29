@@ -331,5 +331,31 @@ export function handleJobsRequest(req: Request): Response | null {
   return Response.json(restarted ? { ...body, serverRestart: restarted } : body, { headers: { "cache-control": "no-store" } });
 }
 
+/** A MODULE ASKS FOR ITS DATABASE'S WORK NOW (Ron, 2026-10-26: "wait for the import"): the Diffusion module does not
+ *  align and fit a scan itself when the import-time work can make it; it asks for the run and waits for what it makes.
+ *  POST /_jobs/run {"db": "<id>"}: a registered database only; queued as a real change is (the startup sweep's
+ *  "unchanged since the last run" does not skip it). Says whether the work is available here at all. */
+export async function handleJobsRunRequest(req: Request): Promise<Response | null> {
+  const url = new URL(req.url);
+  if (url.pathname !== "/_jobs/run") return null;
+  if (req.method !== "POST") return new Response("POST only", { status: 405 });
+  const noStore = { headers: { "cache-control": "no-store" } };
+  if (!status.available || !origin) return Response.json({ queued: false, why: status.why ?? "no import-time work here" }, noStore);
+  const body = await req.json().catch(() => null) as { db?: unknown; extension?: unknown } | null;
+  const db = typeof body?.db === "string" ? body.db : "";
+  const known = db ? (await listDatabases().catch(() => [] as Db[])).find((d) => d.id === db && d.exists) : undefined;
+  if (!known) return Response.json({ queued: false, why: "no such database" }, { status: 404, ...noStore });
+  // WOULD IT RUN? (critic 2026-10-26, finding 4): the job asked for (or any, when none is named) must pass the same pin
+  // test the run does; otherwise the answer is no, with the reason, and the module does the work itself at once.
+  const ext = typeof body?.extension === "string" ? body.extension : "";
+  const jobs = [...coreJobs(), ...jobEntries()].filter((j) => !ext || j.extension === ext);
+  const refusals = await Promise.all(jobs.map((j) => notPinned(j).then((why) => why ? `${j.extension}: ${why}` : "")));
+  if (!jobs.length) return Response.json({ queued: false, why: ext ? `no import-time work named ${ext} here` : "no import-time work here" }, noStore);
+  if (refusals.every(Boolean)) return Response.json({ queued: false, why: refusals.join("; ") }, noStore);
+  sweepOnly.delete(db);
+  enqueue(db);
+  return Response.json({ queued: true, running: status.running?.db === db }, noStore);
+}
+
 /** For tests: the state, read only. */
 export const jobsStatus = (): Readonly<Status> => status;

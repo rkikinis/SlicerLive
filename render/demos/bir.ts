@@ -48,6 +48,14 @@ export interface StripItem {
   seriesUID: string;
   lines: string[]; // decoration: date · modality · description · count (spec 5.3)
   current: boolean;
+  /** Modality, for the badge on the row. Falls back to lines[0]. */
+  modality?: string;
+  /** This series draws OVER the loaded images rather than replacing them (a segmentation).
+   *  Changes the row's tooltip, and lets the reader mark which overlay is showing. */
+  overlay?: boolean;
+  /** The series' tile, or null when there is no image to show (a report, a presentation state,
+   *  a segmentation object). A null tile makes the row COMPACT — modality badge + text, no
+   *  picture box — rather than a square of placeholder. */
   thumb: () => Promise<Blob | null>;
   open: () => void | Promise<void>;
 }
@@ -66,6 +74,9 @@ export interface BirCfg {
   offsetMm: (p: Plane) => number;
   spacing: (p: Plane) => number;
   step: (p: Plane, forward: boolean) => void;
+  /** Slice number and count for a plane, as the corner readout shows them. Drives the slice
+   *  scrollbars; without it they fall back to the plane's span divided by its spacing. */
+  sliceIndex?: (p: Plane) => { index: number; count: number };
   redraw: (p: Plane) => void;
   redrawAll: () => void;
   rasLo: Vec3;
@@ -93,6 +104,11 @@ export interface BirCfg {
    *  way to persist annotations (e.g. the read-only SlicerRAD-IDC viewer) — everything else in the
    *  BIR tool set stays. */
   disableMeasurements?: boolean;
+  /** The loaded series is a STACK of images, not a volume (its slice positions are duplicated,
+   *  unevenly spaced or drifting), so the MPR reformats and the 3D render would be fabrications.
+   *  Locks the reader to BIR basic — one stack viewport — and disables the layout control and
+   *  the Advanced Mode toggle with a tip that says why. */
+  stackOnly?: boolean;
   /** Hide the "Select Patient" toolbar button and the "Browser (patient/study/series)" layout
    *  option. For study-scoped deployments (SlicerRAD-IDC) that have no patient/study browser to
    *  return to — the series thumbnail strip is the navigation surface instead. */
@@ -106,6 +122,11 @@ export interface BirApi {
   leftMode(): "scroll" | "wl" | "zoom" | "pan";
   hooks(p: Plane): { onLeftGrab: (u: number, v: number, w: number, h: number) => boolean };
   drawOverlay(p: Plane): void;
+  /** Re-render the open series' thumbnail (its pixels may have arrived since it was drawn). */
+  refreshStrip(): void;
+  /** Mark which overlay series (e.g. a segmentation) is currently drawn over the images.
+   *  null clears the mark. */
+  markOverlay(seriesUID: string | null): void;
   resize(): void;
   selected(): Plane;
   setLayout(l: "single" | "twoUp" | "fourUp"): void;
@@ -234,9 +255,18 @@ const STYLE = `
   overflow:hidden; background:#05060a; }
 #bir-strip .item:hover { border-color:#33507e; }
 #bir-strip .item.current { border-color:#2b6cb0; box-shadow:0 0 0 1px #2b6cb0; }
+/* The displayed OVERLAY (a segmentation drawn over the open series) — a second kind of
+   "showing", so it reads differently from the open series itself. */
+#bir-strip .item.overlay { border-color:#54c6f0; box-shadow:inset 3px 0 0 #54c6f0; }
 #bir-strip img { width:100%; aspect-ratio:1; object-fit:contain; background:#000; display:block; }
+#bir-strip .item.no-thumb img { display:none; }
 #bir-strip .cap { font:10px -apple-system,system-ui,sans-serif; color:#9fb3d0; padding:3px 6px;
-  line-height:1.35; }
+  line-height:1.35; display:flex; gap:5px; align-items:baseline; }
+#bir-strip .item.no-thumb .cap { padding:5px 6px; }
+#bir-strip .cap .mod { flex:0 0 auto; font-weight:700; color:#cfe0f5; background:#1b2740;
+  border-radius:3px; padding:0 4px; }
+#bir-strip .cap .txt { min-width:0; overflow:hidden; text-overflow:ellipsis;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .bir-cell-selected { outline:1px solid #2b6cb0; outline-offset:-1px; }
 .srv-grid.ann-none .srv-orient, .srv-grid.ann-none .srv-slice-readout,
 .srv-grid.ann-min .srv-slice-readout { display:none; }
@@ -273,12 +303,79 @@ export function mountBir(cfg: BirCfg): BirApi {
     cell.appendChild(c);
     overlays.set(p, c);
   }
+  // ---- slice scrollbars -------------------------------------------------------------------
+  // Slicer and OHIF both put one on a stack view, and the reader had only the text readout: no
+  // indication of where in the stack you are without reading it, and no way to get somewhere
+  // else without scrolling there. Drag the thumb, or click the track to jump.
+  const scrollbars = new Map<Plane, { bar: HTMLElement; thumb: HTMLElement }>();
+  const planeAxis = (p: Plane) => (p === "axial" ? 2 : p === "coronal" ? 1 : 0);
+  const sliceCount = (p: Plane): number => {
+    const fromHost = cfg.sliceIndex?.(p).count;
+    if (fromHost && fromHost > 1) return fromHost;
+    const a = planeAxis(p), sp = cfg.spacing(p);
+    return sp > 0 ? Math.max(1, Math.round((cfg.rasHi[a] - cfg.rasLo[a]) / sp)) : 1;
+  };
+  for (const p of cfg.planes) {
+    const cell = cfg.cellOf(p);
+    if (!cell) continue;
+    const bar = document.createElement("div");
+    bar.className = "bir-scrollbar";
+    bar.style.cssText = "position:absolute;top:0;right:0;width:11px;height:100%;z-index:3;" +
+      "cursor:ns-resize;touch-action:none;background:linear-gradient(90deg,transparent,rgba(10,14,22,.45));";
+    const thumb = document.createElement("div");
+    thumb.style.cssText = "position:absolute;left:2px;width:7px;border-radius:4px;" +
+      "background:rgba(190,210,240,.55);box-shadow:0 0 0 1px rgba(0,0,0,.35);transition:background 120ms;";
+    bar.appendChild(thumb);
+    cell.appendChild(bar);
+    const toOffset = (clientY: number) => {
+      const r = bar.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (clientY - r.top) / Math.max(1, r.height)));
+      // Top of the bar is the HIGH end of the axis, matching how the views scroll.
+      cfg.setOff01(p, 1 - frac);
+      cfg.redraw(p);
+      drawOverlay(p);
+      syncScrollbar(p);
+    };
+    let dragging = false;
+    bar.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      thumb.style.background = "rgba(220,235,255,.9)";
+      toOffset(e.clientY);                 // scrub FIRST: a capture that can't be taken must
+      try { bar.setPointerCapture(e.pointerId); } catch { /* ignore */ }  // not swallow the click
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    bar.addEventListener("pointermove", (e) => { if (dragging) toOffset(e.clientY); });
+    const end = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      thumb.style.background = "rgba(190,210,240,.55)";
+      try { bar.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", end);
+    scrollbars.set(p, { bar, thumb });
+  }
+  const syncScrollbar = (p: Plane) => {
+    const sb = scrollbars.get(p);
+    if (!sb) return;
+    const n = sliceCount(p);
+    if (n <= 1) { sb.bar.style.display = "none"; return; }   // a single-slice series has nowhere to go
+    sb.bar.style.display = "";
+    const h = sb.bar.clientHeight || 1;
+    const size = Math.max(18, Math.min(h, h / n));
+    const frac = 1 - Math.max(0, Math.min(1, cfg.off01(p)));
+    sb.thumb.style.height = `${size}px`;
+    sb.thumb.style.top = `${frac * (h - size)}px`;
+  };
+
   const resizeOverlays = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     for (const [, c] of overlays) {
       c.width = Math.max(1, Math.floor(c.clientWidth * dpr));
       c.height = Math.max(1, Math.floor(c.clientHeight * dpr));
     }
+    for (const p of cfg.planes) syncScrollbar(p);
   };
 
   const rasOfClick = (p: Plane, u: number, v: number, w: number, h: number): Vec3 =>
@@ -289,6 +386,7 @@ export function mountBir(cfg: BirCfg): BirApi {
   };
 
   const drawOverlay = (p: Plane) => {
+    syncScrollbar(p);
     const c = overlays.get(p);
     if (!c) return;
     const ctx = c.getContext("2d")!;
@@ -469,12 +567,20 @@ export function mountBir(cfg: BirCfg): BirApi {
     "border:1px solid #33507e;border-radius:4px;padding:2px 4px;cursor:pointer;";
   for (
     const [v, label] of [
-      ["fourUp", "Four-Up (MPR + 3D)"],
-      ["twoUp", "2 side-by-side"],
-      ["single", "Single viewport"],
+      // A stack has nothing to lay out: no reformats, no 3D. Offering the multi-viewport
+      // protocols would offer views that would be wrong.
+      ...(cfg.stackOnly ? [["single", "Single stack viewport"]] : [
+        ["fourUp", "Four-Up (MPR + 3D)"],
+        ["twoUp", "2 side-by-side"],
+        ["single", "Single viewport"],
+      ]),
       ...(cfg.hidePatientBrowser ? [] : [["browser", "Browser (patient/study/series)"]]),
     ] as const
   ) layoutSel.add(new Option(label, v));
+  if (cfg.stackOnly) {
+    layoutSel.title = "Layout — this series is an image stack, not a volume: only the stack " +
+      "viewport is available (no reformats or 3D)";
+  }
   layoutSel.addEventListener("change", () => {
     if (layoutSel.value === "browser") cfg.close();
     else setLayout(layoutSel.value as typeof layout);
@@ -737,9 +843,12 @@ export function mountBir(cfg: BirCfg): BirApi {
     disabledTip: "Show Report — no reports available for this patient",
   });
   btn("help", "help", "Help — tool guide and keyboard shortcuts — H / F1", () => showHelp());
-  btn("advanced", "advanced", "Advanced Mode — toggle BIR basic (single stack) vs MPR Four-Up + 3D — F10", () => {
+  btn("advanced", "advanced", "Advanced Mode — toggle BIR basic (single stack) vs MPR Four-Up + 3D — F10", cfg.stackOnly ? undefined : () => {
     setLayout(layout === "single" ? "fourUp" : "single");
-  });
+  }, cfg.stackOnly ? {
+    disabled: true,
+    disabledTip: "Advanced Mode — unavailable: this series is an image stack, not a volume (no MPR or 3D)",
+  } : undefined);
 
   // ---- caller-supplied extra tools (IDC Share / Download) --------------------------------
   if (cfg.extraTools?.length) {
@@ -749,6 +858,9 @@ export function mountBir(cfg: BirCfg): BirApi {
 
   // ---- layouts (hanging protocols) --------------------------------------------------------
   const setLayout = (l: typeof layout) => {
+    // A stack has only the stack viewport, whoever asks (toolbar, F10, the caller's initial
+    // layout, a saved hanging protocol).
+    if (cfg.stackOnly) l = "single";
     layout = l;
     const show: Record<string, boolean> = {};
     const names = [...cfg.planes, "threeD"];
@@ -769,6 +881,9 @@ export function mountBir(cfg: BirCfg): BirApi {
 
   // ---- thumbnail strip (BIR 5.3 Navigation) ----------------------------------------------
   let strip: HTMLElement | null = null;
+  // Re-asks the open series for its tile. A streaming load draws the first one from the
+  // placeholder volume, so it has to be re-rendered once the real data is in.
+  let refreshCurrentThumb: (() => void) | null = null;
   if (cfg.strip?.length) {
     strip = document.createElement("div");
     strip.id = "bir-strip";
@@ -778,15 +893,30 @@ export function mountBir(cfg: BirCfg): BirApi {
       const item = document.createElement("div");
       item.className = "item" + (it.current ? " current" : "");
       if (it.current) currentItem = item;
-      item.title = it.lines.join(" · ") + " — click to load";
+      item.dataset.uid = it.seriesUID;
+      item.title = it.lines.join(" · ") +
+        (it.overlay ? " — click to show over the current images" : " — click to load");
       const img = document.createElement("img");
       img.alt = "";
-      it.thumb().then((b) => {
-        if (b) img.src = URL.createObjectURL(b);
-      }).catch(() => {});
+      // A series with no image to show (SR, SEG, RTSTRUCT, presentation state) collapses to a
+      // text row the height of its own caption, the way OHIF lists them — a square of
+      // placeholder for each one pushes the series that DO have pictures off the screen.
+      const loadThumb = () =>
+        it.thumb().then((b) => {
+          item.classList.toggle("no-thumb", !b);
+          if (b) img.src = URL.createObjectURL(b);
+        }).catch(() => item.classList.add("no-thumb"));
+      loadThumb();
+      if (it.current) refreshCurrentThumb = loadThumb;
       const cap = document.createElement("div");
       cap.className = "cap";
-      cap.textContent = it.lines.join(" · ");
+      const mod = document.createElement("span");
+      mod.className = "mod";
+      mod.textContent = it.modality ?? it.lines[0] ?? "";
+      const txt = document.createElement("span");
+      txt.className = "txt";
+      txt.textContent = (it.modality ? it.lines : it.lines.slice(1)).join(" · ");
+      cap.append(mod, txt);
       item.append(img, cap);
       // Single click loads the series (OHIF-style); ignore a click on the already-open one.
       item.addEventListener("click", () => { if (!it.current) it.open(); });
@@ -991,6 +1121,12 @@ export function mountBir(cfg: BirCfg): BirApi {
     leftMode: () => (tool === "wl" || tool === "zoom" || tool === "pan" ? tool : "scroll"),
     hooks,
     drawOverlay,
+    refreshStrip: () => refreshCurrentThumb?.(),
+    markOverlay: (uid) => {
+      for (const el of strip?.querySelectorAll(".item") ?? []) {
+        (el as HTMLElement).classList.toggle("overlay", !!uid && (el as HTMLElement).dataset.uid === uid);
+      }
+    },
     resize: () => {
       resizeOverlays();
       redrawOverlays();

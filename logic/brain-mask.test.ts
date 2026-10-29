@@ -99,6 +99,36 @@ Deno.test("a job the server never starts, while it runs nothing else, ends the w
   assertEquals(!after.ok && after.message.includes("runs nothing else"), true);
 });
 
+// A FIRST RUN FETCHES ITS WEIGHTS (2026-10-26: LNQ's first run on the laptop was called stuck while it downloaded): a
+// new line under the stage is movement, and while the stage is "weights" the wait is the install's, not two minutes.
+Deno.test("an install that says one line per part and nothing between is not called stuck by the two-minute rule", async () => {
+  let polls = 0;
+  const fetchFn = (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("tasks/")) return Promise.resolve(new Response("{}", { status: 200 }));
+    if (init?.method === "POST") return Promise.resolve(new Response(JSON.stringify({ id: "j5" }), { status: 200 }));
+    if (u.endsWith("/jobs")) return Promise.resolve(new Response(JSON.stringify({ jobs: [{ id: "j5", state: "running" }] }), { status: 200 }));
+    if (u.endsWith("/result")) return Promise.resolve(new Response("", { status: 404 }));
+    polls++;
+    // fraction 0 throughout; the stage is "weights", the detail moves only now and then; then it finishes
+    const detail = `reading fold ${Math.min(4, Math.floor(polls / 40))}'s weights`;
+    return Promise.resolve(new Response(JSON.stringify(polls < 200 ? { state: "running", progress: { stage: "weights", detail, part: 0, fraction: 0 } } : { state: "succeeded" }), { status: 200 }));
+  };
+  const r = await synthstripBrainMask(live, "x", undefined, { transport: { fetch: fetchFn as typeof fetch, base: "/_haversack/" }, upload, pollMs: 1, stallMs: 30, installStallMs: 5000 });
+  assertEquals(!r.ok && r.reason, "failed");   // it ran to the end (the stand-in sends no answer): not "stuck"
+  // ...and an install that truly stops is still stuck, after the install's own wait, said as such.
+  const still = (url: string | URL | Request, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("tasks/")) return Promise.resolve(new Response("{}", { status: 200 }));
+    if (init?.method === "POST") return Promise.resolve(new Response(JSON.stringify({ id: "j6" }), { status: 200 }));
+    if (u.endsWith("/jobs")) return Promise.resolve(new Response(JSON.stringify({ jobs: [{ id: "j6", state: "running" }] }), { status: 200 }));
+    return Promise.resolve(new Response(JSON.stringify({ state: "running", progress: { stage: "weights", detail: "reading fold 0's weights", fraction: 0 } }), { status: 200 }));
+  };
+  const s = await synthstripBrainMask(live, "y", undefined, { transport: { fetch: still as typeof fetch, base: "/_haversack/" }, upload, pollMs: 2, stallMs: 30, installStallMs: 150 });
+  assertEquals(!s.ok && s.reason, "stuck");
+  assertEquals(!s.ok && s.message.includes("weights"), true);
+});
+
 Deno.test("a running job that makes no progress is a stuck server too (Ron, 2026-10-15: be aggressive)", async () => {
   const fetchFn = (url: string | URL | Request, init?: RequestInit) => {
     const u = String(url);

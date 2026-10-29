@@ -54,7 +54,8 @@ export function applySceneState(live: LiveScene, doc: Obj, hooks: RestoreHooks =
     if (n.type === "image") {
       const dcm = (n.dicom as Obj | undefined) ?? {};
       // By the file AND its frame where the volume came from a multi-frame file (logic/instance-key.ts).
-      const inst = firstInstance({ sopInstanceUIDs: dcm.sopInstanceUIDs as string[] | undefined, frameNumbers: dcm.frameNumbers as number[] | undefined });
+      // Version 2 names the ordered `instances` (Steve's descriptor), version 1 the first one as `sopInstanceUIDs`.
+      const inst = firstInstance({ sopInstanceUIDs: (dcm.instances ?? dcm.sopInstanceUIDs) as string[] | undefined, frameNumbers: dcm.frameNumbers as number[] | undefined });
       const hit = liveAll.find((l) => l.type === "image" && holdsInstance(origin(l) as { sopInstanceUIDs?: string[]; frameNumbers?: number[] }, inst))
         ?? liveAll.find((l) => l.type === "image" && (origin(l).seriesInstanceUID === dcm.seriesInstanceUID || origin(l).savedSeriesInstanceUID === dcm.seriesInstanceUID));
       if (hit) map.set(id, hit.id); else missing.push(`a volume of series …${String(dcm.seriesInstanceUID ?? "").slice(-8)}${n.frameLabel ? ` (${n.frameLabel})` : ""}`);

@@ -119,3 +119,14 @@ Deno.test("GET /_jobs says while the page holds the graphics card, so a running 
   assertEquals(await held(), true);
   assertEquals(typeof before, "boolean");
 });
+
+Deno.test("POST /_jobs/run: a module asks for its database's work; an unknown database is not queued (2026-10-26, Ron: 'wait for the import')", async () => {
+  const { handleJobsRunRequest } = await import("./extension-jobs.ts");
+  assertEquals(await handleJobsRunRequest(new Request("http://x/_jobs")), null, "another path is not this route's");
+  assertEquals((await handleJobsRunRequest(new Request("http://x/_jobs/run")))!.status, 405);
+  const r = await handleJobsRunRequest(new Request("http://x/_jobs/run", { method: "POST", body: JSON.stringify({ db: "no-such-database" }) }));
+  const body = await r!.json() as { queued: boolean; why?: string };
+  assertEquals(body.queued, false);
+  assert(body.why, "it says why");
+  assert(!jobsStatus().queued.includes("no-such-database"));
+});

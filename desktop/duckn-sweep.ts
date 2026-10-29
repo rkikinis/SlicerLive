@@ -28,6 +28,7 @@ import { copyStatus } from "./duckn-copy-check.ts";
 import { writeDucknCopy } from "./duckn-copy.ts";
 
 import { sqliteScript } from "./sqlite.ts";
+import { provenanceEdges, provenancePathFor } from "./db-index.ts";
 import { join } from "jsr:@std/path@1";
 /** Not images: never read for a copy. Anything else is tried, and a refusal is recorded. */
 const NOT_IMAGES = new Set(["SEG", "SR", "PR", "KO", "RTSTRUCT", "RTPLAN", "RTDOSE", "RTRECORD", "REG", "DOC", "PLAN", "AU", "ECG"]);
@@ -63,6 +64,11 @@ export function outcomeOf(msg: string): "refused" | "unreadable" | "failed" {
   return /does not give whole numbers|will not guess|declared nothing|different orientation|slice in this series|none of the volumes in this series is complete/.test(msg) ? "refused" : "failed";
 }
 
+/** The series that are saved scenes in DICOM: children of a made-from record of kind "scene". */
+async function sceneObjects(dbPath: string): Promise<Set<string>> {
+  try { return new Set((await provenanceEdges(provenancePathFor(dbPath))).filter((e) => e.kind === "scene").map((e) => e.child)); } catch { return new Set(); }
+}
+
 async function listSeries(dbPath: string): Promise<{ uid: string; modality: string }[]> {
   // Albula's own SQLite (desktop/sqlite.ts), not the sqlite3 program: Windows has none (2026-10-13).
   const text = (await sqliteScript(join(dbPath, "ctkDICOM.sql"), ".timeout 5000\n.mode json\nSELECT SeriesInstanceUID AS uid, COALESCE(Modality,'') AS modality FROM Series ORDER BY SeriesInstanceUID;", true)).trim();
@@ -93,7 +99,10 @@ export async function sweep(dbPath: string, opts: { dryRun?: boolean; onEntry?: 
       if (!opts.dryRun) await Deno.remove(`${folder}/${e.name}`, { recursive: true });
     }
   } catch { /* no copies folder yet */ }
-  const all = (await listSeries(root)).filter((s) => !NOT_IMAGES.has(s.modality.toUpperCase()));
+  // A SAVED SCENE STORED AS DICOM (desktop/scene-mrcom.ts; made-from kind "scene") is a picture of a scene, not a scan:
+  // its pixels are the object's placeholder, and a copy of them is nothing anyone loads.
+  const scenes = await sceneObjects(root);
+  const all = (await listSeries(root)).filter((s) => !NOT_IMAGES.has(s.modality.toUpperCase()) && !scenes.has(s.uid));
   const entries: SweepEntry[] = [];
   const writeReport = async (finished: boolean) => {
     if (opts.dryRun) return;

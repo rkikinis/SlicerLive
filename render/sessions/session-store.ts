@@ -12,6 +12,7 @@
 // written through LiveScene.write (so a connected app follows). "Save" = export the reachable active set.
 import type { Change, LiveScene } from "../livescene.ts";
 import type { MrsonNode } from "../mrson.ts";
+import { blobRefs } from "../../logic/bulk.ts";
 import type { Op } from "../liveops.ts";
 import type { SessionFS } from "./session-fs.ts";
 
@@ -211,12 +212,7 @@ export class SessionStore {
 }
 
 /** Every content-addressed blob hash a set of nodes references (zarr chunks, mesh points/triangles). */
-export function blobRefs(nodes: MrsonNode[]): Set<string> {
-  const refs = new Set<string>();
-  for (const n of nodes) {
-    const z = (n as { zarr?: { chunkHashes?: Record<string, string> } }).zarr;
-    if (z?.chunkHashes) for (const h of Object.values(z.chunkHashes)) refs.add(h);
-    for (const k of ["points", "triangles"]) { const v = (n as Record<string, unknown>)[k]; if (typeof v === "string" && v.startsWith("sha256-")) refs.add(v); }
-  }
-  return refs;
-}
+// Moved to logic/bulk.ts: they are pure functions over mrson nodes, and logic/mrcom/* needs them
+// without this file's DOM-typed imports. Re-exported so existing callers are unchanged.
+export { type BulkSource, bulkSources } from "../../logic/bulk.ts";
+export { blobRefs };

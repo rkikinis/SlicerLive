@@ -58,6 +58,17 @@ await run(Deno.execPath(), [
   join(here, "main.ts"),
 ]);
 
+// THE MAC'S OWN SERVICES FOR SHARING (desktop/native/albula-mac.swift, desktop/mac-helper.ts): Touch ID, the Keychain,
+// Bonjour. Built with Apple's compiler when it is there; without it the app is built anyway and sharing says it is not
+// available on this build (mac-helper.ts helperPath).
+const helper = join(buildDir, "albula-mac");
+let haveHelper = false;
+try {
+  const o = await new Deno.Command("xcrun", { args: ["swiftc", "-O", join(here, "native", "albula-mac.swift"), "-o", helper], stdout: "null", stderr: "piped" }).output();
+  haveHelper = o.success;
+  if (!o.success) console.warn("the sharing helper did not build (sharing will not be available in this app):\n" + new TextDecoder().decode(o.stderr).split("\n").filter((l) => !/deprecated/.test(l)).slice(0, 8).join("\n"));
+} catch { console.warn("no Apple compiler (xcrun swiftc): the app is built without the sharing helper"); }
+
 console.log("assembling SlicerAlbula.app…");
 const app = join(buildDir, "SlicerAlbula.app");
 /**
@@ -88,6 +99,7 @@ const res = join(app, "Contents", "Resources");
 await Deno.mkdir(macos, { recursive: true });
 await Deno.mkdir(res, { recursive: true });
 await Deno.copyFile(bin, join(macos, "SlicerAlbula"));
+if (haveHelper) await Deno.copyFile(helper, join(macos, "albula-mac"));
 await Deno.writeTextFile(
   join(app, "Contents", "Info.plist"),
   `<?xml version="1.0" encoding="UTF-8"?>
@@ -104,6 +116,8 @@ await Deno.writeTextFile(
   <key>NSHighResolutionCapable</key><true/>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
+  <key>NSLocalNetworkUsageDescription</key><string>SlicerAlbula opens a database shared by your other Mac, or shares one with it, on this network.</string>
+  <key>NSBonjourServices</key><array><string>_albula._tcp</string></array>
 </dict></plist>
 `,
 );

@@ -47,12 +47,12 @@ import { orderScene } from "./scene-order.ts";
 import { parseTerminology } from "../../logic/anatomy/terminology.ts";
 import { companionItem, currentFrames, loadSequenceIntoScene, sequencePlays, shownMember, type SequenceDocument } from "../../logic/sequences.ts";
 import { afterPress, pressedIn } from "./press-guard.ts";
-import { loadedElsewhere as loadedElsewhereIn } from "../../logic/loaded-elsewhere.ts";
+import { loadedElsewhere as loadedElsewhereIn, otherPatientsOpen } from "../../logic/loaded-elsewhere.ts";
 import { startWork } from "../working.ts";
 import { databaseForPath, dbIdOf, mergeListings, scanDatabases, seriesNamedIn, windowDatabase } from "../database-routing.ts";
 import { documentSeriesFor, parsePictures } from "../../logic/readers/dicom-picture.ts";
 import { readDicomHead } from "../../logic/readers/dicom-head.ts";
-import { explainSeries } from "../../logic/series-explain.ts";
+import { DIFFUSION_SCAN, explainSeries } from "../../logic/series-explain.ts";
 
 /**
  * The pictures that document a sequence (logic/readers/dicom-picture.ts), as PNG data URLs the
@@ -199,6 +199,12 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
    * module that reads them; the browser says so, quietly, instead of failing.
    */
   const tractsSeries = new Set<string>();
+  /**
+   * A SAVED SCENE STORED AS DICOM (an MRCOM object, desktop/scene-mrcom.ts; provenance kind "scene"): its pixels are only
+   * the object's placeholder picture, so loading it as an image would show a gray strip instead of the scene. Not loaded
+   * here; the browser says where the scene opens (the Scene menu, which lists the same scene).
+   */
+  const sceneSeries = new Set<string>();
 /** A name into a notice's HTML. */
 const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   /** child series uid -> the series it was derived from, from the provenance edges. */
@@ -346,6 +352,28 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const still = named(opts.live.nodes.values());
     opts.store.release([...named(all)].filter((h) => !still.has(h)));
     return n;
+  };
+  /**
+   * WHAT TO DO WITH WHAT IS OPEN -- one question for every load that would land beside data it does not name: a scene
+   * over another scene (Ron, 2026-09-20: "Let the user decide, but only if needed"; 2026-10-17: "consistent behaviour"),
+   * and a series from the DICOM browser over another patient's (2026-10-22: "it should ask whether I load a scene or
+   * individual series (both parents and derived)"). Unsaved work is named, because closing is what would lose it.
+   * Closes when asked to; "stop" is for the caller to end its load.
+   */
+  const askAboutOpen = async (items: MrsonNode[], title: string, closeLabel: string, keepLabel: string): Promise<"close" | "keep" | "stop"> => {
+    const unsaved = unsavedWork();
+    const choice = await new Promise<"close" | "keep" | "stop">((resolve) => shell.notify({
+      title,
+      body: `<b>${items.slice(0, 4).map((n) => esc(String(n.name ?? n.id))).join("</b><br><b>")}</b>` + (items.length > 4 ? `<br>… and ${items.length - 4} more` : "") +
+        (unsaved.length ? `<br><br>Not saved: <b>${unsaved.map(esc).join("</b>, <b>")}</b> — closing loses ${unsaved.length === 1 ? "it" : "them"}.` : ""),
+      actions: [
+        { label: closeLabel, primary: !unsaved.length, onClick: () => resolve("close") },
+        { label: keepLabel, primary: !!unsaved.length, onClick: () => resolve("keep") },
+        { label: "Stop", onClick: () => resolve("stop") },
+      ],
+    }));
+    if (choice === "close") { closeScene(); await new Promise((r) => setTimeout(r, 100)); }
+    return choice;
   };
 
   // Eager, not in a panel's mount: the Scene module's "Close scene" button and the app's own
@@ -1070,7 +1098,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const loadDbEntries0 = async (db: DicomDatabase, list: DbSeriesEntry[], setBusy: (s: string) => void, timings: string[], failures: string[], arrivalFor?: (seriesInstanceUID: string) => { visible3D?: boolean } | undefined, onEach?: () => void): Promise<void> => {
     // STORED FIBER TRACTS ON EVERY PATH IN (critic 2026-10-06, finding 15): the browser's tree fills tractsSeries, but a
     // module's loadDatabaseSeries does not build the tree; the provenance edges say which series are tracts.
-    for (const e of (await provenanceEdges()) ?? []) if (e.kind === "tracts") tractsSeries.add(e.child);
+    for (const e of (await provenanceEdges()) ?? []) { if (e.kind === "tracts") tractsSeries.add(e.child); if (e.kind === "scene") sceneSeries.add(e.child); }
     for (const [n, entry] of list.entries()) {
       // The SCENE name, which is the only thing identifying what was loaded once the browser
       // has closed. Not the browser's own row label, which is nested under a patient and a study.
@@ -1086,6 +1114,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // ONCE. A series already in the scene is not loaded again: a cardiac
         // sequence loaded twice, the Sequences module then played one copy while the 3D showed the
         // other, and nothing moved -- "No beating heart." Loaded is loaded; the row says so.
+        if (sceneSeries.has(entry.seriesInstanceUID)) {
+          timings.push(`${label}: a saved scene, stored as DICOM — open it from the Scene menu at the top`);
+          continue;
+        }
         if (!surfaceSeries.has(entry.seriesInstanceUID) && !tractsSeries.has(entry.seriesInstanceUID) && alreadyLoaded(entry)) {
           timings.push(`${label}: already loaded — not loaded again`);
           continue;
@@ -1399,6 +1431,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       let paintCollections: () => void = () => {};
       const collectionOf = new Map<string, { value: string; source: string }>();
       const licenseOf = new Map<string, string>();
+      // WHAT A DERIVED SERIES IS, in words its maker wrote for a person (the diffusion extension's tract sets since
+      // 2026-10-27: "display_title", "display_line", "display_tip"; tract-set-description.ts there).
+      const displayOf = new Map<string, { title?: string; line?: string; tip?: string }>();
       // COHORTS (desktop/db-index.ts): the person's own grouping of patients and studies.
       interface CohortRow { name: string; created: string; patients: string[]; studies: string[] }
       let cohortList: CohortRow[] = [];
@@ -1438,6 +1473,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           for (const a of (body.attributes ?? []) as { uid: string; key: string; value: string; source: string }[]) {
             if (a.key === "collection") collectionOf.set(a.uid, { value: a.value, source: a.source });
             if (a.key === "license") licenseOf.set(a.uid, a.value);
+            if (a.key.startsWith("display_")) { const d = displayOf.get(a.uid) ?? {}; (d as Record<string, string>)[a.key.slice(8)] = a.value; displayOf.set(a.uid, d); }
           }
           // A "note" is an annotation, not a derivation; only edges that MAKE one series from
           // another shape the tree.
@@ -1447,6 +1483,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             kindOf.set(e.child, e.kind);
             if (e.kind === "surface") surfaceSeries.add(e.child);
             if (e.kind === "tracts") tractsSeries.add(e.child);
+            if (e.kind === "scene") sceneSeries.add(e.child);
             derivedFrom.set(e.child, e.parent);
           }
         }
@@ -1604,6 +1641,25 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // keeps a stored-surfaces series after the segmentation it belongs to.
         const list = withAncestors([...selected])
           .sort((a, b) => Number(a.modality === "SEG") - Number(b.modality === "SEG"));
+        // ANOTHER PATIENT'S DATA OPEN: asked as a scene asks (askAboutOpen). The patient of what is open is read from the
+        // open database's own rows, as the browser groups its patients (ID, else name), and from the node where the
+        // database does not list it; a series of the same patient goes in beside what is open.
+        {
+          const key = (e: { patientID?: string; patientName?: string } | undefined) => (e?.patientID || e?.patientName || "").trim() || undefined;
+          const rows = new Map((openDb?.series ?? []).map((se) => [se.seriesInstanceUID, se]));
+          const incoming = new Set(list.map((e) => key(e)).filter((k): k is string => !!k));
+          const patientOf = (n: MrsonNode) => {
+            const o = (n.origin ?? {}) as { seriesInstanceUID?: string; savedSeriesInstanceUID?: string; patientID?: string; patientName?: string };
+            return key(rows.get(o.savedSeriesInstanceUID ?? "") ?? rows.get(o.seriesInstanceUID ?? "")) ?? key(o);
+          };
+          const others = incoming.size ? otherPatientsOpen(opts.live.nodes.values(), incoming, patientOf) : [];
+          if (others.length) {
+            const choice = await askAboutOpen(others,
+              `${others.length === 1 ? "One thing" : `${others.length} things`} of another patient ${others.length === 1 ? "is" : "are"} open`,
+              "Close them, then load", "Keep them and add");
+            if (choice === "stop") throw new Error("stopped");
+          }
+        }
         // THE TRACT SETS ASKED FOR, recorded BEFORE anything loads: the Diffusion module reads its scan's stored tracts as
         // the scan arrives, which is before this list reaches the tracts' row.
         for (const e of list) { const scan = tractsSeries.has(e.seriesInstanceUID) ? derivedFrom.get(e.seriesInstanceUID) : undefined; if (scan) askDerived("tracts", scan, e.seriesInstanceUID); }
@@ -1753,6 +1809,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         el: HTMLTableRowElement; level: number; parent?: Row; hay: string; open?: boolean; uids?: string[]; scene?: true;
         /** A series row: its entry, for the tooltip that says what it is (explainRow). */
         entry?: DbSeriesEntry; explained?: boolean;
+        /** A tooltip its maker wrote (a tract set), shown instead of the header's; or the lay words put before it (a
+         *  diffusion scan with tracts). */
+        tip?: string; lay?: string;
         /** Who this row belongs to, for the facets and the cohorts: the patient's ID and the study's UID. */
         patient?: string; study?: string;
       }
@@ -1768,9 +1827,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const e = r.entry;
         const cell = r.el.firstElementChild as HTMLElement | null;
         if (!cell) return;
+        if (r.tip) { cell.title = r.tip; return; }
         const head = e.available && e.modality !== "SEG" ? await db.readSeriesFileHead(e, 65536).catch(() => null) : null;
         const extra = r.el.title ? `\n${r.el.title}` : "";   // "derived from: …", or why it cannot be read
-        cell.title = explainSeries(realDescription(e.description) || "", e.count, head ? readDicomHead(head.head.buffer.slice(head.head.byteOffset, head.head.byteOffset + head.head.byteLength) as ArrayBuffer) : null, e.modality) + extra;
+        cell.title = (r.lay ? `${r.lay}\n\n` : "") + explainSeries(realDescription(e.description) || "", e.count, head ? readDicomHead(head.head.buffer.slice(head.head.byteOffset, head.head.byteOffset + head.head.byteLength) as ArrayBuffer) : null, e.modality) + extra;
       };
       const explainUnder = async (st: Row) => {
         const todo = rows.filter((r) => r.entry && !r.explained && (() => { for (let a = r.parent; a; a = a.parent) if (a === st) return true; return false; })());
@@ -2123,27 +2183,56 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
               kids.set(par, list);
             } else roots.push(x);
           }
-          const ordered: { s: DbSeriesEntry; depth: number }[] = [];
-          const walk = (x: DbSeriesEntry, depth: number, seen: Set<string>) => {
+          // FIBER TRACTS, NEWEST FIRST (Ron, 2026-10-27: "newest by default, the user can decide to choose something
+          // else"; "the other versions are shown below a line"): the newest set -- the one the Diffusion module opens -- right
+          // under its scan, then a line, then the other versions, newest first.
+          const ordered: { s: DbSeriesEntry; depth: number; newest?: boolean; others?: number }[] = [];
+          const newestFirst = (a: DbSeriesEntry, b: DbSeriesEntry) => (Number(b.seriesNumber) || 0) - (Number(a.seriesNumber) || 0)
+            || `${b.seriesDate ?? ""}${b.seriesTime ?? ""}`.localeCompare(`${a.seriesDate ?? ""}${a.seriesTime ?? ""}`);
+          const walk = (x: DbSeriesEntry, depth: number, seen: Set<string>, newest = false) => {
             if (seen.has(x.seriesInstanceUID)) return;      // a cycle in the edges must not hang the browser
             seen.add(x.seriesInstanceUID);
-            ordered.push({ s: x, depth });
-            for (const c of kids.get(x.seriesInstanceUID) ?? []) walk(c, depth + 1, seen);
+            ordered.push({ s: x, depth, ...(newest ? { newest } : {}) });
+            const children = kids.get(x.seriesInstanceUID) ?? [];
+            const tracts = children.filter((c) => tractsSeries.has(c.seriesInstanceUID)).sort(newestFirst);
+            for (const c of children) if (!tractsSeries.has(c.seriesInstanceUID)) walk(c, depth + 1, seen);
+            tracts.forEach((c, i) => {
+              if (i === 1) ordered.push({ s: c, depth: depth + 1, others: tracts.length - 1 });
+              walk(c, depth + 1, seen, i === 0 && tracts.length > 0);
+            });
           };
           const seen = new Set<string>();
           for (const x of roots) walk(x, 0, seen);
           for (const x of st.series) walk(x, 0, seen);      // anything a cycle left out still appears
 
           const rowOf = new Map<string, Row>();
-          for (const { s, depth } of ordered) {
+          for (const { s, depth, newest, others } of ordered) {
+            if (others !== undefined) {
+              // The line between the newest tract set and the other versions.
+              const sep = mkRow(2 + depth, rowOf.get(parentOf.get(s.seriesInstanceUID)!) ?? stRow, "", `Other versions (${others}) — for comparison`, ["", "", "", "", "", "", ""], "");
+              sep.el.style.cssText += "border-top:1px solid var(--sl-line-strong, rgba(255,255,255,.2));color:var(--sl-fg-muted);font-style:italic;";
+              (sep.el.firstElementChild as HTMLElement).style.fontWeight = "400";
+              continue;
+            }
+            const disp = displayOf.get(s.seriesInstanceUID);
+            const scannerName = realDescription(s.description);
+            const fiberScan = s.modality === "MR" && (kids.get(s.seriesInstanceUID) ?? []).some((c) => tractsSeries.has(c.seriesInstanceUID));
             // Same placeholder rule as the scene name: a row reading "= NONE =" names nothing.
-            const label = realDescription(s.description) || `${s.modality ?? ""} series ${s.seriesNumber ?? ""}`.trim();
+            const label = disp?.title || (fiberScan ? DIFFUSION_SCAN.title : "") || scannerName || `${s.modality ?? ""} series ${s.seriesNumber ?? ""}`.trim();
             const derived = depth > 0;
             const sRow = mkRow(2 + depth, derived ? rowOf.get(parentOf.get(s.seriesInstanceUID)!) ?? stRow : stRow,
                                 "", label, [seriesWhen(s.seriesDate, s.seriesTime), s.modality ?? "", String(s.count),
                                             "", "", "", s.available ? "" : "external"],
-                                `${p.name} ${st.description} ${label} ${s.modality ?? ""}`);
+                                `${p.name} ${st.description} ${label} ${scannerName} ${disp?.line ?? ""} ${s.modality ?? ""}`);
             sRow.uids = [s.seriesInstanceUID];
+            {
+              const nameTd = sRow.el.firstElementChild as HTMLElement;
+              if (fiberScan && !disp?.title && scannerName) { const g = document.createElement("span"); g.textContent = ` · ${scannerName}`; g.style.cssText = "opacity:.55;font-weight:400;"; nameTd.append(g); }
+              if (newest) { const tag = document.createElement("span"); tag.textContent = "opens in Diffusion"; tag.title = "The Diffusion module opens the newest fiber tracts of a scan."; tag.style.cssText = "margin-left:8px;padding:0 6px;border-radius:8px;font-size:10px;font-weight:500;border:1px solid var(--sl-ok, #7cc47f);color:var(--sl-ok, #7cc47f);"; nameTd.append(tag); }
+              if (disp?.line) { const ln = document.createElement("div"); ln.textContent = disp.line; ln.style.cssText = "white-space:normal;font-weight:400;font-size:11px;opacity:.75;line-height:1.35;margin:2px 0 0 22px;"; nameTd.append(ln); }
+              if (disp?.tip) { sRow.tip = disp.tip; nameTd.title = disp.tip; }
+              else if (fiberScan) { sRow.lay = DIFFUSION_SCAN.tip(s.count, scannerName); nameTd.title = sRow.lay; }
+            }
             sRow.patient = p.id || p.key; sRow.study = st.key;
             sRow.entry = s;
             sRow.el.addEventListener("mouseenter", () => { void explainRow(sRow); });
@@ -2186,7 +2275,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             cb.addEventListener("click", (e) => { e.stopPropagation(); setSel(cb.checked); });
             sRow.el.style.cursor = "pointer";
             sRow.el.addEventListener("click", () => setSel(!cb.checked));
-            sRow.el.addEventListener("dblclick", () => { setSel(true); void loadSelected(true); });   // double-click = load this one and close
+            sRow.el.addEventListener("dblclick", () => { setSel(true); void loadSelected(true).catch(loadFailed); });   // double-click = load this one and close
           }
         }
       }
@@ -2495,6 +2584,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const followCurrent = async () => {
       const seen = currentSeen;
       await loadRegistered();
+      // A database this window opened for itself that has since left the list is let go (finding 4).
+      if (windowOwn && !registered.some((x) => x.id === dbIdOf(windowOwn!))) windowOwn = null;
       currentSeen = servedDb;
       const d = windowDatabase({ open: lastSource?.label, current: servedDb, seen, own: windowOwn });
       windowOwn = d.own;
@@ -2922,19 +3013,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         // and a diffusion scan were left out, so opening another scene over them asked nothing (Ron, 2026-10-17).
         const loadedElsewhere = loadedElsewhereIn(opts.live.nodes.values(), new Set(wanted.keys()));
         if (loadedElsewhere.length) {
-          const unsaved = unsavedWork();
-          const choice = await new Promise<"close" | "keep" | "stop">((resolve) => shell.notify({
-            title: `${loadedElsewhere.length === 1 ? "One thing is" : `${loadedElsewhere.length} things are`} loaded that this scene does not include`,
-            body: `<b>${loadedElsewhere.slice(0, 4).map((n) => esc(String(n.name ?? n.id))).join("</b><br><b>")}</b>` + (loadedElsewhere.length > 4 ? `<br>… and ${loadedElsewhere.length - 4} more` : "") +
-              (unsaved.length ? `<br><br>Not saved: <b>${unsaved.map(esc).join("</b>, <b>")}</b> — closing loses ${unsaved.length === 1 ? "it" : "them"}.` : ""),
-            actions: [
-              { label: "Close them, then open the scene", primary: !unsaved.length, onClick: () => resolve("close") },
-              { label: "Keep them and add the scene", primary: !!unsaved.length, onClick: () => resolve("keep") },
-              { label: "Stop", onClick: () => resolve("stop") },
-            ],
-          }));
+          const choice = await askAboutOpen(loadedElsewhere,
+            `${loadedElsewhere.length === 1 ? "One thing is" : `${loadedElsewhere.length} things are`} loaded that this scene does not include`,
+            "Close them, then open the scene", "Keep them and add the scene");
           if (choice === "stop") return { ok: false, error: "stopped" };
-          if (choice === "close") { closeScene(); await new Promise((r) => setTimeout(r, 100)); }
         }
         // Images before segmentations, ancestors with them -- the browser's own order.
         const list = withAncestors(entries).sort((a, b) => Number(a.modality === "SEG") - Number(b.modality === "SEG"));
@@ -3043,7 +3125,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       /** Load a saved scene by its uid from the current database's store. */
       __loadScene: async (uid: string) => {
         await loadRegistered();   // the database open now, not the one listed when this window started
-        const cur = registered.find((d) => d.current && d.exists) ?? registered.find((d) => d.exists);
+        // THE DEFAULT, OR NOTHING: a default that cannot be reached (a disk unplugged, a Mac asleep) is not silently replaced
+        // by another database while the line still names it (the critic, 2026-10-26, remote database, finding 5).
+        const def = registered.find((d) => d.current);
+        const cur = def ? (def.exists ? def : undefined) : registered.find((d) => d.exists);
         if (!cur) return { ok: false, error: "no database" };
         const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`, { cache: "no-store" });
         if (!res.ok) return { ok: false, error: `no such scene (HTTP ${res.status})` };
@@ -3073,10 +3158,17 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const res = await fetch("/_db", { cache: "no-store" });
         if (!res.ok) return;
         registered = (await res.json()).databases ?? [];
-        const cur = registered.find((d) => d.current && d.exists) ?? registered.find((d) => d.exists);
+        // THE DEFAULT, OR NOTHING: a default that cannot be reached (a disk unplugged, a Mac asleep) is not silently replaced
+        // by another database while the line still names it (the critic, 2026-10-26, remote database, finding 5).
+        const def = registered.find((d) => d.current);
+        const cur = def ? (def.exists ? def : undefined) : registered.find((d) => d.exists);
         if (cur) {
           servedDb = new URL(`/_db/${encodeURIComponent(cur.id)}/`, location.href).href;
           servedLabel = cur.path;   // the full path, per Ron
+        } else {
+          // NONE LEFT (a database removed, 2026-10-26; critic, database remove, finding 4): this window lets go of it.
+          servedDb = null;
+          servedLabel = "";
         }
       } catch { /* no native side: a browser build has no /_db */ }
     };
@@ -3166,6 +3258,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const noPatientData = new Set<string>();
     const afterDatabasesChanged = async (madeId?: string) => {
       await loadRegistered();
+      showCurrentDb();   // the line naming the open database, said again (a database removed: finding 4)
       await fillAddWhich(madeId);
     };
     afterDatabasesChangedOutside = afterDatabasesChanged;

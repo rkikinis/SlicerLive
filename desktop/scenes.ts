@@ -22,6 +22,7 @@ import { checkScene, seriesNamed } from "../logic/scene/check.ts";
 import { provenancePathFor, provenanceEdges, seriesAttributes, type ProvenanceEdge, type SeriesAttribute } from "./db-index.ts";
 
 import { sqliteScript } from "./sqlite.ts";
+import { type SyncResult, syncSceneMrcom } from "./scene-mrcom.ts";
 export const SCENES_FOLDER = "SlicerAlbula-Scenes";
 const UID = /^2\.25\.\d{1,40}$/;
 
@@ -66,7 +67,10 @@ export async function readScene(dbDir: string, uid: string): Promise<unknown | n
   try { return JSON.parse(await Deno.readTextFile(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`)); } catch { return null; }
 }
 
-export interface PutResult { uid: string; v: number; path: string; bytes: number }
+export interface PutResult { uid: string; v: number; path: string; bytes: number; /** The scene's DICOM object, kept in step (desktop/scene-mrcom.ts). */ dicom?: SyncResult }
+
+/** The build that wrote a scene, for its DICOM object's SoftwareVersions. */
+const producerOf = (doc: Record<string, unknown>) => String((doc.source as Record<string, unknown> | undefined)?.producer ?? "SlicerAlbula");
 
 /** Write a scene. `uid` "new" mints one. Refuses a document the checker rejects, and a `v` that is not the row's + 1. */
 export async function putScene(dbDir: string, uid: string, doc: Record<string, unknown>): Promise<PutResult | { error: string; status: number; problems?: unknown; rowV?: number; code?: string }> {
@@ -100,7 +104,9 @@ export async function putScene(dbDir: string, uid: string, doc: Record<string, u
     throw e;
   }
   await Deno.rename(tmp, path);
-  return { uid, v, path, bytes };
+  // THE SCENE IN DICOM TOO: its one MRCOM object, replaced (Ron, 2026-10-29). After the file, never instead of it.
+  const dicom = await syncSceneMrcom(dbDir, uid, { ...doc, uid }, producerOf(doc));
+  return { uid, v, path, bytes, dicom };
 }
 
 /** Is there a row for this uid in the store, whichever database's it is? */
@@ -124,6 +130,7 @@ export async function renameScene(dbDir: string, uid: string, name: string): Pro
   const tmp = `${path}.tmp`;
   await Deno.writeTextFile(tmp, text); await Deno.rename(tmp, path);
   await sqlite(provenancePathFor(dbDir), SCENES_SCHEMA + `UPDATE Scenes SET name=${q(n)}, bytes=${new TextEncoder().encode(text).byteLength} WHERE uid=${q(uid)};`, false);
+  await syncSceneMrcom(dbDir, uid, { ...doc, name: n }, producerOf(doc));   // the object carries the name; a failure is logged there
   return { ok: true, name: n };
 }
 
@@ -133,6 +140,7 @@ export async function deleteScene(dbDir: string, uid: string): Promise<boolean> 
   if (!(await Deno.remove(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`).then(() => true, () => false))) return false;
   const prov = provenancePathFor(dbDir);
   try { await sqlite(prov, SCENES_SCHEMA + `DELETE FROM Scenes WHERE uid=${q(uid)};`, false); } catch { return false; }
+  await syncSceneMrcom(dbDir, uid, null, "");   // its DICOM object goes with it
   return true;
 }
 
@@ -198,7 +206,7 @@ export async function packageScene(dbDir: string, uid: string, dest: string): Pr
     ``,
     `A SlicerAlbula scene, packaged ${localStamp()} by ${src.producer ?? "SlicerAlbula"} (saved ${src.producedAt ?? "?"}, save ${doc.v ?? "?"}).`,
     ``,
-    `scene.mrson.json   what was on screen: which series, which instances, the views, the window/level, the camera (mrson, profile albula-scene/1)`,
+    `scene.mrson.json   what was on screen: which series, which instances, the views, the window/level, the camera (mrson, profile albula-scene/2)`,
     `dicom/             every DICOM file the scene needs, one folder per series: ${reached.length - missing.length} series, ${files} files, ${(bytes / 1e6).toFixed(0)} MB`,
     `provenance.json    what SlicerAlbula knows about those series beyond DICOM: which was made from which, collection and license`,
     ``,
@@ -271,6 +279,7 @@ async function writeSceneAsIs(dbDir: string, uid: string, doc: Record<string, un
   const text = JSON.stringify({ ...doc, uid }, null, 1);
   const bytes = new TextEncoder().encode(text).byteLength;
   await Deno.writeTextFile(`${path}.tmp`, text); await Deno.rename(`${path}.tmp`, path);
+  await syncSceneMrcom(dbDir, uid, { ...doc, uid }, producerOf(doc));   // an imported scene gets its DICOM object here
   const src = (doc.source as Record<string, unknown> | undefined) ?? {};
   await sqlite(provenancePathFor(dbDir), "BEGIN IMMEDIATE;\n" + SCENES_SCHEMA +
     `INSERT OR REPLACE INTO Scenes VALUES (${q(uid)}, ${q((doc.study as Record<string, unknown>)?.studyInstanceUID)}, ${q(doc.name)}, ${q(src.producer)}, ${q(src.producedAt)}, ${v}, ${q(src.origin)}, ${bytes}, ${q(`${SCENES_FOLDER}/${uid}.mrson.json`)});\nCOMMIT;`, false);

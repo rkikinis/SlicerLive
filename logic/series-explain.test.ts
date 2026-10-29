@@ -82,3 +82,12 @@ Deno.test("a segmentation's own name and a plain name are not listed as unexplai
   assert(ctpa.includes("CT pulmonary angiography") && ctpa.includes("40% strength") && !ctpa.includes("heartbeat") && !ctpa.includes("Not explained"), ctpa);
   assert(explainSeries("Topogram 0.7 T30s", 1, null, "CT").includes("Not explained: 0.7, T30s"));
 });
+
+Deno.test("a diffusion scan with tracts is described for a lay person, the scanner's name last", async () => {
+  const { DIFFUSION_SCAN } = await import("./series-explain.ts");
+  assertEquals(DIFFUSION_SCAN.title, "Diffusion MRI — nerve fiber scan");
+  const tip = DIFFUSION_SCAN.tip(100, "dMRI_dir99_AP");
+  assert(tip.startsWith("An MRI scan that measures how water moves in the brain."));
+  assert(tip.endsWith("The scanner called it dMRI_dir99_AP."));
+  assert(tip.includes("100 images"));
+});

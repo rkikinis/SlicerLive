@@ -105,8 +105,14 @@ function tokenFor(port: number): { token: string | null; reason: "ok" | "missing
  * (0.13.0), and a round of server fixes (0.15.0). The task and job records Albula reads are the same
  * shape as 0.12.0's (checked field by field on a spare port). FastSurfer is in the core install since
  * 0.14.0, so the `fastsurfer` extra is gone from the command.
+ *
+ * v0.16.0 (released 2026-10-22) since 2026-10-26, Ron: after the tract remake, "a clean slate". What it brings: the `lnq`
+ * catalog (Steve Pieper's LNQ lymph-node models, four regions, each a 4-5 fold ensemble that now runs all its folds; a
+ * development release offered for testing, "not for diagnostic use"), and NIfTI placed by its sform. Checked on a spare
+ * port first: /v1/health, /v1/tasks and the records of synthstrip:mask, ts.v2:total and ts.v2:lung_vessels have the same
+ * fields as 0.15.0's; SynthStrip's masks on five ds001226 T1s are identical voxel for voxel.
  */
-export const HAVERSACK_VERSION = "v0.15.0";
+export const HAVERSACK_VERSION = "v0.16.0";
 /** The extras the application installs haversack with. One place: the start command and the printed one.
  *  `synthstrip` since 2026-10-04 (the diffusion extension's tracking rule 3 asks for SynthStrip's brain mask), but ONLY
  *  on a Mac with Apple's command line developer tools: the extra builds `surfa` from source (PyPI has no wheel for it),

@@ -379,3 +379,18 @@ Deno.test({
     assertEquals(dciodvfy(out.instances[0].bytes)!.errors, []);
   },
 });
+
+// A T1 whose source names its body part (a BIDS sidecar's BodyPartExamined "BRAIN", OpenNeuro ds005123, 2026-10-22): the
+// part is unpaired, so Laterality must be ABSENT -- the 2026-10-21 rule above added it present and empty for every image.
+Deno.test({
+  name: "dciodvfy: an MR with its body part named (BRAIN) carries no Laterality and no conformance errors",
+  ignore: !HAS_DCIODVFY,
+  fn: async () => {
+    const dims: [number, number, number] = [6, 5, 4], I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const data = Int16Array.from({ length: 120 }, (_, i) => i * 3);
+    const out = await volumeToDicomSeries(data, dims, I, [], { subject: { patientName: "T^MR", patientID: "T", modality: "MR", studyDate: "", studyTime: "", extra: { BodyPartExamined: "BRAIN", PatientPosition: "HFS", ScanningSequence: "GR\\IR", SequenceVariant: "SK\\SP\\MP", ScanOptions: "IR", MRAcquisitionType: "3D", RepetitionTime: 2400, EchoTime: 2.2, EchoTrainLength: 1 } } });
+    const d = dcmjs.data.DicomMetaDictionary.naturalizeDataset(dcmjs.data.DicomMessage.readFile(ab(out.instances[0].bytes)).dict) as Record<string, unknown>;
+    assertEquals(["BodyPartExamined" in d, "Laterality" in d], [true, false]);
+    assertEquals(dciodvfy(out.instances[0].bytes)!.errors.filter((e) => /Laterality/.test(e)), []);
+  },
+});

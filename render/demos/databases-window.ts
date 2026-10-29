@@ -13,7 +13,11 @@ import { openFloatingWindow } from "./floating-window.ts";
 import { escapeHtml as esc } from "./html.ts";
 
 export interface DbDescription { name: string; holds?: string; patientData?: boolean; approval?: string; contact?: string; source?: string }
-export interface RegisteredDb { id: string; path: string; exists: boolean; current: boolean; description?: DbDescription }
+export interface RegisteredDb { id: string; path: string; exists: boolean; current: boolean; description?: DbDescription; /** On another Mac (desktop/db-remote.ts), and why it cannot be opened just now. */ remote?: { host: string; why?: string } }
+
+/** Sharing on this Mac, as GET /_db/_sharing says (desktop/sharing.ts). */
+interface SharingState { available: boolean; touchID: boolean; databases: string[]; network: { known: boolean; allowed: boolean; count: number; why?: string }; listening: boolean; error?: string;
+  pairing: { open: boolean; until?: number; closed?: string; waiting?: string }; name: string; macs: { id: string; name: string; pairedAt: string; confirmedAt?: string }[] }
 
 export async function listDatabases(): Promise<{ databases: RegisteredDb[]; features: string[] }> {
   const j = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : {}).catch(() => ({})) as { databases?: RegisteredDb[]; features?: string[] };
@@ -84,17 +88,51 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     .sl-dbw-f > span:first-child { color:var(--sl-fg-dim); text-align:right; font-size:11px; }
     .sl-dbw-f textarea, .sl-dbw-f input:not([type=checkbox]) { width:100%; box-sizing:border-box; }
     .sl-dbw-form { border:1px solid var(--sl-line-strong); border-radius:var(--sl-radius); padding:8px 10px; margin:6px 0 10px; }
-    .sl-dbw-err { color:var(--sl-error); font-size:11px; }`;
+    .sl-dbw-err { color:var(--sl-error); font-size:11px; }
+    .sl-dbw-said { flex:1; min-width:0; align-self:center; color:var(--sl-fg); font-size:12px; }
+    .sl-dbw-rm { border-top:1px solid var(--sl-line); margin-top:8px; padding-top:6px; }
+    .sl-dbw-tag.sl-sh { background:var(--sl-ok-bg, rgba(143,199,154,.15)); color:var(--sl-ok, #8fc79a); border-color:var(--sl-ok-edge, rgba(143,199,154,.45)); }
+    .sl-dbw-share { display:inline-flex; align-items:center; gap:6px; font-size:12px; margin-left:auto; cursor:pointer; user-select:none; }
+    .sl-dbw-share input { position:absolute; opacity:0; width:1px; height:1px; }
+    .sl-dbw-share i { position:relative; width:34px; height:19px; border-radius:10px; background:var(--sl-line-strong); transition:background .15s; flex:none; }
+    .sl-dbw-share i::after { content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:var(--sl-fg); transition:left .15s; }
+    .sl-dbw-share input:checked + i { background:var(--sl-ok, #8fc79a); }
+    .sl-dbw-share input:checked + i::after { left:17px; }
+    .sl-dbw-share input:focus-visible + i { outline:2px solid var(--sl-accent); outline-offset:2px; }
+    .sl-dbw-share input:disabled + i { opacity:.5; }`;
   box.appendChild(style);
+  // WHAT WAS JUST DONE, said in the footer beside Done, where it stays in sight however the list is scrolled (Ron,
+  // 2026-10-26: "The functions should have proper feedback"; critic, finding 9): made, opened by default, described,
+  // removed. "Added" is said by the package window that does it.
+  const saidLine = document.createElement("div");
+  saidLine.className = "sl-dbw-said";
+  saidLine.setAttribute("role", "status");
+  const say = (m: string) => { saidLine.textContent = m; };
+  // DONE CLOSES THE WINDOW (Ron, 2026-10-26: choosing a database and then knowing to click the red button "is very
+  // efficient, but not intuitive. Keeping it and adding a quit panel button might help").
+  const foot = document.createElement("div");
+  foot.style.cssText = "display:flex;gap:10px;justify-content:flex-end;padding:8px 14px;border-top:1px solid var(--sl-line);";
+  foot.appendChild(saidLine);
+  const done = document.createElement("button");
+  done.textContent = "Done";
+  done.title = "Close this window. The database marked “opens by default” is the one Albula uses.";
+  done.addEventListener("click", () => close());
+  foot.appendChild(done);
+  box.appendChild(foot);
 
+  let removable = false;
+  /** Sharing on this Mac (desktop/sharing.ts), read with each render; undefined on a server without it. */
+  let sharing: SharingState | undefined;
   const render = async () => {
     const { databases, features } = await listDatabases();
+    sharing = features.includes("sharing") ? await fetch("/_db/_sharing", { cache: "no-store" }).then((r) => r.ok ? r.json() : undefined).catch(() => undefined) : undefined;
     const canCreate = features.includes("create");
     body.innerHTML = "";
     const intro = document.createElement("p");
     intro.className = "sl-hint";
     intro.textContent = "The highlighted database is the one Albula opens. Each says what it holds; Edit changes that.";
     body.appendChild(intro);
+    removable = features.includes("remove");
     for (const d of databases) body.appendChild(card(d, canCreate));
     const row = document.createElement("div");
     row.className = "sl-dbw-acts";
@@ -104,10 +142,29 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       const ab = button("Add an existing database folder…", "A folder that already holds a DICOM database (made by Slicer or Albula, or copied from someone): it is moved into “SlicerAlbulaDatabases” (or copied there, if you choose) and added to this list.");
       ab.addEventListener("click", () => addExisting(row));
       row.append(nb, ab);
+      // A DATABASE ON ANOTHER MAC (desktop/db-remote.ts; Ron, 2026-10-26: "Databases can be either local or remote"):
+      // the Macs on this network that share, each with Connect (Ron, 2026-10-28; mockups/database-sharing-2026-10-28.html).
+      if (features.includes("remote")) {
+        const rb = button("Macs nearby…", "Your other Macs on this network that share databases: connect to one, compare the six digits, and allow it there with Touch ID.");
+        rb.addEventListener("click", () => nearbyForm(row));
+        row.appendChild(rb);
+      }
     } else {
       row.innerHTML = `<span class="sl-hint">This Albula's server is older than this window and cannot make databases; rebuild the application.</span>`;
     }
     body.appendChild(row);
+    if (sharing?.available && (sharing.databases.length || sharing.macs.length)) {
+      body.appendChild(sharingBox());
+      // THE BOX FOLLOWS PAIRING while it is open (the critic, round 2, R2-9): who asks, closed, the five minutes ending.
+      if (sharing.pairing.open || sharing.pairing.waiting) {
+        const was = JSON.stringify([sharing.pairing, sharing.macs.length]);
+        const t = setInterval(async () => {
+          if (!body.isConnected) { clearInterval(t); return; }
+          const now = await fetch("/_db/_sharing", { cache: "no-store" }).then((r) => r.ok ? r.json() : undefined).catch(() => undefined) as SharingState | undefined;
+          if (now && JSON.stringify([now.pairing, now.macs.length]) !== was) { clearInterval(t); await render(); }
+        }, 3000);
+      }
+    }
     if (features.includes("test-cases")) await testCases(body);
     if (o.startWithNew && canCreate) { o.startWithNew = false; newForm(row); }
   };
@@ -180,27 +237,273 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     const c = document.createElement("div");
     c.className = "sl-dbw-card" + (d.current ? " sl-cur" : "");
     const ds = d.description;
-    const tag = ds?.patientData === true ? `<span class="sl-dbw-tag sl-pt" title="Not released for public use: kept as patient data is kept">not public</span>`
-      : ds?.patientData === false ? `<span class="sl-dbw-tag" title="De-identified and released for anyone to use">public data</span>` : "";
+    const shared = !d.remote && !!sharing?.databases.includes(d.id);
+    const where = d.remote ? `<span class="sl-dbw-tag" title="Kept on another Mac and opened from here">on ${esc(d.remote.host)}</span>`
+      : shared ? (sharing!.listening ? `<span class="sl-dbw-tag sl-sh" title="The Macs you allowed can open it, on this network">shared</span>`
+        : `<span class="sl-dbw-tag">shared — paused</span>`) : "";
+    // THE REASON ON THE FACE, not in a tooltip (the critic 2026-10-28, finding 10).
+    const pausedWhy = shared && !sharing!.listening ? (sharing!.error ?? sharing!.network.why ?? "not on a network you allowed for sharing; it shares again there by itself") : "";
+    const tag = where + (ds?.patientData === true ? `<span class="sl-dbw-tag sl-pt" title="Not released for public use: kept as patient data is kept">not public</span>`
+      : ds?.patientData === false ? `<span class="sl-dbw-tag" title="De-identified and released for anyone to use">public data</span>` : "");
     const meta = [ds?.approval && `approval: ${ds.approval}`, ds?.source && `from: ${ds.source}`, ds?.contact && `ask: ${ds.contact}`].filter(Boolean) as string[];
-    c.innerHTML = `<div><span class="sl-dbw-name">${esc(dbName(d))}</span>${tag}${d.current ? ` <span class="sl-hint">· opens by default</span>` : ""}${d.exists ? "" : ` <span class="sl-dbw-err">· not reachable (a disk not connected?)</span>`}</div>
+    c.innerHTML = `<div><span class="sl-dbw-name">${esc(dbName(d))}</span>${tag}${d.current ? ` <span class="sl-hint">· opens by default</span>` : ""}${d.exists ? "" : ` <span class="sl-dbw-err">· ${d.remote?.why ? esc(d.remote.why) : `not reachable ${d.remote ? `(${esc(d.remote.host)} asleep, not sharing, or on another network?)` : "(a disk not connected?)"}`}</span>`}</div>
+      ${pausedWhy ? `<div class="sl-dbw-meta">Sharing paused: ${esc(pausedWhy)}</div>` : ""}
       ${ds?.holds ? `<p class="sl-dbw-holds">${esc(ds.holds)}</p>` : ""}
       ${meta.length ? `<div class="sl-dbw-meta">${esc(meta.join(" · "))}</div>` : ""}
-      <div class="sl-dbw-meta" title="Where it is on this computer">${esc(d.path)}</div>`;
+      <div class="sl-dbw-meta" title="${d.remote ? "Where it is kept" : "Where it is on this computer"}">${esc(d.path)}</div>`;
     const acts = document.createElement("div");
     acts.className = "sl-dbw-acts";
     if (!d.current && d.exists) {
       const use = button("Open this one by default", "Albula opens this database from now on (the DICOM database window, and where Load / Save adds scans).");
-      use.addEventListener("click", async () => { await post("/_db", { current: d.id }, "PUT"); o.onChanged?.(); await render(); });
+      use.addEventListener("click", async () => {
+        use.disabled = true;
+        const { ok, j } = await post("/_db", { current: d.id }, "PUT");
+        say(ok ? `Albula now opens “${dbName(d)}”.` : `“${dbName(d)}” was not made the default: ${String(j.error ?? "no reason given")}`);
+        o.onChanged?.(); await render();
+      });
       acts.appendChild(use);
     }
-    if (canEdit && d.exists) {
+    if (canEdit && d.exists && !d.remote) {
       const ed = button(ds ? "Edit" : "Add a description", "What this database is called, what it holds, whether it is public data, the approval it was collected under (if any), whom to ask.");
       ed.addEventListener("click", () => editForm(c, d));
       acts.appendChild(ed);
     }
+    // SHARE WITH MY OTHER MACS (desktop/sharing.ts): on across restarts, on the networks allowed (Ron, 2026-10-28).
+    if (sharing?.available && !d.remote && d.exists) {   // without the helper, no switch (finding 11)
+      const lab = document.createElement("label");
+      lab.className = "sl-dbw-share";
+      lab.title = "Your other Macs that you allow can open this database (and save into it) while they are on the same network as this Mac. The first time on a network, Touch ID allows that network.";
+      // A SLIDE SWITCH (Ron, 2026-10-28: "use a slide button for the share/remove"): on shares, off stops sharing.
+      lab.innerHTML = `<input type="checkbox" role="switch" ${shared ? "checked" : ""}><i aria-hidden="true"></i><span>Share with my other Macs</span>`;
+      const cb = lab.querySelector("input") as HTMLInputElement, txt = lab.querySelector("span") as HTMLElement;
+      cb.addEventListener("change", async () => {
+        cb.disabled = true;
+        txt.textContent = cb.checked ? "Sharing… (Touch ID may be asked)" : "Stopping…";
+        const { ok, j } = await post("/_db/_sharing", { id: d.id, on: cb.checked });
+        say(ok ? (cb.checked ? `“${dbName(d)}” is shared with the Macs you allow, on this network.` : `“${dbName(d)}” is no longer shared.`) : `Not changed: ${String(j.error ?? "no reason given")}`);
+        await render();
+      });
+      acts.appendChild(lab);
+    }
+    if (removable) {
+      const rm = button("Remove…", "Take this database off the list, and choose whether its folder stays where it is or goes to the Trash.");
+      rm.addEventListener("click", () => void removeForm(c, d));
+      acts.appendChild(rm);
+    }
     c.appendChild(acts);
     return c;
+  };
+
+  /**
+   * REMOVE, IN TWO WAYS (Ron, 2026-10-26: "remove from the app or remove and delete"), asked in the card itself, naming
+   * what goes; Keep is the way back (Contents/docs/MODULE-DESIGN-RULES.md, "A final delete asks first"). The server is
+   * asked first what removing would mean (the Trash possible or why not, other things in the folder, work running on
+   * it), so the question says what is true (critic 2026-10-26, Contents/docs/qa/2026-10-26-database-remove.md).
+   */
+  const removeForm = async (c: HTMLElement, d: RegisteredDb) => {
+    c.querySelector(".sl-dbw-rm")?.remove();
+    const f = document.createElement("div");
+    f.className = "sl-dbw-rm";
+    f.innerHTML = `<div class="sl-dbw-name">Remove “${esc(dbName(d))}”?</div><p class="sl-dbw-meta">Looking at it…</p>`;
+    c.appendChild(f);
+    const { ok: seen, j: facts } = await post("/_db/_remove", { id: d.id, dry: true });
+    if (!seen) { f.innerHTML = `<p class="sl-dbw-err">${esc(String(facts.error ?? "It could not be looked at just now."))}</p>`; return; }
+    const trashOk = (facts.trash as { ok: boolean; why?: string }).ok, others = Number(facts.otherItems ?? 0), busy = facts.busy as string | null;
+    f.innerHTML = `<div class="sl-dbw-name">Remove “${esc(dbName(d))}”?</div>
+      ${busy ? `<p class="sl-dbw-err">Not now: ${esc(busy)}. Remove it when that has finished.</p>` : ""}
+      ${facts.remote ? `<p class="sl-dbw-holds">Only its entry on this Mac goes. The database stays on ${esc(String((facts.remote as { host: string }).host))}, untouched; pairing again lists it here again.</p>`
+        : `<p class="sl-dbw-holds"><b>From the list only:</b> the folder stays where it is, with everything in it. “Add an existing database folder…” lists it again.</p>`}
+      ${trashOk ? `<p class="sl-dbw-holds"><b>And move its folder to the Trash:</b> every scan, segmentation and scene in it goes to the Trash${others ? `, and so do the ${others} other file${others === 1 ? "" : "s"} and folder${others === 1 ? "" : "s"} in it that are not part of the database` : ""}. Until the Trash is emptied, Finder's Put Back brings it back.</p>`
+        : d.exists && !facts.remote ? `<p class="sl-dbw-meta">Its folder cannot go to the Trash from here: ${esc(String((facts.trash as { why?: string }).why ?? ""))}.</p>` : ""}
+      ${d.current ? `<p class="sl-dbw-meta">It is the database Albula opens; another one takes its place.</p>` : ""}
+      <div class="sl-dbw-acts"></div>`;
+    const acts = f.querySelector(".sl-dbw-acts") as HTMLElement;
+    const go = (trash: boolean, b: HTMLButtonElement, label: string) => async () => {
+      for (const x of acts.querySelectorAll("button")) (x as HTMLButtonElement).disabled = true;
+      b.textContent = trash ? "Moving to the Trash…" : "Removing…";
+      const { ok, j } = await post("/_db/_remove", { id: d.id, trash });
+      if (!ok) {
+        say(String(j.error ?? `“${dbName(d)}” was not removed.`));
+        b.textContent = label;
+        o.onChanged?.();
+        await render();   // the list as it is now, whatever happened (finding 2)
+        return;
+      }
+      const now = j.current as { name: string; exists: boolean } | null;
+      say(`“${dbName(d)}” is off the list${trash ? " and its folder is in the Trash" : "; its folder stays where it was"}.` +
+        (j.wasCurrent ? (now ? ` Albula now opens “${now.name}”${now.exists ? "" : ", which cannot be reached just now"}.` : " No database opens by default now: make or add one.") : ""));
+      o.onChanged?.();
+      await render();
+    };
+    const only = button(facts.remote ? "Remove from this Mac's list" : "Remove from the list", facts.remote ? "The database stays on the other Mac, untouched." : "The folder stays where it is, untouched.");
+    only.addEventListener("click", go(false, only, "Remove from the list"));
+    acts.appendChild(only);
+    if (trashOk) {
+      const del = button("Remove and move to the Trash", "The folder and everything in it go to the Trash.");
+      del.addEventListener("click", go(true, del, "Remove and move to the Trash"));
+      acts.appendChild(del);
+    }
+    if (busy) for (const x of acts.querySelectorAll("button")) (x as HTMLButtonElement).disabled = true;
+    const keep = button("Keep", "Leave this database as it is.", true);
+    keep.addEventListener("click", () => f.remove());
+    acts.appendChild(keep);
+  };
+
+  /** A question asked in place, with Keep as the way back (MODULE-DESIGN-RULES: "A final delete asks first"). */
+  const askInPlace = (where: HTMLElement, question: string, yes: string, go: () => Promise<void>) => {
+    where.querySelector(".sl-dbw-rm")?.remove();
+    const f = document.createElement("div");
+    f.className = "sl-dbw-rm";
+    f.innerHTML = `<div class="sl-dbw-holds">${esc(question)}</div><div class="sl-dbw-acts"></div>`;
+    const acts = f.querySelector(".sl-dbw-acts") as HTMLElement;
+    const y = button(yes, question), keep = button("Keep", "Leave it as it is.", true);
+    y.addEventListener("click", async () => { y.disabled = keep.disabled = true; await go(); });
+    keep.addEventListener("click", () => f.remove());
+    acts.append(y, keep);
+    where.appendChild(f);
+  };
+
+  /**
+   * SHARING ON THIS MAC: letting a new Mac connect (pairing opens only when asked here, for five minutes: the critic
+   * 2026-10-28, finding 4), the Macs allowed, each with Remove, and the networks allowed (finding 10).
+   */
+  const sharingBox = (): HTMLElement => {
+    const sh = sharing!;
+    const box = document.createElement("div");
+    box.className = "sl-dbw-form";
+    box.innerHTML = `<div class="sl-dbw-name">Sharing with your other Macs</div>`;
+    const pairRow = document.createElement("div");
+    pairRow.className = "sl-dbw-acts";
+    const p = sh.pairing;
+    const line = document.createElement("span");
+    line.style.cssText = "flex:1;align-self:center";
+    line.className = "sl-dbw-meta";
+    line.textContent = !sh.listening ? "A new Mac can connect while this Mac shares on a network you allowed."
+      : p.closed ? `New Macs cannot connect just now: ${p.closed}.`
+      : p.open ? `A new Mac may connect until ${new Date(p.until!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${p.waiting ? ` — ${p.waiting} is asking; compare the numbers, then Touch ID` : ": on it, Databases › Macs nearby… › Connect"}.`
+      : "Only the Macs below can come in.";
+    pairRow.appendChild(line);
+    if (sh.listening && !p.open && !p.closed) {
+      const open = button("Let another Mac connect", "For five minutes, one Mac on this network may connect: it shows six digits, this Mac shows the same in its Touch ID question.", true);
+      open.addEventListener("click", async () => {
+        open.disabled = true; open.textContent = "Opening…";
+        const { ok, j } = await post("/_db/_sharing/open-pairing", {});
+        say(ok ? "For five minutes, one Mac on this network may connect: on it, Databases › Macs nearby… › Connect." : String(j.error ?? "not opened"));
+        await render();
+      });
+      pairRow.appendChild(open);
+    }
+    box.appendChild(pairRow);
+    for (const m of sh.macs) {
+      const r = document.createElement("div");
+      const head = document.createElement("div");
+      head.className = "sl-dbw-acts";
+      const week = m.confirmedAt ? Math.max(0, 7 - Math.floor((Date.now() - Date.parse(m.confirmedAt)) / 86_400_000)) : 0;
+      head.innerHTML = `<span style="flex:1"><b>${esc(m.name)}</b> <span class="sl-dbw-meta">· allowed ${esc(new Date(m.pairedAt).toLocaleDateString())} · Touch ID again ${week ? `in ${week} day${week === 1 ? "" : "s"}` : "at its next visit"}</span></span>`;
+      const rm = button("Remove…", "This Mac can no longer open your shared databases, until it is allowed again.");
+      rm.addEventListener("click", () => askInPlace(r, `Remove ${m.name}? It can no longer open your shared databases; it can connect again later.`, `Remove ${m.name}`, async () => {
+        const { ok, j } = await post("/_db/_sharing/forget", { id: m.id });
+        say(ok ? `${m.name} can no longer open your shared databases.` : String(j.error ?? "not removed"));
+        await render();
+      }));
+      head.appendChild(rm);
+      r.appendChild(head);
+      box.appendChild(r);
+    }
+    if (sh.network.count) {
+      const r = document.createElement("div");
+      const head = document.createElement("div");
+      head.className = "sl-dbw-acts";
+      head.innerHTML = `<span style="flex:1" class="sl-dbw-meta">Shared on ${sh.network.count} network${sh.network.count === 1 ? "" : "s"} you allowed${sh.network.allowed ? ", this one among them" : ""}.</span>`;
+      const fg = button("Forget them…", "Sharing pauses everywhere until you switch it on again on a network, which asks for Touch ID.");
+      fg.addEventListener("click", () => askInPlace(r, "Forget every network allowed for sharing? Sharing pauses until you switch it on again on a network (Touch ID).", "Forget them", async () => {
+        const { ok, j } = await post("/_db/_sharing/forget-networks", {});
+        say(ok ? "No network is allowed for sharing now." : String(j.error ?? "not done"));
+        await render();
+      }));
+      head.appendChild(fg);
+      r.appendChild(head);
+      box.appendChild(r);
+    }
+    return box;
+  };
+
+  /**
+   * THE MACS NEARBY THAT SHARE, each with Connect (desktop/db-remote.ts pairRemote; mockups/database-sharing-2026-10-28.html):
+   * the six digits shown here at once; the other Mac asks its person for Touch ID, showing the same digits. A name can
+   * also be typed (when this Mac cannot see the others: the Local Network permission, a network that hides them).
+   */
+  const nearbyForm = (after: HTMLElement) => {
+    body.querySelector(".sl-dbw-new")?.remove();
+    const f = document.createElement("div");
+    f.className = "sl-dbw-form sl-dbw-new";
+    f.innerHTML = `<div class="sl-dbw-name">Macs nearby that share databases</div>
+      <div class="sl-nb-list"><p class="sl-dbw-meta">Looking on this network…</p></div>
+      <div class="sl-nb-pair"></div>
+      <label class="sl-dbw-f"><span>Or its name</span><input name="host" placeholder="e.g. Rons-MBP.local"></label>
+      <div class="sl-dbw-err"></div><div class="sl-dbw-acts"></div>`;
+    const list = f.querySelector(".sl-nb-list") as HTMLElement, pairBox = f.querySelector(".sl-nb-pair") as HTMLElement;
+    const err = f.querySelector(".sl-dbw-err") as HTMLElement, acts = f.querySelector(".sl-dbw-acts") as HTMLElement;
+    let looking = true;
+    const connect = async (host: string, port: number | undefined, label: string, b: HTMLButtonElement) => {
+      err.textContent = "";
+      b.disabled = true; b.textContent = "Connecting…";
+      const { ok, j } = await post("/_db/_pair-remote", { host, ...(port ? { port } : {}) });
+      if (!ok) { b.disabled = false; b.textContent = "Connect…"; err.textContent = String(j.error ?? "not connected"); return; }
+      looking = false;
+      b.textContent = "Waiting…";
+      // BOTH MACS CONFIRM (the critic 2026-10-28, finding 5): the person here says the numbers are the same, too.
+      pairBox.innerHTML = `<p class="sl-dbw-holds"><b>${esc(label)}</b> asks for Touch ID and shows a number. Is it this one?</p>
+        <div style="font:600 24px var(--sl-mono, ui-monospace, monospace);letter-spacing:.15em;color:var(--sl-accent);margin:4px 0 8px">${esc(String(j.digits))}</div>
+        <div class="sl-dbw-acts"></div>`;
+      const ans = pairBox.querySelector(".sl-dbw-acts") as HTMLElement;
+      const sameB = button("It shows the same number", "Then allow it there with Touch ID; this Mac keeps the connection only when both are done.", true);
+      const diffB = button("It shows a different number", "Something else may be answering in that Mac's name: nothing is kept.");
+      const answer = async (same: boolean) => {
+        sameB.disabled = diffB.disabled = true;
+        await post(`/_db/_pair-remote/${j.pairing}`, { same });
+        if (same) sameB.textContent = "Waiting for Touch ID there…";
+      };
+      sameB.addEventListener("click", () => void answer(true));
+      diffB.addEventListener("click", () => void answer(false));
+      ans.append(sameB, diffB);
+      const follow = async () => {
+        const st = await fetch(`/_db/_pair-remote/${j.pairing}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null) as { state: string; why?: string; databases?: { name: string }[] } | null;
+        if (st?.state === "waiting") { setTimeout(follow, 1000); return; }
+        if (st?.state === "paired") {
+          const dbs = st.databases ?? [];
+          say(`Connected to ${label}: ${dbs.length ? dbs.map((x) => `“${x.name}”`).join(", ") : "it shares no database yet"} listed here.`);
+          o.onChanged?.(); await render(); return;
+        }
+        b.disabled = false; b.textContent = "Connect…";
+        pairBox.innerHTML = "";
+        err.textContent = st?.why ? `Not connected: ${st.why}` : "Not connected.";
+      };
+      void follow();
+    };
+    const look = async () => {
+      if (!looking || !f.isConnected) return;
+      const j = await fetch("/_db/_nearby", { cache: "no-store" }).then((r) => r.json()).catch(() => ({ macs: [] })) as { macs: { name: string; host: string; port?: number }[] };
+      if (!looking) return;
+      list.innerHTML = j.macs.length ? "" : `<p class="sl-dbw-meta">No Mac on this network shares a database just now. On the Mac that holds it: Databases, “Share with my other Macs”.</p>`;
+      for (const m of j.macs) {
+        const r = document.createElement("div");
+        r.className = "sl-dbw-acts";
+        r.innerHTML = `<span style="flex:1"><b>${esc(m.name)}</b> <span class="sl-dbw-meta">· ${esc(m.host)}</span></span>`;
+        const c = button("Connect…", "Shows six digits here; that Mac shows the same and asks for Touch ID to allow this Mac.", true);
+        c.addEventListener("click", () => void connect(m.host, m.port, m.name, c));
+        r.appendChild(c);
+        list.appendChild(r);
+      }
+      setTimeout(look, 2000);
+    };
+    const typed = button("Connect to that name…", "For a Mac this one cannot see on the network.");
+    typed.addEventListener("click", () => { const h = (f.querySelector('[name="host"]') as HTMLInputElement).value.trim(); if (h) void connect(h, undefined, h, typed); });
+    const cancel = button("Close", "Connect to nothing.");
+    cancel.addEventListener("click", () => { looking = false; f.remove(); });
+    acts.append(typed, cancel);
+    after.after(f);
+    void look();
   };
 
   const formBox = (title: string) => {
@@ -219,6 +522,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
     save.addEventListener("click", async () => {
       const { ok, j } = await post(`/_db/${encodeURIComponent(d.id)}/_description`, readForm(f), "PUT");
       if (!ok) { err.textContent = String(j.error ?? "not saved"); return; }
+      say(`The description of “${readForm(f).name || dbName(d)}” is saved.`);
       o.onChanged?.(); await render();
     });
     cancel.addEventListener("click", () => f.remove());
@@ -247,6 +551,7 @@ export function openDatabasesWindow(o: DatabasesWindowOptions = {}): void {
       const { ok, j } = await post("/_db/_create", { ...readForm(f), ...(folder ? { token: folder.token } : {}) });
       make.disabled = false;
       if (!ok) { err.textContent = String(j.error ?? "the database was not made"); return; }
+      say(`“${readForm(f).name}” is made. To add scans to it: Load / Save, Load from Files, “Also add to” it, then DICOM folder….`);
       o.onChanged?.(String(j.id));
       await render();
       if (j.warning) { const w = document.createElement("p"); w.className = "sl-dbw-err"; w.textContent = String(j.warning); body.prepend(w); }

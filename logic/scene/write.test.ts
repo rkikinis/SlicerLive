@@ -19,7 +19,11 @@ Deno.test("the writer keeps what a person did and drops what the database recove
   const images = Object.values(nodes).filter((n) => n.type === "image");
   assertEquals(images.length, 2);
   assert(images.every((n) => typeof n.digest === "string" && (n.digest as string).length === 64), "a digest per volume");
-  assert(images.every((n) => (n.dicom as { sopInstanceUIDs: string[]; instanceCount: number; instancesDigest: string }).sopInstanceUIDs.length === 1), "one instance names the frame");
+  // Profile version 2: Steve's descriptor, every instance in slice order (mrson/schema/bulk.schema.json "dicom").
+  assert(images.every((n) => (n.dicom as { kind: string }).kind === "dicom-series"), "the descriptor's kind");
+  assert(images.every((n) => (n.dicom as { instances: string[] }).instances.length === 2), "every instance, in slice order");
+  assert(images.every((n) => n.zarr === undefined), "no `zarr` field (Steve's schema reads it as the voxels' location)");
+  assertEquals((Object.values(nodes).find((n) => n.type === "segmentation")!.dicom as { kind: string }).kind, "dicom-seg");
   assert(images.every((n) => (n.dicom as { instanceCount: number }).instanceCount === 2 && (n.dicom as { instancesDigest: string }).instancesDigest.length === 64), "the count and a digest name the exact set");
   assert(images.every((n) => n.name === undefined), "an image's name (it carries the patient's label) is not stored");
   assert(Object.values(nodes).every((n) => !["image", "scalarVolumeDisplay", "volumeRenderingDisplay", "sliceComposite", "sequence", "sequenceBrowser"].includes(n.type as string) || n.name === undefined), "no generated name is stored");

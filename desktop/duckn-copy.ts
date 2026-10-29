@@ -30,7 +30,7 @@
 import * as zlib from "node:zlib";
 import dcmjs from "../logic/dcmjs.ts";
 import { lastHeaderMs, lastSkipped, lastSkipReasons, parseInstances, setDcmjs, volumesOfSeries } from "../logic/readers/dicom-series.ts";
-import { DICOM_HEADER_LAYOUT, mergeSlice, sameHeader, splitShared } from "../logic/readers/dicom-tags.ts";
+import { DICOM_HEADER_LAYOUT, ducknView, mergeSlice, sameHeader, splitShared } from "../logic/readers/dicom-tags.ts";
 import { percentileWindowLevel, sha256, volumeToZarr } from "../logic/ingest.ts";
 import { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
 import { COPY_CODE, COPY_FOLDER } from "./duckn-copy-code.ts";
@@ -45,7 +45,9 @@ const ZSTD_LEVEL = 3;
 // Michael Halle's keyword view shared and per slice (logic/readers/dicom-tags.ts).
 // 0.3 (2026-09-25): `notHeld` -- every image of the series the copy does not hold, by SOPInstanceUID and frame number,
 // with the reason (critic, 2026-09-25, finding 7), so a writer reading the copy knows whether the series is complete.
-const ALBULA_EXT_VERSION = "0.3";
+// 0.4 (2026-10-27): the `dicom` view follows duckn dicom-spec 1.0 as haversack writes it (logic/readers/dicom-tags.ts
+// ducknView): `stored_values: false`, the source transfer syntax, `sample_units` from the scan's own Rescale Type.
+const ALBULA_EXT_VERSION = "0.4";
 
 const DATA_TYPE: Record<string, string> = { "<i2": "int16", "<u2": "uint16", "|u1": "uint8", "|i1": "int8", "<f4": "float32" };
 
@@ -231,7 +233,16 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
       // it). Michael Halle's keyword VIEW of the same header where his layout puts it: shared as the array's DICOM
       // tags, the rest per slice in the samples.
       const th = performance.now();
-      const { shared, perSlice } = splitShared((vol.sliceHeaders ?? []).map((h) => h.tags));
+      // The view as duckn's dicom-spec 1.0 defines it for rescaled values (ducknView), as haversack writes its copies.
+      const views = (vol.sliceHeaders ?? []).map((h) => ducknView(h.tags));
+      const { shared, perSlice } = splitShared(views);
+      // The facts the view leaves to the extension and the convention (dicom-spec §3.1; duckn's sample_units): the
+      // source's transfer syntax when every file states the same one; the units the scan's own Rescale Type names, when
+      // every slice names the same one and it is not "US" (unspecified) -- as duckn's converter decides them.
+      const one = <T,>(xs: T[]) => xs.length && xs.every((x) => x === xs[0]) ? xs[0] : undefined;
+      const sourceTs = one((vol.sliceHeaders ?? []).map((h) => h.tags.TransferSyntaxUID as string | undefined));
+      const rescaleType = one((vol.sliceHeaders ?? []).map((h) => h.tags.RescaleType as string | undefined));
+      const sampleUnits = typeof rescaleType === "string" && rescaleType.trim() && rescaleType.trim().toUpperCase() !== "US" ? rescaleType.trim() : undefined;
       const record = splitShared((vol.sliceHeaders ?? []).map((h) => h.json));
       const headerFile = vol.sliceHeaders?.length ? "dicom-header.json.zst" : undefined;
       if (headerFile) {
@@ -253,8 +264,9 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
         attributes: {
           duckn: {
             ...ducknAttrs(vol as unknown as Parameters<typeof ducknAttrs>[0], perSlice.length ? perSlice : undefined),   // geometry, and each slice's own header
+            ...(sampleUnits ? { sample_units: sampleUnits } : {}),
             extensions: {
-              dicom: { version: "1.0", ...(lossy ? { lossy_compressed: true } : {}), tags: dicomTags },
+              dicom: { version: "1.0", stored_values: false, ...(sourceTs ? { source_transfer_syntax: sourceTs } : {}), ...(lossy ? { lossy_compressed: true } : {}), tags: dicomTags },
               albula: {
                 version: ALBULA_EXT_VERSION,
                 ...(headerFile ? { header: { file: headerFile, layout: DICOM_HEADER_LAYOUT } } : {}),
@@ -282,7 +294,7 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
           // The record: every attribute of the file, private and binary included, byte for byte (base64).
           if (!sameHeader(vol.sliceHeaders[k].json, mergeSlice(rec.shared, rec.perSlice[k]))) throw new Error(`${seriesUID}: slice ${k}'s DICOM header does not come back from the copy as it was`);
           // Mike's view: the same, in his form.
-          if (!sameHeader(vol.sliceHeaders[k].tags, mergeSlice(d.extensions.dicom.tags, own(k)))) throw new Error(`${seriesUID}: slice ${k}'s keyword view does not come back from the copy as it was written`);
+          if (!sameHeader(views[k], mergeSlice(d.extensions.dicom.tags, own(k)))) throw new Error(`${seriesUID}: slice ${k}'s keyword view does not come back from the copy as it was written`);
         }
       }
       ms.header += performance.now() - th;

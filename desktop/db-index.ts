@@ -554,7 +554,10 @@ export async function seriesAttributes(path: string): Promise<SeriesAttribute[]>
 }
 
 /** A person's answer. Written with source "user", which the lookups never overwrite. */
-export async function setSeriesAttribute(path: string, uid: string, key: string, value: string, source: "user" | "haversack" = "user"): Promise<void> {
+/** Who may be recorded as speaking: a person, haversack (what a server reported), or the diffusion extension (the
+ *  descriptions it writes for its tract sets, 2026-10-27). */
+export type AttributeSource = "user" | "haversack" | "albula-diffusion" | "albula-scene";
+export async function setSeriesAttribute(path: string, uid: string, key: string, value: string, source: AttributeSource = "user"): Promise<void> {
   const q = (s: string) => "'" + s.replace(/'/g, "''") + "'";
   if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(key)) throw new Error("bad attribute key");
   await sqlite(path,

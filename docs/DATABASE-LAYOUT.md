@@ -51,8 +51,12 @@ machine whole.
   OpenNeuro/<dataset>/<subject>/  DICOM objects made from the brain tumor test cases (BIDS → DICOM, desktop/bids-import.ts)
   SlicerAlbula-Zarr/        the working copy: one Zarr folder per grayscale series (not DICOM; derived)
   SlicerAlbula-Scenes/      saved scenes, one mrson JSON file each (not DICOM; kept)
+  SlicerAlbula-Scenes/MRCOM/ each saved scene again as one DICOM object, an MRCOM bundle (since 2026-10-29; indexed)
   SlicerAlbula-Cache/       caches (not DICOM; derived)
   SlicerAlbula-Checkpoints/ an AI run's raw result, a safety net (not DICOM, not indexed; derived)
+  SlicerAlbula-Logs/        run logs: diffusion-runs.jsonl, what the diffusion extension's job tried on each scan, with
+                            what, and how it ended, and every tract set deleted with its whole record (added to, never
+                            edited; not DICOM, KEPT -- the history survives the results; albula-diffusion run-log.ts)
   SlicerAlbula-Import/      uploads waiting to be added (not indexed)
   SlicerAlbula-Download/    downloads waiting to be added (desktop/test-cases.ts)
 ```
@@ -96,8 +100,9 @@ writes:
 | fiber tracts (the diffusion extension) | **Tractography Results** | `tracts-dicom.ts` in `rkikinis/albula-diffusion` |
 | a diffusion scan converted from NIfTI or NRRD | **Enhanced MR Image** | `export-dicom-dwi.ts` in `rkikinis/albula-diffusion` |
 
-Where dicom3tools' `dciodvfy` is installed, the tests check the label-map, surface, image and tractography writers with
-it (they are skipped without it). A DICOM object Albula makes from another keeps the source's attributes, private ones
+Where dicom3tools' `dciodvfy` is installed, the tests check the label-map, surface, image and tractography writers, the
+BIDS converter's output, the diffusion writer and the scene object with it (skipped without it), each allowing a named
+list of errors it does not fix. A DICOM object Albula makes from another keeps the source's attributes, private ones
 included, except private pixel data (groups 7F01–7FFF); a conversion from NIfTI or NRRD has no DICOM source to keep.
 
 ### The working copy: `SlicerAlbula-Zarr/` (not DICOM; derived)
@@ -110,11 +115,21 @@ code is not used, and the series loads from DICOM. Each copy lists any image of 
 `SlicerAlbula-Zarr/sweep-report.json`); making them at indexing and in the background inside the app is planned (the
 workspace's `DUCKN-WORKING-COPY.md`). Deleting this folder loses nothing.
 
-### Scenes: `SlicerAlbula-Scenes/` (not DICOM; kept)
+### Scenes: `SlicerAlbula-Scenes/` (not DICOM; kept) and their DICOM objects
 
 `<scene UID>.mrson.json`: a scene in Steve Pieper's mrson format (the modernized MRML): what is loaded, how it is shown,
 the camera, the markups. A scene names its data by DICOM UID, never by file. The list of scenes is a table in the record
-store. Code: `desktop/scenes.ts`.
+store. Code: `desktop/scenes.ts`. **Since 2026-10-29 the files are profile `albula-scene/2`** (`logic/scene/profile.ts`):
+each image and segmentation named in Steve's descriptor form (`kind`, every instance in slice order), so they pass his
+validator (`mrson/validate.ts`); version 1 files still open.
+
+**Each scene is also a DICOM object** (`SlicerAlbula-Scenes/MRCOM/<SOP instance UID>.dcm`): a Secondary Capture carrying
+the scene in Steve's MRCOM private block (`logic/mrcom/`, his spec `docs/MRCOM-SCENE-BUNDLE.md`), in reference mode -- it
+names the scans and segmentations, carries none of their voxels -- indexed in the scene's study (modality OT, "Scene:
+<name>"), made from its first scan (record-store kind `scene`) and tied to its scene by the series fact `sceneUID`. One
+object per scene: every save and rename replaces it, a delete removes it (`desktop/scene-mrcom.ts`, called by
+`desktop/scenes.ts`). The browser does not load it as an image; the copy sweep skips it. The scene file stays what Albula
+opens; the object is the scene's record in DICOM, for other programs and for the archive.
 
 ### Caches: `SlicerAlbula-Cache/` (not DICOM; derived)
 
@@ -156,3 +171,23 @@ the record store and its scene into the scene list, in one step (`desktop/packag
 Original acquisitions never. Scenes and the record store only on purpose (they are the only copy). Everything Albula
 derived may be deleted when there is a reason: segmentations, tracts, surfaces and crops (through the app, which also
 removes their index rows, cache files and record-store rows), and the working copy, caches and checkpoints (made again).
+
+A whole database is removed only by the person, in the Databases window (2026-10-26, `desktop/db-remove.ts`): from the
+list only (the folder untouched), or with its folder moved to the macOS Trash -- original acquisitions included, which is
+the point of that choice; Finder's Put Back brings it back until the Trash is emptied. Its rows in the record store
+beside the folder (`provenance.sqlite`: made-from edges, attributes, scenes, cohorts) are left as they are, as a moved
+database leaves them; scenes are listed only while their file exists, the other rows stay as a record.
+
+## Notes added 2026-10-26
+
+- **The settings file is written under a lock** (`settings.ini.lock` beside it, `desktop/settings-file.ts`
+  `withSettingsLock`): the database list ([Database]) and the page's settings are read, changed and written inside it, so
+  two writers (two windows, the app and a headless server) never undo each other.
+- **A scene keeps per-segment settings by segment number** (`labelValue`). Albula's SEG writer numbers a result's segments
+  1..N over the structures present, so the same number is a different structure in another file: settings move between
+  segmentations by the file's segment label, never by number (CONSTRAINTS.md).
+- **`OpenNeuro/` holds every BIDS import by accession** (ds001226, ds005123, ...), each `<accession>/<subject>/<session>/<role>/`.
+- **A database on another Mac** (built 2026-10-28 as sharing in the app, off until switched on; the workspace's
+  `DATABASE-SHARING.md`): listed in its own settings section
+  `[RemoteDatabase]` (`<id>=<host>:<port>|<id there>`), never in [Database]; its folder is on the other Mac, reached only
+  through that Mac's sharing program, which stays the one writer of its index.

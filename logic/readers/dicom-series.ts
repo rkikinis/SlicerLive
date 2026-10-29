@@ -733,9 +733,16 @@ const fgroup = (own: Item | undefined, shared: Item | undefined, name: string): 
  * as 512). Swapped here into a copy; any other syntax, or 8-bit samples, pass through untouched. WAITS ON: dcmjs #541
  * (filed 2026-09-29; the workspace's Contents/docs/upstream-issues-dcmjs.md, issue 11); if dcmjs starts
  * swapping, the three big-endian sets in the diffusion extension's diffusion-vendors.test.ts fail and show it. 32-bit samples are not handled.
+ *
+ * DCMJS SWAPS ITSELF SINCE 2026-10-28: Steve Pieper's build (logic/dcmjs-version.ts) carries his #622, "Explicit VR Big
+ * Endian byte order for binary value fields", so the pixels arrive in the machine's order and a second swap undid it
+ * (8.7 million of 8.9 million voxels wrong on the Siemens Trio Tim set; the vendor tests found it, as said above). So
+ * nothing is swapped while DCMJS_SWAPS_BIG_ENDIAN is true; a dcmjs without #622 needs it false again, and the same
+ * tests will say so.
  */
+export const DCMJS_SWAPS_BIG_ENDIAN = true;
 export function littleEndianPixels(buf: ArrayBuffer, syntax: string, bitsAllocated: number): ArrayBuffer {
-  if (syntax !== "1.2.840.10008.1.2.2" || bitsAllocated !== 16) return buf;
+  if (DCMJS_SWAPS_BIG_ENDIAN || syntax !== "1.2.840.10008.1.2.2" || bitsAllocated !== 16) return buf;
   const b = new Uint8Array(buf.slice(0)), n = b.length & ~1;
   for (let i = 0; i < n; i += 2) { const t = b[i]; b[i] = b[i + 1]; b[i + 1] = t; }
   return b.buffer;

@@ -1,4 +1,4 @@
-// THE ALBULA SCENE PROFILE, albula-scene/1 -- what a saved scene may contain, as data, so the
+// THE ALBULA SCENE PROFILE, albula-scene/2 (version 1 still read) -- what a saved scene may contain, as data, so the
 // checker (check.ts), the writer (write.ts) and the loader read one definition and cannot drift.
 //
 // Steve Pieper's mrson core (github.com/pieper/mrson, structure/mrson-core.struct.json, 2026-08-03)
@@ -11,7 +11,13 @@
 // `deno run -A logic/scene/profile.ts > Contents/docs/profiles/albula-scene-1.struct.json` and
 // described for people in Contents/docs/profiles/albula-scene-1.md.
 
-export const PROFILE_ID = "albula-scene/1";
+// VERSION 2 (2026-10-29, Ron: the three scenes he keeps "must be converted to the new format"): the `dicom` block in
+// Steve's descriptor form (mrson/schema/bulk.schema.json "dicom": `kind` and the ordered `instances`), the size note under
+// `voxelShape` instead of `zarr` (which his schema reads as "the voxels are here"), and every segment named. Version 1
+// files are still read; only version 2 is written.
+export const PROFILE_ID = "albula-scene/2";
+/** Every profile a scene may declare and still be read. */
+export const PROFILES_READ = ["albula-scene/1", PROFILE_ID] as const;
 export const MRSON_VERSION = 0;
 
 /** A field's kind, enough to check a value's shape. */
@@ -34,7 +40,7 @@ export const NODE_TYPES: Record<string, Record<string, FieldSpec>> = {
     voxelType: { kind: "string", from: "core" },
     comps: { kind: "int", from: "core" },
     frame: { kind: "string", from: "core", note: "the Frame of Reference UID as a named frame; RAS when the series has none" },
-    dicom: { kind: "object", required: true, from: "profile", note: "seriesInstanceUID, studyInstanceUID, sopInstanceUIDs, frameOfReferenceUID; the instance list names the frame of a sequence" },
+    dicom: { kind: "object", required: true, from: "profile", note: "Steve's descriptor (kind dicom-series, the ordered instances; frameNumbers beside them for a multi-frame file), seriesInstanceUID, studyInstanceUID, frameOfReferenceUID; version 1 wrote the first instance only, as sopInstanceUIDs" },
     digest: { kind: "string", from: "profile", note: "sha-256 over the volume's chunk hashes: its content identity" },
     name: { kind: "string", from: "core" },
     refs: { kind: "refs", from: "core" },
@@ -42,7 +48,7 @@ export const NODE_TYPES: Record<string, Record<string, FieldSpec>> = {
   segmentation: {
     referenceImage: { kind: "ref", required: true, from: "core" },
     segments: { kind: "array", required: true, from: "core" },
-    dicom: { kind: "object", required: true, from: "profile", note: "the SEG's seriesInstanceUID (saved as, else loaded from), sopClassUID" },
+    dicom: { kind: "object", required: true, from: "profile", note: "Steve's descriptor (kind dicom-seg, its instance), the SEG's seriesInstanceUID (saved as, else loaded from), sopClassUID" },
     zOrder: { kind: "int", from: "profile" },
     hiddenViews: { kind: "strings", from: "profile" },
     fill2D: { kind: "object", from: "profile" },
@@ -156,7 +162,7 @@ export const NODE_TYPES: Record<string, Record<string, FieldSpec>> = {
 /** The envelope: what every scene file carries besides its nodes. */
 export const ENVELOPE: Record<string, FieldSpec> = {
   mrson: { kind: "int", required: true, from: "core" },
-  extensionsUsed: { kind: "strings", required: true, from: "core", note: "must contain albula-scene/1" },
+  extensionsUsed: { kind: "strings", required: true, from: "core", note: "must contain albula-scene/2 (or /1, still read)" },
   source: { kind: "object", required: true, from: "core", note: "producer (the build stamp), producedAt (ISO time), origin (the window)" },
   v: { kind: "int", required: true, from: "profile", note: "how many times this scene was saved" },
   name: { kind: "string", required: true, from: "profile" },
@@ -181,7 +187,7 @@ export function toStructureFile(): unknown {
     const name = type[0].toUpperCase() + type.slice(1) + "Node";
     definitions[name] = {
       type: "object",
-      comment: `Fields marked profile are albula-scene/1's; the rest are the mrson core's (github.com/pieper/mrson).`,
+      comment: `Fields marked profile are ${PROFILE_ID}'s; the rest are the mrson core's (github.com/pieper/mrson).`,
       properties: Object.fromEntries(Object.entries(fields).map(([f, spec]) => [f, { ...(kindType(spec.kind) as object), ...(spec.note ? { comment: `${spec.from}: ${spec.note}` } : { comment: spec.from }) }])),
       required: ["id", ...Object.entries(fields).filter(([, s]) => s.required).map(([f]) => f)],
     };

@@ -58,6 +58,21 @@ function perspectiveZO(fovy, aspect, near, far) {
   m[14] = far * near / (near - far);
   return m;
 }
+function perspectiveZOTile(fovy, viewW, viewH, x, y, w, h, near, far) {
+  const t = near * Math.tan(fovy / 2), b = -t;
+  const r = t * (viewW / viewH), l = -r;
+  const l2 = l + (r - l) * x / viewW, r2 = l + (r - l) * (x + w) / viewW;
+  const t2 = t - (t - b) * y / viewH, b2 = t - (t - b) * (y + h) / viewH;
+  const m = new Float32Array(16);
+  m[0] = 2 * near / (r2 - l2);
+  m[5] = 2 * near / (t2 - b2);
+  m[8] = (r2 + l2) / (r2 - l2);
+  m[9] = (t2 + b2) / (t2 - b2);
+  m[10] = far / (near - far);
+  m[11] = -1;
+  m[14] = far * near / (near - far);
+  return m;
+}
 function lookAt(eye, center, up) {
   let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];
   let zl = Math.hypot(zx, zy, zz) || 1;
@@ -215,6 +230,1121 @@ function spacingFromIjkToRAS(ijkToRAS) {
   ];
 }
 
+// render/sdf-bake.ts
+var INIT_WGSL = (
+  /* wgsl */
+  `
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
+@group(0) @binding(0) var t_label : texture_3d<u32>;
+@group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> u : U;
+// PADDED SDF GRID: the seed/SDF textures are LARGER than the labelmap by 'pad' voxels on every side
+// (dims.w). Coord c is a padded-grid coord; the label lives at c-pad, and everything outside the label
+// range is background (0). This gives a real spatial margin of background BEYOND the segmentation, so
+// a segment touching the labelmap edge closes as a genuine capped surface with room for the SDF to go
+// positive \u2014 and gradient/finite-difference samples near that cap stay in-bounds (they read real
+// background) instead of hitting the out-of-volume cull sentinel, which used to poison the normal.
+fn labelAt(c : vec3<i32>) -> u32 {
+  let pad = i32(u.dims.w);
+  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);   // label dims = padded dims - 2\xB7pad
+  let lc = c - vec3<i32>(pad);
+  if (any(lc < vec3<i32>(0)) || any(lc >= ld)) { return 0u; }
+  return textureLoad(t_label, lc, 0).r;
+}
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let my = labelAt(c);
+  let meIn = my != 0u;
+  let allMode = u.params.y > 0.5;                   // 0 = outer boundary only; 1 = ANY label change (multi-material interfaces)
+  var boundary = false;
+  var region = my;                                  // inside voxel \u2192 own label
+  let offs = array<vec3<i32>, 6>(vec3<i32>(1,0,0), vec3<i32>(-1,0,0), vec3<i32>(0,1,0), vec3<i32>(0,-1,0), vec3<i32>(0,0,1), vec3<i32>(0,0,-1));
+  for (var i = 0; i < 6; i = i + 1) {
+    let nl = labelAt(c + offs[i]);
+    // outer mode: boundary at inside\u2194outside (segment\u2194background). all mode: boundary at ANY label change
+    // (segment\u2194background AND segment\u2194segment) so embedded/nested structures get an interface shell too.
+    let isChange = select((nl != 0u) != meIn, nl != my, allMode);
+    // outer: a background boundary voxel adopts the neighbour's label (so the outer shell renders on both
+    // sides). all: every voxel keeps its OWN label (background stays 0 = transparent), so the region
+    // COLOUR changes across EVERY interface \u2014 including the outer one \u2014 which the shader's on-the-fly
+    // re-signing needs to recover a clean inside/outside normal there too.
+    if (isChange) { boundary = true; if (my == 0u && !allMode) { region = nl; } }
+  }
+  var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz, f32(region)); }
+  textureStore(t_seed_out, c, seed);
+}`
+);
+var JFA_WGSL = (
+  /* wgsl */
+  `
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
+@group(0) @binding(0) var t_seed_in : texture_3d<f32>;
+@group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
+@group(0) @binding(2) var<uniform> u : U;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
+  let step = i32(u.params.x);
+  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
+  var best = textureLoad(t_seed_in, c, 0);
+  var bestD = select(1e30, distance(p, best.xyz), best.w > 0.5);
+  for (var dz = -1; dz <= 1; dz = dz + 1) {
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+      for (var dx = -1; dx <= 1; dx = dx + 1) {
+        if (dx == 0 && dy == 0 && dz == 0) { continue; }
+        let nc = clamp(c + vec3<i32>(dx, dy, dz) * step, vec3<i32>(0), dmax);
+        let s = textureLoad(t_seed_in, nc, 0);
+        if (s.w > 0.5) {
+          let d = distance(p, s.xyz);
+          if (d < bestD) { bestD = d; best = s; }
+        }
+      }
+    }
+  }
+  textureStore(t_seed_out, c, best);
+}`
+);
+var FINAL_WGSL = (
+  /* wgsl */
+  `
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
+@group(0) @binding(0) var t_seed_in : texture_3d<f32>;
+@group(0) @binding(1) var t_label : texture_3d<u32>;
+@group(0) @binding(2) var t_out : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> u : U;
+@group(0) @binding(4) var<uniform> u_pal : array<vec4<f32>, 256>;
+@group(0) @binding(5) var t_attr : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(6) var<uniform> u_mode : array<vec4<f32>, 256>;   // .x = shading mode (0 surface, 1 volume)
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
+  let s = textureLoad(t_seed_in, c, 0);
+  let valid = s.w > 0.5;
+  let dist = select(1e3, distance(p, s.xyz), valid);
+  let pad = i32(u.dims.w);                                       // label is offset by pad; pad region = background (outside)
+  let lc = c - vec3<i32>(pad);
+  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);
+  let inRange = all(lc >= vec3<i32>(0)) && all(lc < ld);
+  let ins = inRange && textureLoad(t_label, lc, 0).r != 0u;
+  // outer mode: SIGNED (neg inside the union) \u2014 smooth zero-crossing = clean normals. all mode:
+  // UNSIGNED distance to the nearest interface (every label change is a wall; no global inside/outside).
+  let sdf = select(select(dist, -dist, ins), dist, u.params.y > 0.5);
+  let lbl = u32(s.w + 0.5) & 255u;
+  let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
+  let mode = select(0.0, u_mode[lbl].x, valid);
+  // PREMULTIPLIED colour (rgb\xB7opacity): the colour-seam blur then can't bleed a HIDDEN (opacity 0)
+  // segment's colour into a visible neighbour \u2014 an invisible organ was still tinting the organ it
+  // abutted (looked like half-opacity). The shader divides by the per-segment opacity to recover the
+  // true colour, so a 0-opacity region contributes nothing to the blend.
+  textureStore(t_out, c, vec4<f32>(pal.rgb * pal.a, sdf));
+  // .r = opacity, .g = shading mode, .a = CRISP presence (1 inside a real segment, 0 background) \u2014
+  // the FULLBLUR carries .a unblurred so the shader can tell a genuine in-segment voxel from one that
+  // merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
+  //
+  // .b is the BAND-LIMITED LABEL FIELD, and in outer mode it is what the surface IS. It starts as the
+  // crisp 0/1 presence and FULLBLUR low-passes it, so the shader reads p = G_\u03C3 * 1(label\u22600) and takes
+  // the surface to be its p = 0.5 level set. A labelmap is a SAMPLED indicator function: its voxel
+  // staircase is ALIASING, not data, and the faithful surface is that indicator reconstructed with a
+  // kernel at the grid's Nyquist limit \u2014 which is what the smoothing control now sets. Thresholding a
+  // BOUNDED field at 0.5 also cannot do what blurring the unbounded SIGNED DISTANCE did (fuse two
+  // vertebrae across a disc space): in the middle of a 4-voxel gap p \u2248 2\xB7\u03A6(-2) \u2248 0.05, nowhere near
+  // 0.5, so the gap stays open at every \u03C3 in range.
+  //
+  // Interface ("all") mode keeps the blurred DISTANCE here instead: its field is UNSIGNED (distance to
+  // the nearest label change), so a union indicator says nothing about the internal interfaces that
+  // mode exists to show, and its normal still comes from the smoothed distance.
+  let bchan = select(select(0.0, 1.0, ins), sdf, u.params.y > 0.5);
+  textureStore(t_attr, c, vec4<f32>(pal.a, mode, bchan, select(0.0, 1.0, ins)));
+}`
+);
+var BLUR_WGSL = (
+  /* wgsl */
+  `
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
+@group(0) @binding(0) var t_in : texture_3d<f32>;
+@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> u : BU;
+fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
+  var av = vec3<i32>(0);
+  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
+  let center = textureLoad(t_in, c, 0);
+  var sum = center.a * wt(0u);
+  let R = i32(u.axis_r.y);
+  for (var i = 1; i <= R; i = i + 1) {
+    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).a
+                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).a);
+  }
+  textureStore(t_out, c, vec4<f32>(center.rgb, sum));
+}`
+);
+var COLBLUR_WGSL = (
+  /* wgsl */
+  `
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
+@group(0) @binding(0) var t_in : texture_3d<f32>;
+@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> u : BU;
+fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
+  var av = vec3<i32>(0);
+  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
+  let center = textureLoad(t_in, c, 0);
+  var sum = center.rgb * wt(0u);
+  let R = i32(u.axis_r.y);
+  for (var i = 1; i <= R; i = i + 1) {
+    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).rgb
+                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).rgb);
+  }
+  textureStore(t_out, c, vec4<f32>(sum, center.a));
+}`
+);
+var FULLBLUR_WGSL = (
+  /* wgsl */
+  `
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
+@group(0) @binding(0) var t_in : texture_3d<f32>;
+@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> u : BU;
+fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
+  var av = vec3<i32>(0);
+  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
+  let center = textureLoad(t_in, c, 0);
+  var gb = center.gb * wt(0u);
+  let R = i32(u.axis_r.y);
+  for (var i = 1; i <= R; i = i + 1) {
+    gb = gb + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).gb
+                          + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).gb);
+  }
+  textureStore(t_out, c, vec4<f32>(center.r, gb.x, gb.y, center.a));
+}`
+);
+function gaussHalfKernel(sigma) {
+  const radius = Math.max(1, Math.min(15, Math.ceil(3 * sigma)));
+  const raw = new Float32Array(radius + 1);
+  let total = 0;
+  for (let i = 0; i <= radius; i++) {
+    raw[i] = Math.exp(-(i * i) / (2 * sigma * sigma));
+    total += (i === 0 ? 1 : 2) * raw[i];
+  }
+  const w = new Float32Array(16);
+  for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
+  return {
+    radius,
+    w
+  };
+}
+var JfaSdfBaker = class _JfaSdfBaker {
+  labelTex;
+  dims;
+  ijkToRAS;
+  dev;
+  seed;
+  sdfTex;
+  attrTex;
+  // ONE blur scratch, shared by the colour, distance and attribute blurs. They are the same format
+  // and size and blurStage runs them one at a time, so a second copy was 8 B per voxel of pure
+  // duplication — 12% of this pipeline, which is the difference between fitting a device and losing
+  // it. Named `scratch` rather than per-target so it cannot drift back into two.
+  scratch;
+  lastSeed;
+  uni;
+  palBuf;
+  modeBuf;
+  initPipe;
+  jfaPipe;
+  finalPipe;
+  blurPipe;
+  colBlurPipe;
+  fullBlurPipe;
+  g;
+  steps;
+  smoothSigma;
+  pad;
+  labelDims;
+  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
+  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
+  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
+  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
+  bmode;
+  constructor(dev, labelTex, dims, ijkToRAS, smoothSigmaVoxels = 1, pad = 2, boundaryMode = "outer") {
+    this.labelTex = labelTex;
+    this.dims = dims;
+    this.ijkToRAS = ijkToRAS;
+    this.lastSeed = 0;
+    this.dev = dev;
+    this.smoothSigma = smoothSigmaVoxels;
+    this.bmode = boundaryMode === "all" ? 1 : 0;
+    this.pad = pad;
+    this.labelDims = [
+      dims[0],
+      dims[1],
+      dims[2]
+    ];
+    this.dims = [
+      dims[0] + 2 * pad,
+      dims[1] + 2 * pad,
+      dims[2] + 2 * pad
+    ];
+    const m = ijkToRAS.slice();
+    for (let r = 0; r < 3; r++) m[r * 4 + 3] -= pad * (m[r * 4] + m[r * 4 + 1] + m[r * 4 + 2]);
+    this.ijkToRAS = m;
+    const [dx, dy, dz] = this.dims;
+    const mk = (fmt, extra = 0) => dev.createTexture({
+      size: this.dims,
+      dimension: "3d",
+      format: fmt,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra
+    });
+    const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+    this.seed = [
+      mk("rgba32float", seedUsage),
+      mk("rgba32float", seedUsage)
+    ];
+    this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);
+    this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);
+    this.scratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
+    this.uni = dev.createBuffer({
+      size: 112,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.palBuf = dev.createBuffer({
+      size: 256 * 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.modeBuf = dev.createBuffer({
+      size: 256 * 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    const mod = (code) => dev.createComputePipeline({
+      layout: "auto",
+      compute: {
+        module: dev.createShaderModule({
+          code
+        }),
+        entryPoint: "main"
+      }
+    });
+    this.initPipe = mod(INIT_WGSL);
+    this.jfaPipe = mod(JFA_WGSL);
+    this.finalPipe = mod(FINAL_WGSL);
+    this.blurPipe = mod(BLUR_WGSL);
+    this.colBlurPipe = mod(COLBLUR_WGSL);
+    this.fullBlurPipe = mod(FULLBLUR_WGSL);
+    this.g = [
+      Math.ceil(dx / 4),
+      Math.ceil(dy / 4),
+      Math.ceil(dz / 4)
+    ];
+    const maxDim = Math.max(dx, dy, dz);
+    const steps = [];
+    for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
+    this.steps = steps;
+  }
+  /** GPU bytes this baker holds, and what it WOULD hold for a given label grid.
+   *
+   *  The JFA is the memory-hungry part of the pipeline by a wide margin: the seed ping-pong is two
+   *  rgba32float volumes (32 B/voxel between them) and there are four more rgba16float volumes
+   *  (sdf, attr, and a scratch for each). On the PADDED grid that is 68 B per voxel including the
+   *  r32uint master the caller owns — so a 250³ grid is 1.06 GB, per segmentation. Two of them side
+   *  by side is how a comparison view walks off the end of a laptop's VRAM: the device is lost and
+   *  the canvas goes white, with no error a user can act on. Callers size their grid against this
+   *  (see render/gpu-budget.ts) instead of finding out the hard way. */
+  static bytesPerVoxel() {
+    return 2 * 16 + 8 + 8 + 8 + 4;
+  }
+  /** Bytes for a label grid of `dims` once padded by `pad` voxels on every side. */
+  static estimateBytes(dims, pad = 2) {
+    const n = (dims[0] + 2 * pad) * (dims[1] + 2 * pad) * (dims[2] + 2 * pad);
+    return n * _JfaSdfBaker.bytesPerVoxel();
+  }
+  /** Bytes this instance actually holds. */
+  byteSize() {
+    const n = this.dims[0] * this.dims[1] * this.dims[2];
+    return n * _JfaSdfBaker.bytesPerVoxel();
+  }
+  /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
+   *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
+   *  place. */
+  sdfTexture() {
+    return this.sdfTex;
+  }
+  /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
+  attrTexture() {
+    return this.attrTex;
+  }
+  /** The PADDED grid the SDF/attr textures live on (labelDims + 2·pad), and the ijkToRAS that maps it
+   *  to RAS — hand these to the SegmentField so its patient→texture transform covers the padded extent. */
+  sdfDims() {
+    return this.dims;
+  }
+  sdfIjkToRAS() {
+    return this.ijkToRAS;
+  }
+  /** Background margin (voxels) padded on each side; readDistance() is on the padded grid, so a label
+   *  voxel (x,y,z) is at padded (x+pad, y+pad, z+pad). */
+  padVoxels() {
+    return this.pad;
+  }
+  /** Read back the per-voxel signed distance (sdfTex .a, mm) to CPU. For accuracy comparison/tests. */
+  async readDistance() {
+    const [dx, dy, dz] = this.dims;
+    const bpr = Math.ceil(dx * 8 / 256) * 256;
+    const rowU16 = bpr / 2;
+    const buf = this.dev.createBuffer({
+      size: bpr * dy * dz,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    const enc = this.dev.createCommandEncoder();
+    enc.copyTextureToBuffer({
+      texture: this.sdfTex
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: dy
+    }, [
+      dx,
+      dy,
+      dz
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const u16 = new Uint16Array(buf.getMappedRange());
+    const h2f = (h) => {
+      const s = h & 32768 ? -1 : 1, e = (h & 31744) >> 10, f = h & 1023;
+      if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+      if (e === 31) return f ? NaN : s * Infinity;
+      return s * Math.pow(2, e - 15) * (1 + f / 1024);
+    };
+    const out = new Float32Array(dx * dy * dz);
+    for (let z = 0; z < dz; z++) for (let y = 0; y < dy; y++) for (let x = 0; x < dx; x++) {
+      out[(z * dy + y) * dx + x] = h2f(u16[(z * dy + y) * rowU16 + x * 4 + 3]);
+    }
+    buf.unmap();
+    buf.destroy();
+    return out;
+  }
+  /** Set the label→colour palette (256 × rgba f32: rgb = colour, a = opacity). Call before bake(). */
+  setPalette(palette) {
+    const pal = new Float32Array(256 * 4);
+    pal.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
+    this.dev.queue.writeBuffer(this.palBuf, 0, pal);
+  }
+  /** Set the per-label shading mode palette (256 × vec4; .x = 0 surface shell / 1 volume DVR fill). */
+  setModePalette(modes) {
+    const m = new Float32Array(256 * 4);
+    m.set(modes.subarray(0, Math.min(modes.length, 256 * 4)));
+    this.dev.queue.writeBuffer(this.modeBuf, 0, m);
+  }
+  writeUni(step, origin = [
+    0,
+    0,
+    0
+  ]) {
+    const ab = new ArrayBuffer(112);
+    const f = new Float32Array(ab), u = new Uint32Array(ab);
+    f.set(transpose4(this.ijkToRAS), 0);
+    u[16] = this.dims[0];
+    u[17] = this.dims[1];
+    u[18] = this.dims[2];
+    u[19] = this.pad;
+    f[20] = step;
+    f[21] = this.bmode;
+    f[22] = 0;
+    f[23] = 0;
+    const i32v = new Int32Array(ab);
+    i32v[24] = origin[0];
+    i32v[25] = origin[1];
+    i32v[26] = origin[2];
+    i32v[27] = 0;
+    this.dev.queue.writeBuffer(this.uni, 0, ab);
+  }
+  /** Distance-blur σ, in VOXELS, applied to the signed distance on every bake/refine (0 = none).
+   *  The zero level set barely moves, so the silhouette stays where the labelmap put it; what the
+   *  blur smooths is the GRADIENT, i.e. the shading normal — which is what turns a voxel-faceted
+   *  "golf ball" into a surface. Takes effect on the next bake(); the caller decides when that is,
+   *  since a sweep is ~20 compute passes. */
+  setSmoothing(sigmaVoxels) {
+    this.smoothSigma = Math.max(0, sigmaVoxels);
+  }
+  smoothing() {
+    return this.smoothSigma;
+  }
+  /** σ for the COLOUR-seam blur, which is NOT the geometry σ and must not follow it up.
+   *
+   *  The seam blur exists for one narrow job: the region colour is flooded per voxel, so the border
+   *  between two labels is a voxel staircase in COLOUR even when the surface is smooth. A fraction of
+   *  a voxel of blur hides that. Tying it to the geometry σ (it used to be min(1, σ)) meant that
+   *  asking for a smoother SURFACE also dissolved the label boundaries — and a boundary is the entire
+   *  signal in a comparison view. It showed up worst on the SPINEPS disc layer: a near-white disc
+   *  between two saturated vertebra colours, blurred a full voxel, reads as a milky smear over both
+   *  bones instead of a disc. Capped well below a voxel, the seam stays a seam. */
+  seamSigma() {
+    return Math.min(0.4, this.smoothSigma);
+  }
+  /** FAST bake for LIVE editing: plain JFA (approximate) + the attr blur that band-limits the label
+   *  field (no colour-seam blur). Cheap, so it keeps up with an in-progress stroke; the colour seams
+   *  stay voxel-jagged until the edit settles and refine() runs. */
+  bake() {
+    this.sweep([], this.smoothSigma, 0);
+  }
+  /** REFINE for a STATIC labelmap (run once the edit settles): JFA+2 extra passes → a near-exact
+   *  Voronoi/SDF (fixes the small JFA mistakes near close/overlapping segments) and a colour-seam blur
+   *  so neighbouring-label boundaries are smooth, not a voxel staircase. The attr blur stays at the
+   *  caller's σ — it is the geometry, not a quality knob. Higher quality lives in the resident
+   *  texture, so camera renders stay cheap. */
+  refine() {
+    this.sweep([
+      2,
+      1
+    ], this.smoothSigma, this.seamSigma());
+  }
+  /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
+   *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
+   *  whole volume, which is what makes level stepping feel instant. The seed ping-pong pair is
+   *  first made consistent with a full-texture copy, so region passes can ping-pong while JFA
+   *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
+   *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
+   *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
+  refineRegion(regionIjk, maxStep = Infinity) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const lo = [
+      Math.max(0, regionIjk.lo[0]),
+      Math.max(0, regionIjk.lo[1]),
+      Math.max(0, regionIjk.lo[2])
+    ];
+    const hi = [
+      Math.min(dx, regionIjk.hi[0]),
+      Math.min(dy, regionIjk.hi[1]),
+      Math.min(dz, regionIjk.hi[2])
+    ];
+    const [rx, ry, rz] = [
+      hi[0] - lo[0],
+      hi[1] - lo[1],
+      hi[2] - lo[2]
+    ];
+    if (rx <= 0 || ry <= 0 || rz <= 0) return;
+    const g = [
+      Math.ceil(rx / 4),
+      Math.ceil(ry / 4),
+      Math.ceil(rz / 4)
+    ];
+    const region = {
+      lo,
+      hi
+    };
+    let src = this.lastSeed;
+    let enc = dev.createCommandEncoder();
+    enc.copyTextureToTexture({
+      texture: this.seed[src]
+    }, {
+      texture: this.seed[src ^ 1]
+    }, this.dims);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    {
+      const b = dev.createBindGroup({
+        layout: this.initPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.labelTex.createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.initPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(g[0], g[1], g[2]);
+      p2.end();
+    }
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    const steps = [
+      ...this.steps.filter((v) => v <= maxStep),
+      2,
+      1
+    ];
+    for (const step of steps) {
+      this.writeUni(step, lo);
+      const dst = src ^ 1;
+      enc = dev.createCommandEncoder();
+      const b = dev.createBindGroup({
+        layout: this.jfaPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[dst].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.jfaPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(g[0], g[1], g[2]);
+      p2.end();
+      dev.queue.submit([
+        enc.finish()
+      ]);
+      src = dst;
+    }
+    this.lastSeed = src;
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[src].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(g[0], g[1], g[2]);
+    p.end();
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    if (this.seamSigma() > 0) this.blurStage(this.colBlurPipe, this.seamSigma(), this.sdfTex, this.scratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
+  }
+  /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
+   *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
+   *  routed to the scratch texture (discarded — the blurred resident sdfTex stays pristine) and
+   *  re-blur the attributes. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
+   *  what makes per-vertebra focus switching real-time. */
+  rebakeAttr(blurSeams = false, regionIjk) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const region = regionIjk && {
+      lo: [
+        Math.max(0, regionIjk.lo[0]),
+        Math.max(0, regionIjk.lo[1]),
+        Math.max(0, regionIjk.lo[2])
+      ],
+      hi: [
+        Math.min(dx, regionIjk.hi[0]),
+        Math.min(dy, regionIjk.hi[1]),
+        Math.min(dz, regionIjk.hi[2])
+      ]
+    };
+    const [gx, gy, gz] = region ? [
+      Math.ceil((region.hi[0] - region.lo[0]) / 4),
+      Math.ceil((region.hi[1] - region.lo[1]) / 4),
+      Math.ceil((region.hi[2] - region.lo[2]) / 4)
+    ] : this.g;
+    if (region && (gx <= 0 || gy <= 0 || gz <= 0)) return;
+    this.writeUni(0, region ? region.lo : [
+      0,
+      0,
+      0
+    ]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[this.lastSeed].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.scratch.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(gx, gy, gz);
+    p.end();
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
+  }
+  /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
+   *  for a smoothing change is both wasteful and WRONG — the fast bake's approximate flood differs
+   *  from the refined one by a fraction of a voxel, so the surface visibly shifted back and forth
+   *  as the control moved. This re-derives the attributes and the colour from the EXISTING seeds
+   *  (so the distance is bit-identical) and re-blurs them at the new σ. */
+  resmooth() {
+    const dev = this.dev;
+    this.writeUni(0, [
+      0,
+      0,
+      0
+    ]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[this.lastSeed].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]);
+    p.end();
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    const seam = this.seamSigma();
+    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.scratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch);
+  }
+  /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
+   *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
+  blurAttrOnly() {
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch);
+  }
+  /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
+  sweep(extraSteps, distSigma, colorSigma) {
+    const dev = this.dev, [gx, gy, gz] = this.g;
+    this.writeUni(0);
+    let enc = dev.createCommandEncoder();
+    {
+      const b = dev.createBindGroup({
+        layout: this.initPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.labelTex.createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[0].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.initPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(gx, gy, gz);
+      p2.end();
+    }
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    let src = 0;
+    for (const step of [
+      ...this.steps,
+      ...extraSteps
+    ]) {
+      this.writeUni(step);
+      const dst = src ^ 1;
+      enc = dev.createCommandEncoder();
+      const b = dev.createBindGroup({
+        layout: this.jfaPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[dst].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.jfaPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(gx, gy, gz);
+      p2.end();
+      dev.queue.submit([
+        enc.finish()
+      ]);
+      src = dst;
+    }
+    this.lastSeed = src;
+    enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[src].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(gx, gy, gz);
+    p.end();
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.scratch);
+    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.scratch);
+  }
+  /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
+   *  ending in scratch → copied back to `tex` so its identity stays stable for the renderer. */
+  blurStage(pipe, sigma, tex, scratch, region) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const { radius, w } = gaussHalfKernel(sigma);
+    const passes = [
+      [
+        tex,
+        scratch,
+        0
+      ],
+      [
+        scratch,
+        tex,
+        1
+      ],
+      [
+        tex,
+        scratch,
+        2
+      ]
+    ];
+    const enc = dev.createCommandEncoder();
+    let passIdx = 0;
+    for (const [srcT, dstT, axis] of passes) {
+      const expand = region ? (2 - passIdx) * radius : 0;
+      const lo = region ? [
+        Math.max(0, region.lo[0] - expand),
+        Math.max(0, region.lo[1] - expand),
+        Math.max(0, region.lo[2] - expand)
+      ] : [
+        0,
+        0,
+        0
+      ];
+      const hi = region ? [
+        Math.min(dx, region.hi[0] + expand),
+        Math.min(dy, region.hi[1] + expand),
+        Math.min(dz, region.hi[2] + expand)
+      ] : [
+        dx,
+        dy,
+        dz
+      ];
+      const ab = new ArrayBuffer(112);
+      const u32 = new Uint32Array(ab), f32 = new Float32Array(ab), i32 = new Int32Array(ab);
+      u32[0] = dx;
+      u32[1] = dy;
+      u32[2] = dz;
+      u32[4] = axis;
+      u32[5] = radius;
+      f32.set(w, 8);
+      i32[24] = lo[0];
+      i32[25] = lo[1];
+      i32[26] = lo[2];
+      const ub = dev.createBuffer({
+        size: 112,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      dev.queue.writeBuffer(ub, 0, ab);
+      const b = dev.createBindGroup({
+        layout: pipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: srcT.createView()
+          },
+          {
+            binding: 1,
+            resource: dstT.createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: ub
+            }
+          }
+        ]
+      });
+      const bp = enc.beginComputePass();
+      bp.setPipeline(pipe);
+      bp.setBindGroup(0, b);
+      bp.dispatchWorkgroups(Math.ceil((hi[0] - lo[0]) / 4), Math.ceil((hi[1] - lo[1]) / 4), Math.ceil((hi[2] - lo[2]) / 4));
+      bp.end();
+      passIdx++;
+    }
+    if (region) {
+      const sz = [
+        region.hi[0] - region.lo[0],
+        region.hi[1] - region.lo[1],
+        region.hi[2] - region.lo[2]
+      ];
+      enc.copyTextureToTexture({
+        texture: scratch,
+        origin: region.lo
+      }, {
+        texture: tex,
+        origin: region.lo
+      }, sz);
+    } else {
+      enc.copyTextureToTexture({
+        texture: scratch
+      }, {
+        texture: tex
+      }, this.dims);
+    }
+    dev.queue.submit([
+      enc.finish()
+    ]);
+  }
+  destroy() {
+    this.seed[0].destroy();
+    this.seed[1].destroy();
+    this.sdfTex.destroy();
+    this.attrTex.destroy();
+    this.scratch.destroy();
+    this.uni.destroy();
+    this.palBuf.destroy();
+    this.modeBuf.destroy();
+  }
+};
+
+// render/gpu-budget.ts
+var SHARE = 0.25;
+var CEILING = 75e7;
+function gpuBudget(adapter) {
+  const dm = navigator.deviceMemory;
+  const fallback = !!adapter?.isFallbackAdapter;
+  const claimed = typeof dm === "number" ? Math.min(dm, 8) : void 0;
+  const gb = fallback ? 1 : claimed ?? 4;
+  const bytes = Math.max(96e6, Math.min(CEILING, gb * 1e9 * SHARE));
+  const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("gpumem") : null;
+  const override = q ? Number(q) * 1e9 : NaN;
+  if (Number.isFinite(override) && override > 32e6) {
+    return {
+      bytes: override,
+      deviceMemoryGb: dm,
+      fallbackAdapter: fallback,
+      why: `?gpumem=${q} override`
+    };
+  }
+  const learned = learnedBudget();
+  if (learned !== void 0 && learned < bytes) {
+    return {
+      bytes: learned,
+      deviceMemoryGb: dm,
+      fallbackAdapter: fallback,
+      why: `reduced to ${(learned / 1e9).toFixed(2)} GB after this tab lost the GPU`
+    };
+  }
+  return {
+    bytes,
+    deviceMemoryGb: dm,
+    fallbackAdapter: fallback,
+    why: fallback ? "software adapter \u2014 minimum budget" : `${claimed ? `navigator.deviceMemory ${dm}${dm !== claimed ? ` (clamped to ${claimed})` : ""} GB` : "no deviceMemory signal, assuming 4 GB"} \xD7 ${SHARE}, capped at ${(CEILING / 1e9).toFixed(2)} GB`
+  };
+}
+function sdfVoxelCap(bytes, count = 1, pad = 2) {
+  const per = Math.max(bytes / Math.max(count, 1), 32e6);
+  const nPadded = per / JfaSdfBaker.bytesPerVoxel();
+  const side = Math.cbrt(nPadded);
+  const inner = Math.max(32, side - 2 * pad);
+  return Math.floor(inner * inner * inner);
+}
+var formatBytes = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round(b / 1e6)} MB`;
+var KEY = "slicerlive.gpuBudgetBytes";
+function learnedBudget() {
+  try {
+    const v = Number(sessionStorage.getItem(KEY));
+    return Number.isFinite(v) && v > 32e6 ? v : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function reduceBudget(current) {
+  const next = Math.max(96e6, Math.min(current, learnedBudget() ?? current) / 2);
+  try {
+    sessionStorage.setItem(KEY, String(next));
+  } catch {
+  }
+  return next;
+}
+function budgetWasReduced() {
+  return learnedBudget() !== void 0;
+}
+
 // render/slice-renderer.ts
 var DEFAULT_FORMAT = "rgba8unorm-srgb";
 var SHADER = (
@@ -223,16 +1353,33 @@ var SHADER = (
 struct U {
   p2t : mat4x4<f32>,     // RAS -> texture[0,1] (folds in ijkToRAS: rotation + anisotropy)
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
-  uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
+  uvec : vec4<f32>,      // xyz: RAS vector spanning the view width (isotropic mm); w: segmentation
+                         //      outline width in SCREEN PIXELS (see setOutlineWidth)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, _, _
+  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, bgLutMode (0 gray, 1 LUT row 0)
+  // \u2500\u2500 Slicer slice-composite layers (vtkMRMLSliceCompositeNode): a FOREGROUND volume blended over the
+  //    background with its own geometry, W/L and LUT, and a LABEL volume coloured through a colour table.
+  p2tFg : mat4x4<f32>,   // RAS -> foreground texture[0,1]
+  fgParams : vec4<f32>,  // win, lev, opacity (0 = no foreground), compositing (0 alpha,1 reverse alpha,2 add,3 subtract)
+  p2tLabel : mat4x4<f32>,// RAS -> label texture[0,1]
+  labelParams : vec4<f32>, // opacity (0 = no label layer), lutEntries, fgLutMode (0 gray, 1 LUT row 1), _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
 @group(0) @binding(3) var t_overlay : texture_3d<f32>;
 @group(0) @binding(4) var s_nn : sampler;   // NEAREST \u2014 labelmap overlay is per-voxel crisp (matches Slicer)
+// Label-overlay mode (size.z > 0.5): instead of a pre-coloured rgba volume, take the segment
+// number from a u8 label volume and its colour+opacity from the same 256x2 palette the
+// ColorizeField uses. A coloured overlay of a 509x365x299 CT would be 222 MB; label + palette
+// is 55 MB and, because it shares the palette, hiding an organ group in 3D hides it here too.
+@group(0) @binding(5) var t_labels : texture_3d<u32>;
+@group(0) @binding(6) var t_palette : texture_2d<f32>;
+@group(0) @binding(7) var t_fg : texture_3d<f32>;       // foreground scalar volume
+@group(0) @binding(8) var t_lut : texture_2d<f32>;      // 256x2 colour LUTs: row 0 background, row 1 foreground (sampled over the W/L ramp)
+@group(0) @binding(9) var t_labelVol : texture_3d<f32>; // label volume (integer values stored as float)
+@group(0) @binding(10) var t_labelLut : texture_2d<f32>;// Nx1 colour table indexed by label value
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -245,10 +1392,30 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
-fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
+/** The overlay colour of ONE label layer at a texture coordinate.
+ *
+ *  size.z is the number of label layers (0 = the pre-coloured rgba overlay, which is one layer by
+ *  definition). The layers are stacked along z in a single label texture \u2014 depth = nz * layers \u2014
+ *  because DICOM SEG segments may overlap and one label per voxel cannot hold that: segments that
+ *  overlap are decoded into different layers and composited here, the way OHIF composites one
+ *  representation per layer. */
+fn ov_layer(t : vec3<f32>, layer : i32) -> vec4<f32> {
+  if (u.size.z > 0.5) {
+    let full = vec3<f32>(textureDimensions(t_labels));
+    let nz = full.z / max(u.size.z, 1.0);                    // depth of ONE layer
+    let d = vec3<f32>(full.x, full.y, nz);
+    let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
+    let lab = i32(textureLoad(t_labels, vec3<i32>(vi.x, vi.y, vi.z + layer * i32(nz)), 0).r);
+    if (lab == 0) { return vec4<f32>(0.0); }
+    return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
+  }
+  if (layer > 0) { return vec4<f32>(0.0); }
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+}
+fn ov_at(ras : vec3<f32>, layer : i32) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+  return ov_layer(t, layer);
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -261,23 +1428,86 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  let ov = textureSampleLevel(t_overlay, s_nn, tex, 0.0);
+  if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
+  // \u2500\u2500 foreground layer (Slicer's vtkImageBlend semantics per compositing mode) \u2500\u2500
+  if (u.fgParams.z > 0.0) {
+    let tf = (u.p2tFg * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tf >= vec3<f32>(0.0)) && all(tf <= vec3<f32>(1.0))) {
+      let fv = textureSampleLevel(t_fg, s_lin, tf, 0.0).r;
+      let fwin = max(u.fgParams.x, 1e-6);
+      let fg = clamp((fv - (u.fgParams.y - fwin * 0.5)) / fwin, 0.0, 1.0);
+      var fcol = vec3<f32>(fg);
+      if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
+      let a = u.fgParams.z;
+      let mode = i32(u.fgParams.w + 0.5);
+      if (mode == 0) { col = mix(col, fcol, a); }                       // alpha: fg over bg
+      else if (mode == 1) { col = mix(fcol, col, a); }                  // reverse alpha: bg over fg
+      else if (mode == 2) { col = clamp(col + fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }   // add
+      else { col = clamp(col - fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }                   // subtract
+    }
+  }
+  // \u2500\u2500 label layer: integer label -> colour table entry, blended at labelOpacity (label 0 = transparent) \u2500\u2500
+  if (u.labelParams.x > 0.0) {
+    let tl = (u.p2tLabel * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tl >= vec3<f32>(0.0)) && all(tl <= vec3<f32>(1.0))) {
+      let lv = i32(textureSampleLevel(t_labelVol, s_nn, tl, 0.0).r + 0.5);
+      let nEntries = i32(u.labelParams.y);
+      if (lv > 0 && lv < nEntries) {
+        let lc = textureLoad(t_labelLut, vec2<i32>(lv, 0), 0);
+        col = mix(col, lc.rgb, clamp(lc.a * u.labelParams.x, 0.0, 1.0));
+      }
+    }
+  }
   // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
   // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
   // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
   // inner edge \u2014 at both label\u2194label and label\u2194background boundaries.
-  let fillA = clamp(ov.a * u.params.z, 0.0, 1.0);
-  var outA = 0.0;
-  if (u.params.w > 0.0) {
-    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
-    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
-    let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
-    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
-                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
-    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
-    outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
+  //
+  // Each label layer composites over the one below, so a voxel claimed by two segments comes out
+  // MORE OPAQUE than either alone (1-(1-a1)(1-a2)) and in the blend of their colours \u2014 which is
+  // how an overlap reads as an overlap rather than as whichever segment was decoded last. Each
+  // layer is also edge-tested on its OWN labels, so every segment keeps its own contour through
+  // the region it shares; the contours blend only where they coincide.
+  let nL = max(i32(u.size.z), 1);
+  let w = max(u.uvec.w, 1.0);
+  let du = u.uvec.xyz / u.size.x * w;     // w px right, in RAS
+  let dv = u.vvec.xyz / u.size.y * w;     // w px up
+  let dd = 0.70710678;                    // diagonals at the same distance
+  var fillC = vec3<f32>(0.0); var fillA = 0.0;   // premultiplied
+  var edgeC = vec3<f32>(0.0); var edgeA = 0.0;
+  for (var l = 0; l < nL; l = l + 1) {
+    let ov = ov_layer(tex, l);
+    if (ov.a <= 0.0) { continue; }                 // segment hidden, or no label in this layer
+    // The display alpha is folded in PER LAYER, before compositing \u2014 that is what makes an
+    // overlap more opaque: one layer gives exactly a, two give 1-(1-a)^2.
+    let fa = clamp(ov.a * u.params.z, 0.0, 1.0);
+    fillC = ov.rgb * fa + fillC * (1.0 - fa);
+    fillA = fa + fillA * (1.0 - fa);
+    if (u.params.w <= 0.0) { continue; }
+    // The contour is the band of voxels within w SCREEN pixels of a boundary, so it keeps the
+    // same visual weight at every zoom. Eight neighbours, not four: at four, a boundary running
+    // diagonally is only sampled across its corners and the line thins and breaks up as w grows.
+    // A neighbour is a DIFFERENT segment iff its overlay texel differs at all. The overlay is
+    // sampled NEAREST from a crisp per-voxel bake, so every texel is an exact palette entry and
+    // an exact comparison is the label test: two touching segments whose colours happen to be
+    // close still get a boundary, where a distance threshold used to merge them into one blob.
+    // A hidden segment (palette alpha 0) differs from a visible neighbour, so the visible one
+    // keeps its contour there; and its own voxels have ov.a = 0, so it draws nothing itself.
+    let n0 = ov_at(ras + du, l); let n1 = ov_at(ras - du, l);
+    let n2 = ov_at(ras + dv, l); let n3 = ov_at(ras - dv, l);
+    let n4 = ov_at(ras + (du + dv) * dd, l); let n5 = ov_at(ras + (du - dv) * dd, l);
+    let n6 = ov_at(ras - (du + dv) * dd, l); let n7 = ov_at(ras - (du - dv) * dd, l);
+    if (any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov) ||
+        any(n4 != ov) || any(n5 != ov) || any(n6 != ov) || any(n7 != ov)) {
+      let ea = clamp(ov.a * u.params.w, 0.0, 1.0);
+      edgeC = ov.rgb * ea + edgeC * (1.0 - ea);
+      edgeA = ea + edgeA * (1.0 - ea);
+    }
   }
-  col = mix(col, ov.rgb, max(fillA, outA));
+  // Fill first, then the contours over it (the contour of a segment reads over its own fill and
+  // over anything it overlaps).
+  if (fillA > 0.0) { col = mix(col, fillC / fillA, fillA); }
+  if (edgeA > 0.0) { col = mix(col, edgeC / edgeA, edgeA); }
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `
@@ -294,9 +1524,11 @@ var BASES = {
       1,
       0
     ],
-    uAxis: 0,
-    vAxis: 1,
-    nAxis: 2
+    nDir: [
+      0,
+      0,
+      1
+    ]
   },
   coronal: {
     uDir: [
@@ -309,9 +1541,11 @@ var BASES = {
       0,
       1
     ],
-    uAxis: 0,
-    vAxis: 2,
-    nAxis: 1
+    nDir: [
+      0,
+      1,
+      0
+    ]
   },
   sagittal: {
     uDir: [
@@ -324,11 +1558,14 @@ var BASES = {
       0,
       1
     ],
-    uAxis: 1,
-    vAxis: 2,
-    nAxis: 0
+    nDir: [
+      1,
+      0,
+      0
+    ]
   }
 };
+var dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function ijkAxisForRasAxis(ijkToRAS, rasAxis) {
   let best = 0, bestMag = -1;
   for (let c = 0; c < 3; c++) {
@@ -342,7 +1579,8 @@ function ijkAxisForRasAxis(ijkToRAS, rasAxis) {
 }
 function slicerDefaultOffset01(orient, dims, ijkToRAS, rasLo, rasHi) {
   const b = BASES[orient];
-  const n = b.nAxis;
+  const nAbs = b.nDir.map(Math.abs);
+  const n = nAbs[0] >= nAbs[1] && nAbs[0] >= nAbs[2] ? 0 : nAbs[1] >= nAbs[2] ? 1 : 2;
   const a = ijkAxisForRasAxis(ijkToRAS, n);
   const m = Math.floor((dims[a] - 1) / 2);
   const ijk = [
@@ -362,9 +1600,25 @@ var SliceRenderer = class {
   sampler;
   nnSampler;
   ubuf;
-  u = new Float32Array(36);
+  u = new Float32Array(80);
   bind;
+  // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
+  // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
+  // resolution under load to keep interactive latency low, snapping back to native when settled.
+  blitPipeline;
+  lowTex;
+  lowView;
+  lowW = 0;
+  lowH = 0;
+  blitBind;
   overlay;
+  labels;
+  palette;
+  scalarTex;
+  fgTex;
+  lutTex;
+  labelVolTex;
+  labelLutTex;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
   // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
   uSpanMm = 0;
@@ -407,6 +1661,9 @@ var SliceRenderer = class {
     0,
     0
   ];
+  // Optional per-orientation basis override (reslice along a volume's own axes). null = the
+  // anatomical preset.
+  basisOverride = {};
   constructor(gpu, format = DEFAULT_FORMAT) {
     this.dev = gpu.device;
     this.format = format;
@@ -454,6 +1711,197 @@ var SliceRenderer = class {
     this.setWindowLevel(255, 127);
     this.setOverlayOpacity(0.55);
   }
+  /** 1x1x1 stand-ins so the label-overlay bindings always exist. The pipeline layout is fixed,
+   *  so every caller must bind them even when it only wants a plain MPR. */
+  emptyLabels;
+  emptyPalette;
+  noLabels() {
+    if (!this.emptyLabels) {
+      this.emptyLabels = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "r8uint",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyLabels
+      }, new Uint8Array(1), {
+        bytesPerRow: 1,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
+    }
+    return this.emptyLabels;
+  }
+  noPalette() {
+    if (!this.emptyPalette) {
+      this.emptyPalette = this.dev.createTexture({
+        size: [
+          256,
+          2
+        ],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyPalette
+      }, new Uint8Array(256 * 2 * 4), {
+        bytesPerRow: 256 * 4
+      }, [
+        256,
+        2
+      ]);
+    }
+    return this.emptyPalette;
+  }
+  emptyScalar;
+  noScalar() {
+    if (!this.emptyScalar) {
+      this.emptyScalar = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "r32float",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyScalar
+      }, new Float32Array(1), {
+        bytesPerRow: 4,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
+    }
+    return this.emptyScalar;
+  }
+  emptyLut;
+  noLut() {
+    if (!this.emptyLut) {
+      this.emptyLut = this.dev.createTexture({
+        size: [
+          256,
+          2
+        ],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyLut
+      }, new Uint8Array(256 * 2 * 4), {
+        bytesPerRow: 256 * 4
+      }, [
+        256,
+        2
+      ]);
+    }
+    return this.emptyLut;
+  }
+  /** Foreground layer: a second scalar volume with its own RAS->texture mapping, W/L, opacity and
+   *  compositing mode (Slicer's slice composite node). Pass null to remove. */
+  setForeground(tex, p2t, win, lev, opacity, compositing = 0) {
+    this.fgTex = tex ?? void 0;
+    if (p2t) this.u.set(p2t, 36);
+    this.u[52] = win;
+    this.u[53] = lev;
+    this.u[54] = tex ? opacity : 0;
+    this.u[55] = compositing;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Colour LUTs over the W/L ramp for the background (row 0) and foreground (row 1): 256 rgba8 entries
+   *  each, or null for the grayscale ramp. */
+  setLayerLUTs(bg, fg) {
+    if (!bg && !fg) {
+      this.lutTex = void 0;
+      this.u[35] = 0;
+      this.u[58] = 0;
+      if (this.scalarTex) this.rebind();
+      return;
+    }
+    if (!this.lutTex) this.lutTex = this.dev.createTexture({
+      size: [
+        256,
+        2
+      ],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+    const gray = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i;
+      gray[i * 4 + 3] = 255;
+    }
+    this.dev.queue.writeTexture({
+      texture: this.lutTex,
+      origin: [
+        0,
+        0
+      ]
+    }, bg ?? gray, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
+    this.dev.queue.writeTexture({
+      texture: this.lutTex,
+      origin: [
+        0,
+        1
+      ]
+    }, fg ?? gray, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
+    this.u[35] = bg ? 1 : 0;
+    this.u[58] = fg ? 1 : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
+   *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
+  setLabelLayer(tex, p2t, table, opacity) {
+    this.labelVolTex = tex ?? void 0;
+    if (p2t) this.u.set(p2t, 60);
+    const n = table ? table.length / 4 : 0;
+    if (table && n > 0) {
+      if (!this.labelLutTex || this.labelLutTex.width !== n) {
+        this.labelLutTex?.destroy();
+        this.labelLutTex = this.dev.createTexture({
+          size: [
+            n,
+            1
+          ],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
+      }
+      this.dev.queue.writeTexture({
+        texture: this.labelLutTex
+      }, table, {
+        bytesPerRow: n * 4
+      }, [
+        n,
+        1
+      ]);
+    }
+    this.u[76] = tex && table ? opacity : 0;
+    this.u[77] = n;
+    if (this.scalarTex) this.rebind();
+  }
   emptyOverlay;
   transparentOverlay() {
     if (!this.emptyOverlay) {
@@ -480,6 +1928,56 @@ var SliceRenderer = class {
     }
     return this.emptyOverlay;
   }
+  /** Reslice this orientation along an arbitrary RAS basis instead of the anatomical preset.
+   *  Pass null to restore. The vectors should be unit length and mutually orthogonal; they are
+   *  used verbatim, so the caller owns the display convention for a non-anatomical frame. */
+  setBasis(orient, basis) {
+    this.basisOverride[orient] = basis;
+  }
+  /** offset01 (the setPlane scrub coordinate) for a RAS point, along the plane's current normal — the
+   *  inverse of what setPlane does internally, so a caller holding a position in mm (a slice node's
+   *  centre, a crosshair) can address the same slice for anatomical AND oblique bases. */
+  offset01Along(orient, ras) {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    return Math.max(0, Math.min(1, (dot3(ras, n) - lo) / Math.max(hi - lo, 1e-6)));
+  }
+  /** Slide a RAS point along the plane's current normal, only if needed, so that its scrub position
+   *  lies inside the volume — the mm-space form of setPlane's 0..1 clamp, for a caller stepping a
+   *  focus point through the slices of an anatomical OR oblique basis. In-plane coordinates are kept. */
+  clampAlongNormal(orient, ras) {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    const have = dot3(ras, n), want = Math.max(lo, Math.min(hi, have));
+    return [
+      ras[0] + n[0] * (want - have),
+      ras[1] + n[1] * (want - have),
+      ras[2] + n[2] * (want - have)
+    ];
+  }
+  basisOf(orient) {
+    return this.basisOverride[orient] ?? BASES[orient];
+  }
+  /** Extent of the volume's RAS bounding box projected onto a direction — the generalisation
+   *  of "rasHi[axis] - rasLo[axis]" to an oblique axis. Reduces to exactly that for the
+   *  anatomical bases, since projecting an axis-aligned box on its own axis is the axis span. */
+  extentAlong(d) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const c = [
+        i & 1 ? this.rasHi[0] : this.rasLo[0],
+        i & 2 ? this.rasHi[1] : this.rasLo[1],
+        i & 4 ? this.rasHi[2] : this.rasLo[2]
+      ];
+      const t = dot3(c, d);
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    return {
+      lo,
+      hi
+    };
+  }
   /** Volume geometry: patientToTexture (RAS->tex[0,1], encodes ijkToRAS) + the RAS
    *  bounding box (for plane extents/scrub range). Get both from the ImageField. */
   setVolume(p2t, rasLo, rasHi) {
@@ -493,6 +1991,20 @@ var SliceRenderer = class {
    *  same RAS->tex mapping addresses both. Omit overlay for a plain MPR. */
   setTextures(scalar, overlay) {
     this.overlay = overlay ?? this.transparentOverlay();
+    this.scalarTex = scalar;
+    this.rebind();
+  }
+  /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
+   *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
+   *  nulls to go back to the rgba overlay. */
+  setLabelOverlay(labels, palette, layers = 1) {
+    this.labels = labels ?? void 0;
+    this.palette = palette ?? void 0;
+    this.u[34] = labels && palette ? Math.max(1, layers) : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  rebind() {
+    if (!this.scalarTex) return;
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -508,15 +2020,39 @@ var SliceRenderer = class {
         },
         {
           binding: 2,
-          resource: scalar.createView()
+          resource: this.scalarTex.createView()
         },
         {
           binding: 3,
-          resource: this.overlay.createView()
+          resource: (this.overlay ?? this.transparentOverlay()).createView()
         },
         {
           binding: 4,
           resource: this.nnSampler
+        },
+        {
+          binding: 5,
+          resource: (this.labels ?? this.noLabels()).createView()
+        },
+        {
+          binding: 6,
+          resource: (this.palette ?? this.noPalette()).createView()
+        },
+        {
+          binding: 7,
+          resource: (this.fgTex ?? this.noScalar()).createView()
+        },
+        {
+          binding: 8,
+          resource: (this.lutTex ?? this.noLut()).createView()
+        },
+        {
+          binding: 9,
+          resource: (this.labelVolTex ?? this.noScalar()).createView()
+        },
+        {
+          binding: 10,
+          resource: (this.labelLutTex ?? this.noPalette()).createView()
         }
       ]
     });
@@ -543,16 +2079,21 @@ var SliceRenderer = class {
   setOverlayOutline(on) {
     this.u[31] = on ? 1 : 0;
   }
+  /** Overlay outline width, in SCREEN pixels (constant under zoom). Rides in uvec.w, which the
+   *  per-frame uniform update writes alongside the view vectors. */
+  setOutlineWidth(px) {
+    this.outlineWidth = Math.max(1, px);
+  }
+  outlineWidth = 2;
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
    *  extent along the limiting in-plane axis — NO extra margin. (Verified against
    *  Slicer: Red FOV=[891.78,256] at viewport 634x182 -> vertical FOV == the 256mm
    *  A-extent, horizontal follows viewport aspect.) */
   viewSpanMm() {
-    const b = BASES[this.orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    return Math.max(uExt, vExt);
+    const b = this.basisOf(this.orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    return Math.max(u.hi - u.lo, v.hi - v.lo);
   }
   /** The fitted in-plane extent (mm) used for a given orientation — the value directly
    *  comparable to a Slicer slice node's fitted fieldOfView. */
@@ -563,10 +2104,20 @@ var SliceRenderer = class {
     this.orient = prev;
     return s;
   }
-  /** Fitted (zoom=1) in-plane extent for an orientation. */
-  baseSpan(orient) {
-    const b = BASES[orient];
-    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
+  /** Letterbox fit at zoom=1 (Slicer's FitSliceToVolume): the in-plane FOV (uS0×vS0) that
+   *  exactly contains the slice's bounding box in a viewport of the given aspect — the whole
+   *  slice is visible and the LIMITING axis touches the window edge (so the largest fitting
+   *  axis fills the window, no needless margin). Replaces the old max(uExt,vExt) span, which
+   *  under-zoomed whenever the larger extent wasn't on the viewport's limiting axis. */
+  fitUV(orient, aspectWH) {
+    const b = this.basisOf(orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    const uExt = u.hi - u.lo, vExt = v.hi - v.lo;
+    const uS0 = Math.max(uExt, vExt * aspectWH);
+    return {
+      uS0,
+      vS0: uS0 / aspectWH
+    };
   }
   /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
    *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
@@ -574,16 +2125,21 @@ var SliceRenderer = class {
    *  pan/zoom. Returns the plane centre `c` (RAS, incl. scrub offset + pan) and the half-... no:
    *  uS/vS are the FULL in-plane extents mapped across the viewport width/height. */
   frameFor(orient, offset01, aspectWH) {
-    const b = BASES[orient];
+    const b = this.basisOf(orient);
     const vs = this.viewState[orient];
-    const span = this.baseSpan(orient) / vs.zoom;
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
     const c = [
       (this.rasLo[0] + this.rasHi[0]) / 2,
       (this.rasLo[1] + this.rasHi[1]) / 2,
       (this.rasLo[2] + this.rasHi[2]) / 2
     ];
-    c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const nx = this.extentAlong(b.nDir);
+    const want = nx.lo + Math.max(0, Math.min(1, offset01)) * (nx.hi - nx.lo);
+    const have = dot3(c, b.nDir);
+    c[0] += b.nDir[0] * (want - have);
+    c[1] += b.nDir[1] * (want - have);
+    c[2] += b.nDir[2] * (want - have);
     c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
     c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
     c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
@@ -600,21 +2156,19 @@ var SliceRenderer = class {
   }
   /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
   panByPixels(orient, dxPx, dyPx, w, h) {
-    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
-    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    const z = this.viewState[orient].zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
+    const uS = uS0 / z, vS = vS0 / z;
     this.viewState[orient].panU -= dxPx / w * uS;
     this.viewState[orient].panV += dyPx / h * vS;
   }
   /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
   zoomAbout(orient, factor, pu, pv, w, h) {
     const vs = this.viewState[orient];
-    const base = this.baseSpan(orient);
-    const spanOld = base / vs.zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
     const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
-    const spanNew = base / z;
-    const au = Math.max(1, w / h), av = Math.max(1, h / w);
-    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;
-    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.panU += (pu - 0.5) * (uS0 / vs.zoom - uS0 / z);
+    vs.panV += (0.5 - pv) * (vS0 / vs.zoom - vS0 / z);
     vs.zoom = z;
   }
   /** Reset pan/zoom for an orientation to the fitted view. */
@@ -624,6 +2178,25 @@ var SliceRenderer = class {
       panV: 0,
       zoom: 1
     };
+  }
+  /** Centre the in-plane view on `centerRAS` WITHOUT touching zoom — move the view, don't refit it.
+   *  setMirrorFrame sets both because it mirrors a slice node's centre AND field of view; an app
+   *  that is following a target from one place to another wants only the pan. */
+  recenter(orient, centerRAS) {
+    const b = this.basisOf(orient);
+    const volC = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
+    const d = [
+      centerRAS[0] - volC[0],
+      centerRAS[1] - volC[1],
+      centerRAS[2] - volC[2]
+    ];
+    const vs = this.viewState[orient];
+    vs.panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
+    vs.panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
   }
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState() {
@@ -644,10 +2217,10 @@ var SliceRenderer = class {
    *  zoom proportionally; pan is the centre's offset from the volume centre projected onto the
    *  plane's in-plane axes. The out-of-plane offset is applied separately via setPlane. */
   setMirrorFrame(orient, centerRAS, fovX, fovY) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const zoom = Math.max(uExt / Math.max(fovX, 1e-6), vExt / Math.max(fovY, 1e-6));
+    const b = this.basisOf(orient);
+    const aspect = fovX / Math.max(fovY, 1e-6);
+    const { uS0 } = this.fitUV(orient, aspect);
+    const zoom = Math.max(1e-3, uS0 / Math.max(fovX, 1e-6));
     const volC = [
       (this.rasLo[0] + this.rasHi[0]) / 2,
       (this.rasLo[1] + this.rasHi[1]) / 2,
@@ -663,14 +2236,38 @@ var SliceRenderer = class {
     this.viewState[orient] = {
       panU,
       panV,
-      zoom: Math.max(1e-3, zoom)
+      zoom
+    };
+  }
+  /** The current pan/zoom of a plane expressed the way Slicer's slice node stores it: in-plane centre
+   *  (RAS, without the out-of-plane offset which the caller owns) + field of view (mm) — the inverse
+   *  of setMirrorFrame, so a local pan/zoom can be written back to the app as a slice frame. */
+  mirrorFrame(orient, aspectWH) {
+    const b = this.basisOf(orient);
+    const st = this.viewState[orient];
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const fovX = uS0 / st.zoom, fovY = vS0 / st.zoom;
+    const volC = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
+    const centerRAS = [
+      volC[0] + b.uDir[0] * st.panU + b.vDir[0] * st.panV,
+      volC[1] + b.uDir[1] * st.panU + b.vDir[1] * st.panV,
+      volC[2] + b.uDir[2] * st.panU + b.vDir[2] * st.panV
+    ];
+    return {
+      centerRAS,
+      fovX,
+      fovY
     };
   }
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
   viewToTex(u, v) {
-    const b = BASES[this.orient];
+    const b = this.basisOf(this.orient);
     const uS = this.uSpanMm || this.viewSpanMm();
     const vS = this.vSpanMm || this.viewSpanMm();
     const c = this.cX;
@@ -697,7 +2294,7 @@ var SliceRenderer = class {
     return {
       u,
       v,
-      distMm: d[b.nAxis]
+      distMm: dot3(d, b.nDir)
     };
   }
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
@@ -725,7 +2322,7 @@ var SliceRenderer = class {
     this.u[20] = b.uDir[0] * uS;
     this.u[21] = b.uDir[1] * uS;
     this.u[22] = b.uDir[2] * uS;
-    this.u[23] = 0;
+    this.u[23] = this.outlineWidth;
     this.u[24] = b.vDir[0] * vS;
     this.u[25] = b.vDir[1] * vS;
     this.u[26] = b.vDir[2] * vS;
@@ -759,6 +2356,108 @@ var SliceRenderer = class {
   }
   renderToView(view, w, h) {
     this.drawInto(view, w, h);
+  }
+  /** Bilinear-blit pipeline (fullscreen triangle) that upsamples the low-res reslice to the view. */
+  ensureBlit() {
+    if (this.blitPipeline) return;
+    const m = this.dev.createShaderModule({
+      code: (
+        /* wgsl */
+        `
+struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var o: VO; o.pos = vec4<f32>(p[i], 0.0, 1.0);
+  o.uv = vec2<f32>((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5); return o;
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@fragment fn fs(in: VO) -> @location(0) vec4<f32> { return textureSample(src, samp, in.uv); }`
+      )
+    });
+    this.blitPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: {
+        module: m,
+        entryPoint: "vs"
+      },
+      fragment: {
+        module: m,
+        entryPoint: "fs",
+        targets: [
+          {
+            format: this.format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
+    });
+  }
+  ensureLow(w, h) {
+    this.ensureBlit();
+    if (this.lowTex && this.lowW === w && this.lowH === h) return;
+    this.lowTex?.destroy();
+    this.lowTex = this.dev.createTexture({
+      size: [
+        w,
+        h
+      ],
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
+    this.lowView = this.lowTex.createView();
+    this.lowW = w;
+    this.lowH = h;
+    this.blitBind = this.dev.createBindGroup({
+      layout: this.blitPipeline.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.lowView
+        },
+        {
+          binding: 1,
+          resource: this.sampler
+        }
+      ]
+    });
+  }
+  /** Adaptive (moving-frame) render: reslice at `rw×rh` into an off-screen target, then bilinear-blit
+   *  up to the `vw×vh` view. Single frame, no accumulation — use while interacting; call renderToView
+   *  (native) when the view settles. At rw==vw/rh==vh this is a native render plus a pass-through blit. */
+  renderUpscaled(view, rw, rh, vw, vh) {
+    if (rw >= vw && rh >= vh) {
+      this.drawInto(view, vw, vh);
+      return;
+    }
+    this.ensureLow(rw, rh);
+    this.drawInto(this.lowView, rw, rh);
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
+    pass.setPipeline(this.blitPipeline);
+    pass.setBindGroup(0, this.blitBind);
+    pass.draw(3);
+    pass.end();
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
   }
   async renderToRGBA(w, h) {
     const target = this.dev.createTexture({
@@ -935,6 +2634,7 @@ function attachSliceControls(canvas, cfg) {
   let view = null;
   let scroll = null;
   let grabbed = null;
+  let wlDrag = null;
   const onContext = (e) => e.preventDefault();
   const onWheel = (e) => {
     e.preventDefault();
@@ -955,6 +2655,12 @@ function attachSliceControls(canvas, cfg) {
       lastDown = dbl ? 0 : now;
       lastX = e.clientX;
       lastY = e.clientY;
+      if (dbl && (e.ctrlKey || e.metaKey) && cfg.wl?.enabled() && cfg.wl.reset) {
+        e.preventDefault();
+        cfg.wl.reset();
+        cfg.redraw();
+        return;
+      }
       if (dbl && h.onDoubleClick?.()) {
         e.preventDefault();
         return;
@@ -979,10 +2685,29 @@ function attachSliceControls(canvas, cfg) {
     if (e.button !== 0) return;
     e.preventDefault();
     const { u, v, w, h: hh } = uv(e);
+    const mode = cfg.leftMode?.() ?? (cfg.wl?.enabled() ? "wl" : "scroll");
     if (h.onLeftGrab?.(u, v, w, hh)) {
       grabbed = {
         moved: 0
       };
+    } else if (mode === "wl" && cfg.wl) {
+      const [win, lev] = cfg.wl.get();
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
+      canvas.style.cursor = "crosshair";
+    } else if (mode === "zoom" || mode === "pan") {
+      view = {
+        mode,
+        x: e.clientX,
+        y: e.clientY,
+        pu: u,
+        pv: v
+      };
+      canvas.style.cursor = mode === "zoom" ? "ns-resize" : "grabbing";
     } else scroll = {
       x: e.clientX,
       y: e.clientY,
@@ -995,7 +2720,7 @@ function attachSliceControls(canvas, cfg) {
       const dx = e.clientX - view.x, dy = e.clientY - view.y;
       const r = canvas.getBoundingClientRect();
       if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
-      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), view.pu, view.pv, r.width, r.height);
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), 0.5, 0.5, r.width, r.height);
       view.x = e.clientX;
       view.y = e.clientY;
       cfg.redraw();
@@ -1005,6 +2730,25 @@ function attachSliceControls(canvas, cfg) {
       grabbed.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
       const { u, v, w, h: hh } = uv(e);
       h.onLeftDrag?.(u, v, w, hh);
+      return;
+    }
+    if (wlDrag && cfg.wl) {
+      const [lo, hi] = cfg.wl.range();
+      const r = canvas.getBoundingClientRect();
+      const gain = (hi - lo) / Math.max(1, Math.min(r.width, r.height));
+      let win = wlDrag.win + gain * (e.clientX - wlDrag.x);
+      if (win < 0) win = 0;
+      let lev = wlDrag.lev + gain * (wlDrag.y - e.clientY);
+      if (lev < lo - win / 2) lev = lo - win / 2;
+      if (lev > hi + win / 2) lev = hi + win / 2;
+      cfg.wl.set(win, lev);
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
+      cfg.redraw();
       return;
     }
     if (scroll) {
@@ -1038,6 +2782,11 @@ function attachSliceControls(canvas, cfg) {
       const m = grabbed.moved;
       grabbed = null;
       h.onLeftDrop?.(m);
+      return;
+    }
+    if (wlDrag) {
+      wlDrag = null;
+      canvas.style.cursor = "default";
       return;
     }
     scroll = null;
@@ -1416,6 +3165,19 @@ function attachCameraControls(canvas, camera, opts = {}) {
   });
   const pointers = /* @__PURE__ */ new Map();
   let pinch = null;
+  let triple = null;
+  const centroid = () => {
+    let mx = 0, my = 0;
+    for (const p of pointers.values()) {
+      mx += p.x;
+      my += p.y;
+    }
+    const n = pointers.size || 1;
+    return {
+      mx: mx / n,
+      my: my / n
+    };
+  };
   const pinchState = () => {
     const [a, b] = [
       ...pointers.values()
@@ -1426,8 +3188,10 @@ function attachCameraControls(canvas, camera, opts = {}) {
       my: (a.y + b.y) / 2
     };
   };
+  const on = () => opts.enabled?.() ?? true;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
+    if (!on()) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, {
       x,
@@ -1452,12 +3216,29 @@ function attachCameraControls(canvas, camera, opts = {}) {
     } else if (pointers.size === 2) {
       interactor.end();
       pinch = pinchState();
+    } else if (pointers.size === 3) {
+      pinch = null;
+      const c = centroid();
+      triple = {
+        mx: c.mx,
+        my: c.my
+      };
+      opts.onVolumeDragStart?.();
     }
   });
   const endPointer = (e) => {
     if (!pointers.delete(e.pointerId)) return;
+    if (!on()) {
+      interactor.end();
+      pinch = null;
+      return;
+    }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (pointers.size < 3 && triple) {
+      triple = null;
+      opts.onVolumeDragEnd?.();
+    }
     if (pointers.size === 1) {
       const p = [
         ...pointers.values()
@@ -1474,13 +3255,19 @@ function attachCameraControls(canvas, camera, opts = {}) {
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
+    if (!on()) return;
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, {
       x,
       y
     });
-    if (pointers.size >= 2) {
+    if (pointers.size >= 3) {
+      const c = centroid();
+      if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
+      return;
+    }
+    if (pointers.size === 2) {
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);
@@ -1493,6 +3280,7 @@ function attachCameraControls(canvas, camera, opts = {}) {
     }
   });
   canvas.addEventListener("wheel", (e) => {
+    if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
     opts.onLog?.("cameraWheel", {
@@ -1588,6 +3376,7 @@ function rasToScreen3D(cam, ras, w, h) {
 
 // render/demos/sl-logo.ts
 var SL_LOGO = "data:image/png;base64,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";
+var SL_FAVICON = "data:image/png;base64,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";
 
 // render/demos/sl-chrome.ts
 var DEFAULT_HELP = [
@@ -1617,6 +3406,51 @@ var DEFAULT_HELP = [
       [
         "Shift + move",
         "Pick \u2192 jump slices to the point"
+      ]
+    ]
+  },
+  {
+    title: "Endovascular flight (fly-inside / endo demo)",
+    rows: [
+      [
+        "Up / Down",
+        "Move in / out along the view axis"
+      ],
+      [
+        "Left / Right",
+        "Yaw"
+      ],
+      [
+        "Shift + Left/Right",
+        "Pitch"
+      ],
+      [
+        "Ctrl + Left/Right",
+        "Roll"
+      ],
+      [
+        "Space",
+        "Toggle forward cruise"
+      ],
+      [
+        "Shift + Space",
+        "Toggle reverse cruise"
+      ],
+      [
+        "Escape",
+        "Stop"
+      ],
+      [
+        "Left-drag",
+        "Look around"
+      ],
+      [
+        "Shift + click",
+        "Autopilot target"
+      ],
+      [
+        "Speed slider",
+        "Travel speed in mm/s (live, applies mid-flight)"
       ]
     ]
   },
@@ -1655,14 +3489,27 @@ function glass(el2, extra = "") {
 }
 function installChrome(opts) {
   const controls = opts.controls ?? [];
-  const help = opts.help ?? DEFAULT_HELP;
-  const helpBtn = document.createElement("button");
-  helpBtn.textContent = "?";
-  helpBtn.title = "Controls & key bindings";
-  helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
-  glass(helpBtn);
-  helpBtn.onclick = openHelp;
-  document.body.appendChild(helpBtn);
+  const host = opts.container ?? document.body;
+  const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
+  try {
+    if (typeof document !== "undefined" && document.head && !document.querySelector('link[rel~="icon"]')) {
+      const link = document.createElement("link");
+      link.rel = "icon";
+      link.href = SL_FAVICON;
+      document.head.appendChild(link);
+    }
+  } catch {
+  }
+  let helpBtn = null;
+  if (opts.help !== false) {
+    helpBtn = document.createElement("button");
+    helpBtn.textContent = "?";
+    helpBtn.title = "Controls & key bindings";
+    helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
+    glass(helpBtn);
+    helpBtn.onclick = openHelp;
+    host.appendChild(helpBtn);
+  }
   let helpEl = null;
   function openHelp() {
     if (helpEl) return;
@@ -1681,7 +3528,7 @@ function installChrome(opts) {
     }
     panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
     helpEl.appendChild(panel);
-    document.body.appendChild(helpEl);
+    host.appendChild(helpEl);
     document.addEventListener("keydown", escClose, true);
   }
   function escClose(e) {
@@ -1695,6 +3542,7 @@ function installChrome(opts) {
     }
   }
   const logo = document.createElement("div");
+  logo.id = "sl-badge";
   logo.title = "SlicerLive \u2014 visualization";
   logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);transition:transform 120ms ease-out;";
   const mark = document.createElement("img");
@@ -1706,13 +3554,13 @@ function installChrome(opts) {
   word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;text-shadow:0 0 14px rgba(255,210,90,.4);";
   logo.appendChild(mark);
   logo.appendChild(word);
-  document.body.appendChild(logo);
+  host.appendChild(logo);
   const place = () => {
     const a = opts.anchor;
     const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
     if (r && r.width > 2 && r.height > 2) {
       logo.style.top = Math.round(r.top + 8) + "px";
-      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+      logo.style.right = Math.round(globalThis.innerWidth - r.right + 8) + "px";
     } else {
       logo.style.top = "10px";
       logo.style.right = "12px";
@@ -1721,11 +3569,13 @@ function installChrome(opts) {
   place();
   requestAnimationFrame(place);
   globalThis.addEventListener("resize", place);
-  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
+  const anchorRO = opts.anchor && "ResizeObserver" in globalThis ? new ResizeObserver(place) : null;
+  anchorRO?.observe(opts.anchor);
   const pop = document.createElement("div");
+  pop.id = "sl-popup";
   pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
-  document.body.appendChild(pop);
+  host.appendChild(pop);
   const paintSw = (sw, on) => {
     sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
     sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
@@ -1783,19 +3633,204 @@ function installChrome(opts) {
     box.addEventListener("pointercancel", end);
     return paint;
   };
+  const attachSteps = (box, max, get, set, fmt, color, disabled, onChange) => {
+    box.style.cursor = "ew-resize";
+    box.title = `Click to step up (wraps past ${max}) \xB7 Drag sideways to set`;
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    const paint = () => {
+      const v = Math.max(0, Math.min(max, Math.round(get())));
+      box.style.opacity = v === 0 ? "0.75" : "1";
+      box.innerHTML = `<span style="position:absolute;left:0;top:0;bottom:0;width:${v / max * 100}%;background:${c};opacity:.9"></span><span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${fmt(v)}</span>`;
+    };
+    paint();
+    const clamp = (v) => Math.max(0, Math.min(max, Math.round(v)));
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (disabled()) return;
+      startX = e.clientX;
+      startV = get();
+      dragged = false;
+      id = e.pointerId;
+      try {
+        box.setPointerCapture(id);
+      } catch {
+      }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) {
+        const v = clamp(startV + dx / (130 / max));
+        if (v !== get()) {
+          set(v);
+          onChange();
+        }
+        paint();
+      }
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) {
+        set((clamp(get()) + 1) % (max + 1));
+        paint();
+        onChange();
+      }
+      try {
+        box.releasePointerCapture(id);
+      } catch {
+      }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
+  const heading = (text, first) => {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:" + (first ? "0 0 8px" : "12px 0 6px") + ";" + (first ? "" : "border-top:1px solid rgba(255,255,255,.12);padding-top:10px;");
+    pop.appendChild(h);
+  };
+  const selects = opts.selects ?? [];
+  const selEls = [];
+  let sectionSeen = null;
+  let firstHead = true;
+  for (const c of selects) {
+    const sec = c.section ?? "Visualization";
+    if (sec !== sectionSeen) {
+      heading(sec, firstHead);
+      sectionSeen = sec;
+      firstHead = false;
+    }
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;";
+    const lab = document.createElement("span");
+    lab.textContent = c.label;
+    const sel = document.createElement("select");
+    sel.style.cssText = "flex:1 1 auto;max-width:60%;border-radius:7px;padding:4px 6px;cursor:pointer;font:500 12px -apple-system,system-ui,sans-serif;color:#e8eeff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+    for (const o of c.options) {
+      const op = document.createElement("option");
+      op.value = o.value;
+      op.textContent = o.label;
+      op.style.cssText = "background:#1b2030;color:#e8eeff;";
+      sel.appendChild(op);
+    }
+    sel.value = c.get();
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      c.set(sel.value);
+      opts.onChange?.();
+      refresh();
+    };
+    row.appendChild(lab);
+    row.appendChild(sel);
+    pop.appendChild(row);
+    selEls.push({
+      c,
+      el: sel
+    });
+  }
   const rows = [];
   if (controls.length) {
-    const head = document.createElement("div");
-    head.textContent = "Visualization";
-    head.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:0 0 8px;";
-    pop.appendChild(head);
     for (const c of controls) {
+      const sec = c.section ?? "Visualization";
+      if (sec !== sectionSeen) {
+        heading(sec, firstHead);
+        sectionSeen = sec;
+        firstHead = false;
+      }
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
+      if (c.slider) {
+        row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 0;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const lab2 = document.createElement("span");
+        lab2.textContent = c.label;
+        const val = document.createElement("span");
+        val.style.cssText = "font:600 11px ui-monospace,Menlo,monospace;color:#9fe9ff;font-variant-numeric:tabular-nums;";
+        top.appendChild(lab2);
+        top.appendChild(val);
+        const inp = document.createElement("input");
+        inp.type = "range";
+        const num = (v, dflt) => v === void 0 ? dflt : typeof v === "function" ? v() : v;
+        const setBounds = () => {
+          inp.min = String(num(c.slider.min, 0));
+          inp.max = String(num(c.slider.max, 1));
+          inp.step = String(num(c.slider.step, 1));
+        };
+        setBounds();
+        inp.value = String(c.slider.get());
+        inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
+        const fmt = c.slider.format ?? ((v) => String(Math.round(v)));
+        const paint = () => {
+          val.textContent = fmt(c.slider.get());
+        };
+        inp.oninput = () => {
+          c.slider.set(parseFloat(inp.value));
+          paint();
+          opts.onChange?.();
+        };
+        inp.onpointerdown = (e) => e.stopPropagation();
+        paint();
+        row.appendChild(top);
+        row.appendChild(inp);
+        pop.appendChild(row);
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            setBounds();
+            inp.value = String(c.slider.get());
+            paint();
+          }
+        });
+        continue;
+      }
       const lab = document.createElement("span");
       lab.textContent = c.label;
       row.appendChild(lab);
+      if (c.button) {
+        const pill = document.createElement("span");
+        pill.style.cssText = "max-width:60%;border-radius:7px;padding:4px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:600 12px -apple-system,system-ui,sans-serif;color:#eaf0ff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+        pill.textContent = c.button.text();
+        pill.onclick = (e) => {
+          e.stopPropagation();
+          c.button.run();
+        };
+        pill.onpointerdown = (e) => e.stopPropagation();
+        row.appendChild(pill);
+        pop.appendChild(row);
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            pill.textContent = c.button.text();
+          }
+        });
+        continue;
+      }
+      if (c.steps) {
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachSteps(box, c.steps.max, c.steps.get, (v) => c.steps.set(v), c.steps.format ?? ((v) => String(v)), c.color ?? [
+          0.62,
+          0.9,
+          1
+        ], () => c.disabled?.() ?? false, () => opts.onChange?.());
+        rows.push({
+          c,
+          row,
+          repaint: paint
+        });
+        pop.appendChild(row);
+        continue;
+      }
       if (c.getOpacity && c.setOpacity) {
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;
@@ -1833,7 +3868,7 @@ function installChrome(opts) {
       }
       pop.appendChild(row);
     }
-  } else if (opts.about === false && !opts.segments) {
+  } else if (opts.about === false && !opts.segments && !selects.length) {
     pop.textContent = "SlicerLive \u2014 WebGPU renderer";
   }
   const segHost = document.createElement("div");
@@ -1845,7 +3880,8 @@ function installChrome(opts) {
     segHost.innerHTML = "";
     if (!S) return;
     const list = S.list();
-    if (!list.length) return;
+    const noteText = S.note?.();
+    if (!list.length && !noteText) return;
     const wrap = document.createElement("div");
     wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" + (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
     for (const s of list) {
@@ -1870,10 +3906,17 @@ function installChrome(opts) {
       wrap.appendChild(row);
       segRows.push({
         num: s.num,
+        name: s.name,
         box,
         color: s.color,
         paint
       });
+    }
+    if (noteText) {
+      const n = document.createElement("div");
+      n.textContent = noteText;
+      n.style.cssText = "margin-top:6px;padding:5px 7px;border-radius:6px;background:rgba(255,196,84,.12);color:#ffc454;font:500 11.5px -apple-system,system-ui,sans-serif;line-height:1.35;";
+      wrap.appendChild(n);
     }
     segHost.appendChild(wrap);
     paintSegments();
@@ -1881,6 +3924,12 @@ function installChrome(opts) {
   function paintSegments() {
     const S = opts.segments;
     if (!S) return;
+    const list = S.list();
+    const changed = list.length !== segRows.length || list.some((s, i) => s.num !== segRows[i].num || s.name !== segRows[i].name);
+    if (changed) {
+      buildSegments();
+      return;
+    }
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
     for (const r of segRows) r.paint();
@@ -1904,6 +3953,10 @@ function installChrome(opts) {
     pop.appendChild(about);
   }
   function refresh() {
+    for (const { c, el: el2 } of selEls) {
+      const v = c.get();
+      if (el2.value !== v) el2.value = v;
+    }
     for (const { c, row, sw, repaint } of rows) {
       const dis = c.disabled?.() ?? false;
       row.style.opacity = dis ? "0.4" : "1";
@@ -1924,7 +3977,7 @@ function installChrome(opts) {
     refresh();
     const b = logo.getBoundingClientRect();
     pop.style.top = Math.round(b.bottom + 6) + "px";
-    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
+    pop.style.right = Math.round(globalThis.innerWidth - b.right) + "px";
     pop.style.opacity = "1";
     pop.style.pointerEvents = "auto";
     pop.style.transform = "translateY(0)";
@@ -1935,25 +3988,53 @@ function installChrome(opts) {
     pop.style.transform = "translateY(-6px)";
   };
   let pinned = false;
+  let startOpen = false;
   logo.onmouseenter = () => {
     logo.style.transform = "scale(1.08)";
     show();
   };
   logo.onclick = () => {
+    startOpen = false;
     pinned = !pinned;
     pinned ? show() : hide();
   };
   logo.onmouseleave = () => {
     logo.style.transform = "scale(1)";
-    if (!pinned) setTimeout(() => {
+    if (!pinned && !startOpen) setTimeout(() => {
       if (!pop.matches(":hover") && !pinned) hide();
     }, 120);
   };
   pop.onmouseleave = () => {
+    startOpen = false;
     if (!pinned) hide();
   };
+  const onDocDown = (e) => {
+    const t = e.target;
+    if (logo.contains(t) || pop.contains(t)) return;
+    if (startOpen) return;
+    pinned = false;
+    hide();
+  };
+  document.addEventListener("pointerdown", onDocDown, true);
+  if (opts.openOnLoad ?? true) {
+    startOpen = true;
+    requestAnimationFrame(() => {
+      if (startOpen) show();
+    });
+  }
+  const destroy = () => {
+    document.removeEventListener("pointerdown", onDocDown, true);
+    globalThis.removeEventListener("resize", place);
+    anchorRO?.disconnect();
+    document.removeEventListener("keydown", escClose, true);
+    helpBtn?.remove();
+    helpEl?.remove();
+    logo.remove();
+    pop.remove();
+  };
   return {
-    refresh
+    refresh,
+    destroy
   };
 }
 
@@ -1961,7 +4042,244 @@ function installChrome(opts) {
 var DEFAULT_FORMAT2 = "rgba8unorm-srgb";
 var SCENE_FLOATS = 16;
 var CLIP_FLOATS = 36;
+var MESH_WGSL = (
+  /* wgsl */
+  `
+struct MU { view_proj : mat4x4<f32>, eye : vec4<f32>, color : vec4<f32> };
+@group(0) @binding(0) var<uniform> mu : MU;
+struct VO { @builtin(position) pos : vec4<f32>, @location(0) wp : vec3<f32> };
+@vertex fn vs_mesh(@location(0) p : vec3<f32>) -> VO { var o : VO; o.pos = mu.view_proj * vec4<f32>(p, 1.0); o.wp = p; return o; }
+struct FO { @location(0) col : vec4<f32>, @location(1) depth : vec4<f32> };
+@fragment fn fs_mesh(i : VO) -> FO {
+  let n = normalize(cross(dpdx(i.wp), dpdy(i.wp)));       // flat face normal (no normals on the wire)
+  let l = normalize(mu.eye.xyz - i.wp);                   // headlight
+  let lam = 0.25 + 0.75 * abs(dot(n, l));
+  let a = mu.color.a;
+  var o : FO;
+  o.col = vec4<f32>(mu.color.rgb * lam * a, a);           // premultiplied
+  o.depth = vec4<f32>(distance(mu.eye.xyz, i.wp), 0.0, 0.0, 1.0);
+  return o;
+}`
+);
 var SceneRenderer = class _SceneRenderer {
+  // ── surface meshes (models): rasterised before each trace into colour+depth targets the march composites ──
+  meshPipeline;
+  gpuMeshes = [];
+  meshTargetsBySize = /* @__PURE__ */ new Map();
+  viewProj = new Float32Array(16);
+  eyePos = [
+    0,
+    0,
+    0
+  ];
+  /** Replace the surface meshes (world/RAS float32 xyz + uint32 triangles, colour, opacity). */
+  setMeshes(meshes) {
+    for (const m of this.gpuMeshes) {
+      m.vbuf.destroy();
+      m.ibuf.destroy();
+      m.ubuf.destroy();
+    }
+    this.gpuMeshes = meshes.filter((m) => m.indices.length >= 3).map((m) => {
+      const vbuf = this.dev.createBuffer({
+        size: Math.ceil(m.positions.byteLength / 4) * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+      });
+      this.dev.queue.writeBuffer(vbuf, 0, m.positions);
+      const ibuf = this.dev.createBuffer({
+        size: Math.ceil(m.indices.byteLength / 4) * 4,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+      });
+      this.dev.queue.writeBuffer(ibuf, 0, m.indices);
+      const ubuf = this.dev.createBuffer({
+        size: 24 * 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      return {
+        vbuf,
+        ibuf,
+        count: m.indices.length,
+        ubuf,
+        color: m.color,
+        opacity: m.opacity
+      };
+    });
+  }
+  hasMeshes() {
+    return this.gpuMeshes.length > 0;
+  }
+  ensureMeshPipeline() {
+    if (this.meshPipeline) return;
+    const mod = this.dev.createShaderModule({
+      code: MESH_WGSL
+    });
+    this.meshPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: {
+        module: mod,
+        entryPoint: "vs_mesh",
+        buffers: [
+          {
+            arrayStride: 12,
+            attributes: [
+              {
+                shaderLocation: 0,
+                offset: 0,
+                format: "float32x3"
+              }
+            ]
+          }
+        ]
+      },
+      fragment: {
+        module: mod,
+        entryPoint: "fs_mesh",
+        targets: [
+          {
+            format: "rgba16float"
+          },
+          {
+            format: "r32float"
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "less"
+      }
+    });
+  }
+  /** Colour/depth targets (+ the group-1 bind group of the trace pipeline) for a given trace size. */
+  meshTargets(w, h) {
+    const key = w + "x" + h;
+    let t = this.meshTargetsBySize.get(key);
+    if (!t) {
+      if (this.meshTargetsBySize.size > 4) {
+        for (const old of this.meshTargetsBySize.values()) {
+          old.col.destroy();
+          old.depth.destroy();
+          old.z.destroy();
+        }
+        this.meshTargetsBySize.clear();
+      }
+      t = {
+        w,
+        h,
+        col: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        }),
+        depth: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "r32float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        }),
+        z: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        })
+      };
+      this.meshTargetsBySize.set(key, t);
+    }
+    if (!t.bind) t.bind = this.dev.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 0,
+          resource: t.col.createView()
+        },
+        {
+          binding: 1,
+          resource: t.depth.createView()
+        }
+      ]
+    });
+    return t;
+  }
+  /** Rasterise the meshes for this frame's trace size; returns the bind group the trace pass needs. */
+  meshPass(enc, w, h) {
+    const t = this.meshTargets(w, h);
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: t.col.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        },
+        {
+          view: t.depth.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 1e30,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ],
+      depthStencilAttachment: {
+        view: t.z.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "store"
+      }
+    });
+    if (this.gpuMeshes.length) {
+      this.ensureMeshPipeline();
+      pass.setPipeline(this.meshPipeline);
+      for (const m of this.gpuMeshes) {
+        const u = new Float32Array(24);
+        u.set(this.viewProj, 0);
+        u[16] = this.eyePos[0];
+        u[17] = this.eyePos[1];
+        u[18] = this.eyePos[2];
+        u[19] = 1;
+        u[20] = m.color[0];
+        u[21] = m.color[1];
+        u[22] = m.color[2];
+        u[23] = m.opacity;
+        this.dev.queue.writeBuffer(m.ubuf, 0, u);
+        pass.setBindGroup(0, this.dev.createBindGroup({
+          layout: this.meshPipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: {
+                buffer: m.ubuf
+              }
+            }
+          ]
+        }));
+        pass.setVertexBuffer(0, m.vbuf);
+        pass.setIndexBuffer(m.ibuf, "uint32");
+        pass.drawIndexed(m.count);
+      }
+    }
+    pass.end();
+    return t.bind;
+  }
   dev;
   format;
   placed = [];
@@ -2370,6 +4688,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     ]));
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
+    const mb = this.meshPass(enc, renderW, renderH);
     const tp = enc.beginRenderPass({
       colorAttachments: [
         {
@@ -2387,6 +4706,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
     const sp = enc.beginRenderPass({
@@ -2414,6 +4734,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   }
   /** Encode trace (producer) + resolve (reconstructor) into `enc`, output to `outView`. */
   encodeFrame(enc, outView) {
+    const mb = this.meshPass(enc, this.traceW, this.traceH);
     const tp = enc.beginRenderPass({
       colorAttachments: [
         {
@@ -2431,6 +4752,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
     const rp = enc.beginRenderPass({
@@ -2500,6 +4822,11 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   resetAccumulation() {
     this.accumN = 0;
   }
+  /** ROLLING accumulation for scenes whose content keeps changing (an animation): each frame blends
+   *  in with weight 1/min(n, accumWindow) — an exponential window of ~accumWindow frames instead of
+   *  the running mean — so static content still converges toward jittered temporal AA while moving
+   *  content keeps a short trail rather than smearing. Infinity (default) = the running mean. */
+  accumWindow = Infinity;
   /** Frames accumulated since the last reset (0 before the first accumulated frame). */
   accumCount() {
     return this.accumN;
@@ -2530,15 +4857,19 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     } else {
       this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
     }
+    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([
+      n - 1
+    ]));
     this.flush();
     this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([
       this.mat[12],
       this.mat[13],
       this.mat[14],
-      1 / n
+      1 / Math.min(n, this.accumWindow)
     ]));
     const prev = this.accumPing, next = 1 - this.accumPing;
     const enc = this.dev.createCommandEncoder();
+    const mb = this.meshPass(enc, width, height);
     const tp = enc.beginRenderPass({
       colorAttachments: [
         {
@@ -2556,6 +4887,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
     const ap = enc.beginRenderPass({
@@ -2612,11 +4944,12 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     this.clipOff = uoff;
     this.pickOff = uoff + CLIP_FLOATS;
-    this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
+    this.mat = new Float32Array(uoff + CLIP_FLOATS + 12);
     this.matBuf = this.dev.createBuffer({
-      size: (uoff + CLIP_FLOATS + 4) * 4,
+      size: (uoff + CLIP_FLOATS + 12) * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
+    for (const t of this.meshTargetsBySize.values()) t.bind = void 0;
     const module = this.dev.createShaderModule({
       code: this.wgsl()
     });
@@ -2732,21 +5065,25 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     const ghostFields = receivers.filter((p) => p.field.ghost);
     const normalReceivers = receivers.filter((p) => !p.field.ghost);
     const clipGuard = (p, expr) => p.field.clippable === false ? expr : `if (!clipped) { ${expr} }`;
-    const sampleInto = (nm, ghost) => ghost ? `let c = sample_field_${nm}(wp, rd); if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }` : `let c = sample_field_${nm}(wp, rd); sum += c;`;
+    const args = (p) => p.field.intervalSampling ? `wp, rd, s_here - last_${p.field.kind}${p.slot}` : "wp, rd";
+    const advance = (p) => p.field.intervalSampling ? ` last_${p.field.kind}${p.slot} = s_here;` : "";
+    const sampleInto = (p, ghost) => {
+      const call = `sample_field_${p.field.kind}${p.slot}(${args(p)})`;
+      return ghost ? `let c = ${call}; if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }` : `let c = ${call}; sum += c;`;
+    };
     const skipBranch = (p, clip, ghost = false) => {
       const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
+      const smp = sampleInto(p, ghost);
       return `    if (t >= resume_${nm}) {
       let d_${nm} = max(skip_${nm}(wp) - step, 0.0);
       if (d_${nm} > 0.0) { resume_${nm} = t + d_${nm}; }
-      else { ${clip ? clipGuard(p, smp) : smp} }
+      else { ${clip ? clipGuard(p, smp) : smp}${advance(p)} }
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     };
     const plainBranch = (p, clip, ghost = false) => {
-      const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
-      return `    { ${clip ? clipGuard(p, smp) : smp} all_defer = false; }`;
+      const smp = sampleInto(p, ghost);
+      return `    { ${clip ? clipGuard(p, smp) : smp}${advance(p)} all_defer = false; }`;
     };
     const normalSkippers = normalReceivers.filter((p) => !p.field.transform).filter((p) => _SceneRenderer.boxSkip || p.field.providesSkip && p.field.skipWGSL);
     const ghostSkippers = ghostFields.filter((p) => p.field.providesSkip && p.field.skipWGSL);
@@ -2766,10 +5103,11 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
       ...normalSkippers,
       ...ghostSkippers
     ].map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
+    const intervalInit = receivers.filter((p) => p.field.intervalSampling).map((p) => `  var last_${p.field.kind}${p.slot} : f32 = max(t_near - step, 0.0);`).join("\n");
     const dispatch = normalReceivers.map((p) => canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)).join("\n");
     const ghostDispatch = ghostFields.map((p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)).join("\n");
     const hasGhost = ghostFields.length > 0;
-    const pickDispatch = normalReceivers.map((p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`)}`).join("\n");
+    const pickDispatch = normalReceivers.map((p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd${p.field.intervalSampling ? ", step" : ""}); sum += c; }`)}`).join("\n");
     return (
       /* wgsl */
       `
@@ -2783,9 +5121,16 @@ ${members}
   clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
   clip_count : vec4<f32>,              // (count, _, _, _)
   pick_cursor : vec4<f32>,             // (ndc_x, ndc_y, _, _) \u2014 the ray for fs_pick
+  probe_origin : vec4<f32>,            // explicit-ray probe: world origin
+  probe_dir : vec4<f32>,               // (dx, dy, dz, enabled) \u2014 w>0 uses this ray instead of the cursor
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
+// Rasterised surface meshes (models): nearest-surface colour (premultiplied) + its distance along the
+// ray, produced by the mesh pass before each trace. The march composites the surface at that depth,
+// so volumes in front occlude it and it occludes what is behind \u2014 the depth-composite seam.
+@group(1) @binding(0) var t_mesh_col : texture_2d<f32>;
+@group(1) @binding(1) var t_mesh_depth : texture_2d<f32>;
 ${this.usesSampler() ? "@group(0) @binding(2) var s_lin : sampler;" : ""}
 ${decls}
 
@@ -2819,18 +5164,23 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   let ro = ndc_to_world(vec4<f32>(ndc_x, ndc_y, 0.0, 1.0));
   let rd = normalize(ndc_to_world(vec4<f32>(ndc_x, ndc_y, 1.0, 1.0)) - ro);
 
+  let mpix = vec2<i32>(v.position.xy);
+  let mesh_c = textureLoad(t_mesh_col, mpix, 0);          // premultiplied surface colour (0 = no mesh)
+  let mesh_t = textureLoad(t_mesh_depth, mpix, 0).r;      // distance along the ray (1e30 = none)
+  var mesh_done = mesh_c.a <= 0.0;
+
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
   let tmn = min(tt, tb); let tmx = max(tt, tb);
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
-  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
+  if (t_far <= t_near || t_far <= 0.0) { return mesh_c; }
 
   let step = max(u_material.scene.x, 1e-3);
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
-  if (t_far <= t_near) { return vec4<f32>(0.0); }
+  if (t_far <= t_near) { return mesh_c; }
   let seed = ign(v.position.xy);
   var t = t_near;
   var integrated = vec4<f32>(0.0);
@@ -2841,10 +5191,32 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   var g_op = 0.0;          // ghost (handle) surface: max opacity along the ray (0.5 inactive /
   var g_col = vec3<f32>(0.0);  // 1.0 active) and its colour \u2014 tracked, never accumulated.
 ${skipInit}
+${intervalInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter \u2014 frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
-    let wp = ro + rd * (t + js * step);
+    // Per-(pixel, step, ACCUM FRAME) ray-offset jitter. The frame term (u_cam.size.w, the
+    // accumulation index) is what makes temporal AA actually converge: with a frame-invariant
+    // offset the jitter turns banding into FIXED-PATTERN noise that averaging can never remove
+    // (measured: 32 samples was as grainy as 1). Varying it per frame decorrelates the samples
+    // so the mean approaches the true integral \u2014 no banding AND no noise. size.w is 0 for every
+    // non-accumulating path, so frame 1 stays byte-identical to a plain renderToView.
+    // Base offset: decorrelated per (pixel, step) so a single frame shows noise, not banding.
+    let jbase = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Advance it across accumulation frames by the golden-ratio additive recurrence
+    // (Cranley-Patterson rotation). MEASURED: this converges at the same 1/sqrt(n) rate as an
+    // independent random offset per frame (high-freq energy 1.36 vs 1.31 at n=64) \u2014 the low-
+    // discrepancy walk is NOT faster here, because the variance is dominated by the step size
+    // against a sharp transfer function, not by the sequence. Kept because it is deterministic
+    // and costs nothing; reduce sampleStep if you need less residual speckle.
+    // At size.w = 0 this is exactly jbase, so the first accumulated frame stays byte-identical
+    // to a plain renderToView \u2014 the property render/test baselines depend on.
+    let js = fract(jbase + u_cam.size.w * 0.6180339887) - 0.5;
+    if (!mesh_done && t + 0.5 * step >= mesh_t) {         // the ray reaches the surface: composite it here
+      integrated = integrated + (1.0 - integrated.a) * mesh_c;
+      mesh_done = true;
+    }
+    let s_here = t + js * step;   // ray distance of this (jittered) sample
+    let wp = ro + rd * s_here;
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
@@ -2865,6 +5237,7 @@ ${ghostDispatch}
     if (all_defer && jump_t > t + step) { t = jump_t; } else { t = t + step; }
     safety = safety + 1;
   }
+  if (!mesh_done) { integrated = integrated + (1.0 - integrated.a) * mesh_c; }   // surface beyond the slab
   // GHOST x-ray, applied ONCE (never compounding): the volume IN FRONT of a handle is shown
   // at residual = 1 - handle_opacity (50% for an inactive handle at opacity 0.5, 0% for an
   // active/hovered handle at opacity 1.0), then the handle (colour g_col at opacity g_op)
@@ -2883,8 +5256,16 @@ ${ghostDispatch}
 // Output: (wp.x, wp.y, wp.z, hit). hit=0 means the ray never reached 50% (empty/miss).
 @fragment
 fn fs_pick() -> @location(0) vec4<f32> {
-  let ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
-  let rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  // Two ray sources: the screen cursor (pick) or an explicit world ray (probe). The explicit
+  // form exists because the cursor ray can only ever probe what is ON SCREEN \u2014 useless for
+  // "how much room is BEHIND me?", which endovascular navigation needs for reverse and for
+  // lateral clearance.
+  var ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
+  var rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  if (u_material.probe_dir.w > 0.5) {
+    ro = u_material.probe_origin.xyz;
+    rd = normalize(u_material.probe_dir.xyz);
+  }
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
@@ -3056,7 +5437,7 @@ ${pickDispatch}
    *  anyway fails validation and the whole view silently renders nothing. Emit the sampler
    *  declaration and its bind entry under the SAME condition so the two can't drift. */
   usesSampler() {
-    return this.placed.some((p) => p.field.bindingCount > 0);
+    return this.placed.some((p) => p.field.usesSampler ?? p.field.bindingCount > 0);
   }
   bindGroupEntries() {
     const entries = [
@@ -3085,12 +5466,38 @@ ${pickDispatch}
     const proj = perspectiveZO(fovyDeg * Math.PI / 180, width / height, 1, 1e5);
     const invVP = invert(multiply(proj, view));
     this.baseInvVP = invVP;
+    this.viewProj = multiply(proj, view);
+    this.eyePos = eye;
     const cam = new Float32Array(24);
     cam.set(invVP, 0);
     this.focalPx = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
     cam[16] = width;
     cam[17] = height;
     cam[18] = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[19] = 0;
+    cam[20] = eye[0];
+    cam[21] = eye[1];
+    cam[22] = eye[2];
+    this.dev.queue.writeBuffer(this.camBuf, 0, cam);
+  }
+  /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a
+   *  rect.w×rect.h target. Screen-space glyph sizing stays keyed to the FULL view height, so a
+   *  patch of the gizmo is drawn at exactly the size the full frame drew it. Pair with
+   *  traceSamples(rect.w, rect.h) — its focal rewrite is then a no-op. */
+  setCameraTile(eye, center, up, fovyDeg, viewW, viewH, rect) {
+    const view = lookAt(eye, center, up);
+    const proj = perspectiveZOTile(fovyDeg * Math.PI / 180, viewW, viewH, rect.x, rect.y, rect.w, rect.h, 1, 1e5);
+    const invVP = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
+    this.viewProj = multiply(proj, view);
+    this.eyePos = eye;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    this.focalPx = viewH / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[16] = rect.w;
+    cam[17] = rect.h;
+    cam[18] = this.focalPx;
+    cam[19] = 0;
     cam[20] = eye[0];
     cam[21] = eye[1];
     cam[22] = eye[2];
@@ -3105,9 +5512,50 @@ ${pickDispatch}
    *  Uses the camera set by the last setCamera(); returns null if the ray never reaches 50%. */
   async pick(u, v) {
     if (!this.pickPipeline || !this.pickBind || !this.placed.length) return null;
-    this.mat[this.pickOff] = u * 2 - 1;
-    this.mat[this.pickOff + 1] = 1 - v * 2;
-    this.flush();
+    return this.serialise(async () => {
+      this.mat[this.pickOff] = u * 2 - 1;
+      this.mat[this.pickOff + 1] = 1 - v * 2;
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      return await this.tracePick();
+    });
+  }
+  /** Trace an EXPLICIT world ray and return the distance (mm) to the first point where
+   *  front-to-back opacity reaches 50%, or Infinity if it never does. Unlike pick(), the ray
+   *  is independent of the camera, so it can look backwards and sideways — which is what makes
+   *  collision "rails" possible in a first-person flythrough. */
+  async probe(origin, dir) {
+    if (!this.pickPipeline || !this.pickBind || !this.placed.length) return Infinity;
+    const l = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    return this.serialise(async () => {
+      this.mat[this.pickOff + 4] = origin[0];
+      this.mat[this.pickOff + 5] = origin[1];
+      this.mat[this.pickOff + 6] = origin[2];
+      this.mat[this.pickOff + 8] = dir[0] / l;
+      this.mat[this.pickOff + 9] = dir[1] / l;
+      this.mat[this.pickOff + 10] = dir[2] / l;
+      this.mat[this.pickOff + 11] = 1;
+      this.flush();
+      const hit = await this.tracePick();
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      if (!hit) return Infinity;
+      return Math.hypot(hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]);
+    });
+  }
+  /** Serialises pick/probe. They share ONE uniform buffer and ONE readback buffer, so
+   *  concurrent calls would overwrite each other's ray and double-map the buffer — a
+   *  Promise.all of probes silently returns garbage. Callers may fire as many as they like;
+   *  they queue here. */
+  pickChain = Promise.resolve();
+  serialise(fn) {
+    const next = this.pickChain.then(fn, fn);
+    this.pickChain = next.catch(() => {
+    });
+    return next;
+  }
+  /** The shared 1x1 render + readback behind pick() and probe(). */
+  async tracePick() {
     if (!this.pickTarget) {
       this.pickTarget = this.dev.createTexture({
         size: [
@@ -3205,6 +5653,7 @@ ${pickDispatch}
     const samples = [];
     for (let i = 0; i < iters; i++) {
       const enc = this.dev.createCommandEncoder();
+      const mb = this.meshPass(enc, width, height);
       const pass = enc.beginRenderPass({
         colorAttachments: [
           {
@@ -3227,6 +5676,7 @@ ${pickDispatch}
       });
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, this.bind);
+      pass.setBindGroup(1, mb);
       pass.draw(3);
       pass.end();
       enc.resolveQuerySet(qs, 0, 2, resolve, 0);
@@ -3293,8 +5743,15 @@ ${pickDispatch}
    *  background) as tightly-packed rgba8 — the bytes streamed to the remote client, which runs the
    *  same reconstruction (upsample + background composite) the local resolve does. The caller sets
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
-  async traceSamples(width, height) {
+  async traceSamples(width, height, viewH = height) {
     this.flush();
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([
+      width,
+      height
+    ]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([
+      this.focalPx * (viewH / height)
+    ]));
     const target = this.dev.createTexture({
       size: [
         width,
@@ -3304,6 +5761,21 @@ ${pickDispatch}
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
     });
     const enc = this.dev.createCommandEncoder();
+    this.meshPass(enc, width, height);
+    const smt = this.meshTargets(width, height);
+    const streamMb = this.dev.createBindGroup({
+      layout: this.streamPipeline.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 0,
+          resource: smt.col.createView()
+        },
+        {
+          binding: 1,
+          resource: smt.depth.createView()
+        }
+      ]
+    });
     const tp = enc.beginRenderPass({
       colorAttachments: [
         {
@@ -3321,6 +5793,7 @@ ${pickDispatch}
     });
     tp.setPipeline(this.streamPipeline);
     tp.setBindGroup(0, this.streamBind);
+    tp.setBindGroup(1, streamMb);
     tp.draw(3);
     tp.end();
     const bpr = Math.ceil(width * 4 / 256) * 256;
@@ -3391,24 +5864,59 @@ var ImageField = class {
   unit;
   stepMm;
   box;
+  normScale = 1;
+  dims;
   constructor(dev, data, dims, spacing, lut, opts) {
+    this.dims = dims;
     const center = opts.center ?? [
       0,
       0,
       0
     ];
+    let src = data, fmt = "r32float", bpe = 4;
+    this.normScale = 1;
+    if (data instanceof Uint8Array) {
+      fmt = "r8unorm";
+      bpe = 1;
+      this.normScale = 255;
+    } else if (data instanceof Uint16Array) {
+      src = Float32Array.from(data);
+      fmt = "r32float";
+      bpe = 4;
+    }
     this.volTex = dev.createTexture({
       size: dims,
       dimension: "3d",
-      format: "r32float",
+      format: fmt,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
-    dev.queue.writeTexture({
-      texture: this.volTex
-    }, data, {
-      bytesPerRow: dims[0] * 4,
-      rowsPerImage: dims[1]
-    }, dims);
+    {
+      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const CHUNK = 256 * 1024 * 1024;
+      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+      for (let z = 0; z < dims[2]; z += slab) {
+        const depth = Math.min(slab, dims[2] - z);
+        const slabBytes = depth * sliceBytes;
+        const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);
+        dev.queue.writeTexture({
+          texture: this.volTex,
+          origin: {
+            x: 0,
+            y: 0,
+            z
+          }
+        }, slabData, {
+          offset: 0,
+          bytesPerRow,
+          rowsPerImage
+        }, [
+          dims[0],
+          dims[1],
+          depth
+        ]);
+      }
+    }
     this.lutTex = dev.createTexture({
       size: [
         256,
@@ -3456,6 +5964,30 @@ var ImageField = class {
       1
     ]);
   }
+  /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
+   *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
+  setClim(lo, hi) {
+    this.clim = [
+      lo,
+      hi
+    ];
+  }
+  getClim() {
+    return [
+      this.clim[0],
+      this.clim[1]
+    ];
+  }
+  /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
+   *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
+  setShade(shade) {
+    this.shade = [
+      shade[0],
+      shade[1],
+      shade[2],
+      shade[3]
+    ];
+  }
   origP2t;
   origBox;
   uniformFloats() {
@@ -3470,6 +6002,42 @@ var ImageField = class {
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture() {
     return this.volTex;
+  }
+  /** Overwrite `depth` z-slices of the volume starting at `z`, in place. The bind group holds a
+   *  stable view of volTex, so a render after this picks the new voxels up with no rebuild —
+   *  which is what lets a volume be allocated first and filled as its slices arrive. `data` is
+   *  one slab in the texture's own dtype (f32 unless the volume was created from a Uint8Array). */
+  updateSlab(z, data, depth = 1) {
+    const [nx, ny, nz] = this.dims;
+    if (z < 0 || z + depth > nz) return;
+    const bpe = data instanceof Uint8Array ? 1 : 4;
+    this.dev.queue.writeTexture({
+      texture: this.volTex,
+      origin: {
+        x: 0,
+        y: 0,
+        z
+      }
+    }, data, {
+      offset: 0,
+      bytesPerRow: nx * bpe,
+      rowsPerImage: ny
+    }, [
+      nx,
+      ny,
+      depth
+    ]);
+  }
+  /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
+   *  texture must use the same factor. 1 for f32 volumes. */
+  normScaleOf() {
+    return this.normScale;
+  }
+  /** Free this field's GPU textures (call when replacing it, e.g. a low-res proxy upgraded to full,
+   *  or an LRU-evicted specimen) so VRAM isn't leaked across a menu of large volumes. */
+  destroy() {
+    this.volTex.destroy();
+    this.lutTex.destroy();
   }
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter() {
@@ -3494,6 +6062,12 @@ var ImageField = class {
   /** RAS(patient) -> texture[0,1] matrix (encodes the real ijkToRAS geometry). */
   patientToTexture() {
     return this.p2t;
+  }
+  /** Re-place the volume in RAS without re-uploading voxels (a parent transform moved it). */
+  setIjkToRAS(ijkToRAS) {
+    this.p2t = patientToTextureFromIjkToRAS(ijkToRAS, this.dims);
+    this.box = volumeAABBFromIjkToRAS(ijkToRAS, this.dims);
+    this.stepMm = Math.min(...spacingFromIjkToRAS(ijkToRAS));
   }
   structMembers(s) {
     return [
@@ -3555,8 +6129,8 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   fillUniforms(out, off) {
     out.set(this.p2t, off);
-    out[off + 16] = this.clim[0];
-    out[off + 17] = this.clim[1];
+    out[off + 16] = this.clim[0] / this.normScale;
+    out[off + 17] = this.clim[1] / this.normScale;
     out[off + 20] = this.shade[0];
     out[off + 21] = this.shade[1];
     out[off + 22] = this.shade[2];
@@ -3592,6 +6166,15 @@ var SegmentField = class {
   mode;
   colorFromTex;
   interfaceMode;
+  voxelMm = 1;
+  providesSkip;
+  /** The band-limited SOLID path: sdf mode, outer boundary, with the attr texture that carries the
+   *  band-limited label field. This is the only variant that uses the interval crossing test. */
+  outerSolid;
+  /** Interval sampling (Field): the shader is handed the ray distance back to THIS field's previous
+   *  sample, so consecutive intervals tile the ray exactly — what makes the crossing test immune to
+   *  the per-step ray jitter and to an empty-space leap. */
+  intervalSampling;
   constructor(tex, dims, spacing, opts) {
     this.tex = tex;
     const center = opts.center ?? [
@@ -3620,19 +6203,37 @@ var SegmentField = class {
     this.bandMm = opts.bandMm ?? voxelMm;
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
+    this.voxelMm = voxelMm;
     this.mode = opts.mode ?? "iso";
+    this.providesSkip = this.mode === "sdf";
     this.colorFromTex = opts.colorFromTexture ?? false;
     this.interfaceMode = this.mode === "sdf" && (opts.interfaceMode ?? false);
     this.attrTex = this.mode === "sdf" ? opts.attrTexture : void 0;
     this.bindingCount = this.attrTex ? 2 : 1;
+    this.outerSolid = this.mode === "sdf" && !this.interfaceMode && !!this.attrTex;
+    this.intervalSampling = this.outerSolid;
   }
   /** Field-level opacity (multiplies every segment's per-label opacity in the shader). Live global
    *  segmentation opacity — the caller does scene.syncUniforms() + redraw to apply. */
   setOpacity(o) {
     this.opacity = Math.max(0, Math.min(1, o));
   }
+  /** Render the sdf field as VOXEL CUBES instead of its smooth iso-surface (sdf mode only).
+   *  What "no smoothing" should mean for a labelmap: one cube per voxel, flat-shaded per face. */
+  setVoxelMode(on) {
+    this.voxelMode = on;
+  }
+  voxelMode = false;
+  /** Reconstruction width σ (VOXELS) of the band-limited label field the sdf surface is the 0.5
+   *  level set of. The field itself is baked by JfaSdfBaker (attr.b); the renderer only needs σ to
+   *  keep the sphere-trace skip from leaping over a surface that has moved off the sharp one.
+   *  Caller does scene.syncUniforms(). */
+  setSmoothingVox(sigmaVoxels) {
+    this.sigmaVox = Math.max(0, sigmaVoxels);
+  }
+  sigmaVox = 0;
   uniformFloats() {
-    return 28;
+    return 36;
   }
   aabb() {
     return this.box;
@@ -3644,12 +6245,56 @@ var SegmentField = class {
     if (destroyPrev && this.tex !== tex) this.tex.destroy();
     this.tex = tex;
   }
+  /** Empty-space skip for "sdf" mode: the texture .a is a TRUE distance-to-surface (mm), so the ray can
+   *  leap |sdf| minus the shell band toward the surface — sphere tracing. A one-voxel safety margin
+   *  absorbs the JFA distance approximation so the leap never overshoots a thin shell (image unchanged,
+   *  just far fewer march steps). Self-contained (no dependency on the sampling fns' emission order). */
+  skipWGSL(s) {
+    return (
+      /* wgsl */
+      `
+fn skip_seg${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) {
+    // OUTSIDE the SDF grid: leap only to the seg's AABB (a contract-valid lower bound), never past it.
+    let cen = (u_material.seg${s}_bmin.xyz + u_material.seg${s}_bmax.xyz) * 0.5;
+    let ext = (u_material.seg${s}_bmax.xyz - u_material.seg${s}_bmin.xyz) * 0.5;
+    let q = abs(transform_point_seg${s}(wp) - cen) - ext;
+    return max(0.0, length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+  }
+  let sd = textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;                      // SIGNED distance to the labelmap surface (mm)
+  // An UNSEEDED voxel \u2014 one the jump flood never reached a seed from \u2014 reports 1e3 mm. That is not a
+  // distance, it is "unknown", and leaping on it sails through whatever surface is really there,
+  // which is how a partial re-flood used to come back as a flat cut across the shell. No real SDF
+  // grid here spans 500 mm, so treat anything beyond that as unknown and march instead of leaping.
+  if (abs(sd) > 500.0) { return 0.0; }
+  // params.w = \u03C3 in mm. The rendered surface is the band-limited field's 0.5 level set, which sits
+  // within ~\u03C3 of this sharp one, so the leap has to stop that much short of it or a \u03C3-wide feature
+  // can be jumped clean over.
+  var leap = max(0.0, abs(sd) - u_material.seg${s}_params.x - u_material.seg${s}_params.y - u_material.seg${s}_params.w);
+${this.clippable && this.outerSolid ? `  // INSIDE the solid, a clip plane is a surface too (the cut face). Leaping on |sd| alone would sail
+  // past it \u2014 the ray enters through the clip, sees a big interior distance, and jumps to the far
+  // wall, so the cap never gets sampled. Clamp the leap to the nearest plane while inside.
+  if (sd < 0.0) {
+    let ccount = u32(u_material.clip_count.x);
+    for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+      let cp = u_material.clip_planes[ci];
+      leap = min(leap, abs(dot(wp, cp.xyz) + cp.w));
+    }
+  }` : ``}
+  return leap;
+}`
+    );
+  }
   structMembers(s) {
     return [
       `  seg${s}_p2t : mat4x4<f32>,`,
       `  seg${s}_color : vec4<f32>,`,
       `  seg${s}_shade : vec4<f32>,`,
-      `  seg${s}_params : vec4<f32>,`
+      `  seg${s}_params : vec4<f32>,`,
+      `  seg${s}_bmin : vec4<f32>,`,
+      `  seg${s}_bmax : vec4<f32>,`
     ].join("\n");
   }
   declareBindings(s, base) {
@@ -3692,8 +6337,8 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
-}` : ""}${this.interfaceMode ? `
-fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTH (seam-blurred) interface distance from attr.b \u2014 for the normal only
+}` : ""}${this.interfaceMode && this.attrTex ? `
+fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED interface distance from attr.b (interface mode)
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
@@ -3703,7 +6348,16 @@ fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a)
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).a;
-}
+}` : ""}${this.outerSolid ? `
+fn pfield_seg${s}(wp : vec3<f32>) -> f32 {
+  // THE BAND-LIMITED LABEL FIELD: p = G_\u03C3 * 1(label != 0), carried in attr.b (JfaSdfBaker finalize
+  // writes the 0/1 indicator there, the attr blur low-passes it at the smoothing \u03C3). Clamped to the
+  // texture edge so a gradient tap just outside the padded grid reads real background instead of a
+  // cull sentinel. The surface is the p = 0.5 level set of this, and nothing else.
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
+}` : ""}${this.interfaceMode ? `
 fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   // One-sided difference of the SMOOTH interface distance along dir, picking the STEEPER side. The
   // unsigned distance has a V-crease at the surface: a central difference straddling it cancels (fake
@@ -3715,9 +6369,202 @@ fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   let dm = c - bdist_seg${s}(wp - dir * h);
   return select(dm, dp, abs(dp) > abs(dm)) / h;
 }` : ""}
-// Shell (surface) contribution at wp: crisp Phong shell around sdf=0. Weighted by (1-mode) so it
-// morphs smoothly into the volume contribution across a blurred surface\u2194volume boundary.
-fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+// VOXEL CUBES (params.z): the labelmap AS SEGMENTED, one cube per voxel, flat-shaded per face.
+//
+// This exists because reading the distance field with LINEAR sampling cannot produce it. The zero
+// level set of a Euclidean distance field is a smooth surface, and its gradient \u2014 the shading
+// normal \u2014 has RIDGES along the medial lines where the distances from neighbouring source voxels
+// meet. Turning the blur off therefore does not reveal voxels; it reveals those ridges, which is
+// what "no smoothing" used to look like.
+//
+// So this path never interpolates: it reads the same texture with textureLoad at the voxel the
+// sample falls in. That voxel is solid iff ITS OWN CENTRE is inside (.a < 0), the surface is the
+// cube faces of the solid voxels, and the normal is the face normal \u2014 constant across each face,
+// which is what makes a face read as a face. A face whose neighbour is also solid is interior and
+// draws nothing, so the result is the outside of the voxel set, not a lattice.
+//
+// It is still the same ray-march through the same field: no geometry is built, and the opacity
+// uses the same shell profile as the smooth path, measured to the cube face instead of to the
+// iso-surface, so the opacity controls behave identically at every smoothing setting.
+fn solid_seg${s}(ix : vec3<i32>) -> bool {
+  // "Is this voxel part of the segmentation?" \u2014 which channel answers that depends on the field.
+  // The signed (outer) field says it with the sign of the distance; the multi-material INTERFACE
+  // field's distance is UNSIGNED (it measures to the nearest label change, not to the outside),
+  // so there it is the crisp per-voxel presence in the attr texture that knows. Reading the sign
+  // of an unsigned field is how voxel mode first came out completely empty on every nested
+  // segmentation \u2014 which is every segmentation with a tumour inside an organ.
+${this.interfaceMode && this.attrTex ? `  return textureLoad(t_attr${s}, ix, 0).a > 0.5;` : `  return textureLoad(t_seg${s}, ix, 0).a < 0.0;`}
+}
+fn voxels_seg${s}(wp : vec3<f32>, rd : vec3<f32>, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let dimsf = vec3<f32>(textureDimensions(t_seg${s}));
+  let ci = floor(t * dimsf - vec3<f32>(0.5) + vec3<f32>(0.5));   // the voxel this sample is in
+  let idx = vec3<i32>(ci);
+  let me = textureLoad(t_seg${s}, idx, 0);
+  if (!solid_seg${s}(idx)) { return vec4<f32>(0.0); }  // this voxel's centre is outside the segmentation
+  // A face perpendicular to texture axis k has texture-space normal e_k; a normal maps from
+  // texture to world by the TRANSPOSE of the world\u2192texture linear part (row k of p2t).
+  let M = u_material.seg${s}_p2t;
+  var rows = array<vec3<f32>, 3>(
+    normalize(vec3<f32>(M[0][0], M[1][0], M[2][0])),
+    normalize(vec3<f32>(M[0][1], M[1][1], M[2][1])),
+    normalize(vec3<f32>(M[0][2], M[1][2], M[2][2])));
+  var offs = array<vec3<i32>, 6>(
+    vec3<i32>(1, 0, 0), vec3<i32>(-1, 0, 0), vec3<i32>(0, 1, 0),
+    vec3<i32>(0, -1, 0), vec3<i32>(0, 0, 1), vec3<i32>(0, 0, -1));
+  // Which faces of this cube are EXPOSED (their neighbour is outside)? Of those, shade the one
+  // the ray meets most squarely. Picking the geometrically nearest face instead leaves the
+  // surface stippled: a ray crossing near a cube's edge is often nearest an INTERIOR face, and
+  // that sample then draws nothing even though the cube is visible there.
+  let lim = vec3<i32>(dimsf) - vec3<i32>(1);
+  var bestDot = -2.0;
+  var n = vec3<f32>(0.0);
+  var exposed = false;
+  var open = array<bool, 6>(false, false, false, false, false, false);
+  for (var f = 0; f < 6; f = f + 1) {
+    if (solid_seg${s}(clamp(idx + offs[f], vec3<i32>(0), lim))) { continue; }   // interior face
+    open[f] = true;
+    exposed = true;
+    let sgn = select(-1.0, 1.0, (f & 1) == 0);
+    let nw = rows[f >> 1] * sgn;
+    let dd = -dot(nw, rd);
+    if (dd > bestDot) { bestDot = dd; n = nw; }
+  }
+  if (!exposed) { return vec4<f32>(0.0); }             // fully buried voxel \u2014 the shell is one cube thick
+  // Which face did the ray actually come IN through? That \u2014 not the face most square to the
+  // camera \u2014 is what makes a cube read as a cube: the step faces catch the light differently
+  // from the faces around them, which is the whole visual signal that this is voxels. Slab
+  // entry test in voxel space; if that face turns out to be interior (possible when the march
+  // steps past a thin feature), fall back to the exposed face the ray meets most squarely.
+  let rv = vec3<f32>(
+    dot(vec3<f32>(M[0][0], M[1][0], M[2][0]), rd),
+    dot(vec3<f32>(M[0][1], M[1][1], M[2][1]), rd),
+    dot(vec3<f32>(M[0][2], M[1][2], M[2][2]), rd)) * dimsf;
+  let r = t * dimsf - vec3<f32>(0.5) - ci;             // position within the voxel, [-0.5, 0.5]
+  var tIn = -1e9;
+  var face = -1;
+  if (abs(rv.x) > 1e-6) { let tk = (-0.5 * sign(rv.x) - r.x) / rv.x; if (tk > tIn) { tIn = tk; face = select(1, 0, rv.x < 0.0); } }
+  if (abs(rv.y) > 1e-6) { let tk = (-0.5 * sign(rv.y) - r.y) / rv.y; if (tk > tIn) { tIn = tk; face = select(3, 2, rv.y < 0.0); } }
+  if (abs(rv.z) > 1e-6) { let tk = (-0.5 * sign(rv.z) - r.z) / rv.z; if (tk > tIn) { tIn = tk; face = select(5, 4, rv.z < 0.0); } }
+  if (face >= 0 && open[face]) {
+    n = rows[face >> 1] * select(-1.0, 1.0, (face & 1) == 0);
+  }
+${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
+  let vop = at.r;                                      // per-segment opacity, this voxel's own
+  let vcol = me.rgb / max(vop, 1e-3);                  // un-premultiply` : `  let vop = seg_op;
+  let vcol = me.rgb;`}
+  let T = clamp(op0 * vop, 0.0, 1.0);
+  if (T <= 0.0) { return vec4<f32>(0.0); }
+  // Optical depth calibrated so crossing ONE voxel accumulates exactly T \u2014 the cube-sized
+  // equivalent of the shell profile the smooth path uses, so the opacity controls mean the same
+  // thing at every smoothing setting.
+  let vox = max(u_material.seg${s}_params.y, 1e-4);
+  let rate = max(abs(dot(rd, n)), 1e-3);
+  let tau = -log(1.0 - min(T, 0.9999)) * (step * rate) / vox;
+  let op = 1.0 - exp(-tau);
+  if (op <= 0.0004) { return vec4<f32>(0.0); }
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ldn = max(dot(-rd, n), 0.0);
+  // Faces need to differ in brightness by WHICH WAY THEY FACE, not by how square they are to the
+  // camera. A head-lit cube surface viewed down one of its own axes has every visible face at the
+  // same angle to the light, and with ka+kd \u2248 1 they all clip to the same flat colour \u2014 which is
+  // exactly what "voxel mode" looked like before this: a flat silhouette with stepped edges.
+  // A fixed overhead sky term (superior-facing brightest, inferior darkest, sides between) makes
+  // each face of each cube read separately from any viewpoint, which is the whole point of the
+  // mode. No specular: a highlight across flat faces reads as curvature.
+  let sky = 0.55 + 0.45 * clamp(0.5 + 0.5 * n.z, 0.0, 1.0);
+  var lit = vcol * sky * (ka + kd * ldn);
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);
+}
+// Surface contribution at wp: a crisp Phong surface. Weighted by (1-mode) so it morphs smoothly
+// into the volume contribution across a blurred surface\u2194volume boundary.
+fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, ds : f32, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+  if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
+${this.outerSolid ? `  // A BAND-LIMITED SOLID, found by an INTERVAL CROSSING TEST.
+  //
+  // A labelmap is a SAMPLED indicator function, and its voxel steps are above the grid's Nyquist
+  // limit \u2014 they are aliasing, not anatomy. So the faithful surface is the 0.5 level set of that
+  // indicator RECONSTRUCTED with a kernel at the limit: p = G_\u03C3 * 1(label != 0), which the baker
+  // low-passes into attr.b and the smoothing control sets the \u03C3 of. Reconstructing with plain
+  // trilinear interpolation instead (what \u03C3\u21920 gives) reproduces the ALIASED surface \u2014 flat voxel
+  // faces and chamfered edges, which is the chunk. Band-limited, the surface still passes through
+  // the voxel faces but carries no energy above Nyquist, which is the smooth.
+  //
+  // This MOVES the geometry with \u03C3, which earlier versions refused to do because smoothing the
+  // signed DISTANCE closed the disc space between two vertebrae and fused them. A BOUNDED
+  // indicator cannot: at the centre of a 4-voxel gap p \u2248 2\xB7\u03A6(-2) \u2248 0.05, nowhere near 0.5. What it
+  // does cost is the curvature term, \u2248 \u03C3\xB2/2R inward on a convex ridge of radius R \u2014 a quarter of a
+  // voxel at \u03C3=1 on a 2-voxel vertebral process. Bounded and predictable, which is the trade a
+  // smoothing control is supposed to offer.
+  //
+  // WHY A CROSSING TEST AND NOT A SHELL BAND. A band wants the PERPENDICULAR distance to the
+  // surface, and the only way to get that from a scalar field is (0.5 - p)/|grad p| \u2014 which falls
+  // apart exactly where |grad p| collapses: concave creases where two surfaces meet, and thin
+  // features. There the estimated distance diverges, no sample falls inside the band, and an
+  // OPAQUE segment renders dusty, with background showing through it. (Measured on a sphere with a
+  // plate through it: 5-7% of interior pixels leaking, up to 31% on a single pixel; the shell-band
+  // design leaked 8-15%.) The test p > 0.5 has no such failure: it is well defined everywhere, so
+  // asking whether THIS interval contains the crossing cannot miss a surface, at any \u03C3, curvature or
+  // incidence. Field.intervalSampling hands us the exact distance back to this field's previous
+  // sample, so consecutive intervals tile the ray with no gap and no overlap \u2014 which is what makes
+  // the test exact under the per-step ray jitter, and across an empty-space leap.
+  let p1 = pfield_seg${s}(wp);
+  let back = wp - rd * max(ds, 1.0e-4);
+  let p0 = pfield_seg${s}(back);
+  let in1 = p1 > 0.5;
+  let in0 = p0 > 0.5;
+  var capNormal = vec3<f32>(0.0);
+  var prevClipped = false;` : ``}${this.outerSolid && this.clippable ? `
+  // SOLID: where a clip plane cuts the body, the body has a FACE there. The ray enters the kept
+  // half-space already inside the solid \u2014 no surface crossing \u2014 so the cut would be a hole into a
+  // bubble unless we treat that entry as a face of its own, with the plane's normal. The previous
+  // sample is the test: if it was on the discarded side, this interval crossed the plane.
+  let ccount = u32(u_material.clip_count.x);
+  for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+    let cp = u_material.clip_planes[ci];
+    if (dot(back, cp.xyz) + cp.w < 0.0) { prevClipped = true; capNormal = -cp.xyz; }
+  }` : ``}${this.outerSolid ? `
+  let surfaceCross = in1 != in0;
+  if (!(surfaceCross || (in1 && prevClipped))) { return vec4<f32>(0.0); }
+  // Where in the interval: linear in p, which is exact to first order and sub-voxel in practice.
+  let u = select(1.0, clamp((0.5 - p0) / (p1 - p0), 0.0, 1.0), surfaceCross);
+  let wc = back + (wp - back) * u;
+  let T = clamp(op0 * seg_op, 0.0, 1.0);
+  if (T <= 0.0) { return vec4<f32>(0.0); }
+  // Normal from a FULL-VOXEL central difference of p. attr.b is read trilinearly, so the field is
+  // only C0 and its gradient jumps at every voxel-face plane; differencing inside a single cell
+  // (h = half a voxel) reports that cell's own gradient and the jumps show up as a rectangular
+  // lattice of dark creases over the surface \u2014 a maze, worst at small \u03C3 where the field is
+  // steepest. A full-voxel difference straddles the discontinuity and averages it out. Geometry
+  // and normal now come from the SAME field, which is what stops a stepped silhouette from being
+  // lit like a smooth one.
+  let hg = max(u_material.seg${s}_params.y, step);
+  let gp = vec3<f32>(
+    pfield_seg${s}(wc + vec3<f32>(hg,0,0)) - pfield_seg${s}(wc - vec3<f32>(hg,0,0)),
+    pfield_seg${s}(wc + vec3<f32>(0,hg,0)) - pfield_seg${s}(wc - vec3<f32>(0,hg,0)),
+    pfield_seg${s}(wc + vec3<f32>(0,0,hg)) - pfield_seg${s}(wc - vec3<f32>(0,0,hg))) / (2.0 * hg);
+  let glen = length(gp);
+  // p increases INWARD, so the outward normal is -grad p. On a cap (entered through a clip plane
+  // with no crossing) the face is the plane, so its normal is the plane's.
+  var n = select(capNormal, -gp / max(glen, 1.0e-6), surfaceCross && glen > 1.0e-5);
+  if (dot(n, n) < 0.25) { n = -rd; }     // degenerate: face the camera rather than drop the sample
+  if (dot(n, -rd) < 0.0) { n = -n; }
+  // ONE crossing = exactly the target opacity T, by construction \u2014 no band, no profile integral,
+  // no dependence on the sample step or the incidence angle. Front and back faces of a translucent
+  // segment still compose to 1-(1-T)\xB2, as a pair of polydata surfaces would.
+  let op = T;
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;
+  let ldn = max(dot(-rd, n), 0.0);
+  let refl = normalize(2.0 * ldn * n + rd);
+  let rdv = max(dot(refl, -rd), 0.0);
+  let col = col_seg${s}(wc);
+  var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);` : `
   let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment \xD7 field)
@@ -3733,7 +6580,7 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
     vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);`}
   let glen = length(g);
-  if (glen < 1e-5) { return vec4<f32>(0.0); }
+  if (glen < 1.0e-5) { return vec4<f32>(0.0); }
   var n = g / glen;
   if (dot(n, -rd) < 0.0) { n = -n; }
   // SURFACE opacity (Slicer polydata parity): the shell is a THIN surface of opacity T, not a solid
@@ -3745,11 +6592,7 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   // built-in silhouette AA).
   let a = max(1.0 - d_mm / band, 0.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
-  // Convert ray-step to d_mm-distance. Outer: RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
-  // (includes |grad sdf|, which the distance blur pulls below 1). Interface: the re-signed gradient has
-  // an arbitrary magnitude (a sign jump at the interface), so use the UNIT normal cosine |dot(rd,n)| \u2014
-  // still \u21920 at grazing (silhouette AA), and keeps opacity thickness-consistent.
-  let rate = max(abs(dot(rd, ${this.interfaceMode ? "n" : "g"})), 1e-3);
+  let rate = max(abs(dot(rd, ${this.interfaceMode ? "n" : "g"})), 1.0e-3);
   let tau = -log(1.0 - min(T, 0.9999)) * (a / band) * (step * rate);
   var op = 1.0 - exp(-tau);
 ${this.interfaceMode ? `  op = op * pres_seg${s}(wp);   // gate to GENUINELY in-segment voxels \u2014 kills the bled colour/opacity halo beyond the real edge` : ""}
@@ -3762,9 +6605,9 @@ ${this.interfaceMode ? `  op = op * pres_seg${s}(wp);   // gate to GENUINELY in-
   let col = col_seg${s}(wp);
   var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
-  return vec4<f32>(lit * op, op);
+  return vec4<f32>(lit * op, op);`}
 }
-fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>${this.intervalSampling ? ", ds : f32" : ""}) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
   let sdf = v_seg${s}(wp);
@@ -3787,9 +6630,9 @@ ${this.attrTex ? `  let at = attr_seg${s}(wp);        // (opacity, shading mode)
     }
   }
   if (mode < 0.999) {
-    acc += (1.0 - mode) * surface_seg${s}(wp, rd, sdf, band, step, seg_op, op0);
+    acc += (1.0 - mode) * surface_seg${s}(wp, rd, ${this.intervalSampling ? "ds" : "step"}, sdf, band, step, seg_op, op0);
   }
-  return acc;` : `  return surface_seg${s}(wp, rd, sdf, band, step, 1.0, op0);`}
+  return acc;` : `  return surface_seg${s}(wp, rd, step, sdf, band, step, 1.0, op0);`}
 }`
       );
     }
@@ -3869,6 +6712,15 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 22] = this.shade[2];
     out[off + 23] = this.shade[3];
     out[off + 24] = this.bandMm;
+    out[off + 25] = this.voxelMm;
+    out[off + 26] = this.voxelMode ? 1 : 0;
+    out[off + 27] = this.sigmaVox * this.voxelMm;
+    out[off + 28] = this.box[0][0];
+    out[off + 29] = this.box[0][1];
+    out[off + 30] = this.box[0][2];
+    out[off + 32] = this.box[1][0];
+    out[off + 33] = this.box[1][1];
+    out[off + 34] = this.box[1][2];
   }
   bindEntries(_s, base) {
     const e = [
@@ -3886,7 +6738,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
 };
 
 // render/bake.ts
-var INIT_WGSL = (
+var INIT_WGSL2 = (
   /* wgsl */
   `
 struct U { dims : vec4<u32> };
@@ -3903,7 +6755,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, vec3<i32>(gid), vec4<f32>(pal.rgb, present * pal.a));
 }`
 );
-var BLUR_WGSL = (
+var BLUR_WGSL2 = (
   /* wgsl */
   `
 struct U { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };  // axis, radius; half-kernel weights
@@ -3930,7 +6782,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, c, vec4<f32>(center.rgb, asum));
 }`
 );
-function gaussHalfKernel(sigma) {
+function gaussHalfKernel2(sigma) {
   const radius = Math.max(1, Math.min(15, Math.ceil(3 * sigma)));
   const raw = new Float32Array(radius + 1);
   let total = 0;
@@ -3994,7 +6846,7 @@ function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
     layout: "auto",
     compute: {
       module: dev.createShaderModule({
-        code: INIT_WGSL
+        code: INIT_WGSL2
       }),
       entryPoint: "main"
     }
@@ -4040,12 +6892,12 @@ function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
     texB.destroy();
     return texA;
   }
-  const { radius, w } = gaussHalfKernel(sigmaVoxels);
+  const { radius, w } = gaussHalfKernel2(sigmaVoxels);
   const blurPipe = dev.createComputePipeline({
     layout: "auto",
     compute: {
       module: dev.createShaderModule({
-        code: BLUR_WGSL
+        code: BLUR_WGSL2
       }),
       entryPoint: "main"
     }
@@ -4171,7 +7023,7 @@ var ColorizeBaker = class {
       layout: "auto",
       compute: {
         module: dev.createShaderModule({
-          code: INIT_WGSL
+          code: INIT_WGSL2
         }),
         entryPoint: "main"
       }
@@ -4180,7 +7032,7 @@ var ColorizeBaker = class {
       layout: "auto",
       compute: {
         module: dev.createShaderModule({
-          code: BLUR_WGSL
+          code: BLUR_WGSL2
         }),
         entryPoint: "main"
       }
@@ -4258,7 +7110,7 @@ var ColorizeBaker = class {
     }
     if (smooth) {
       const s = this.scratch;
-      const { radius, w } = gaussHalfKernel(sigmaVoxels);
+      const { radius, w } = gaussHalfKernel2(sigmaVoxels);
       const passes = [
         [
           s,
@@ -4347,13 +7199,23 @@ async function inflateDeflate(buf) {
   const ds = new DecompressionStream("deflate");
   return await new Response(new Response(buf).body.pipeThrough(ds)).arrayBuffer();
 }
+var blobFetch = (url) => fetch(url);
 async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
+  const zv = await fetchZarrVolumeNative(blobBase, z, onBytes, concurrency);
+  const data = zv.data instanceof Float32Array ? zv.data : Float32Array.from(zv.data);
+  return {
+    data,
+    dims: zv.dims,
+    range: zv.range
+  };
+}
+async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
   const hashes = z.chunkHashes;
   const posBase = blobBase + z.dir + "/" + z.dataset + "/";
   const chunkUrl = (kk, jj, ii) => hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
-  const out = new Float32Array(nz * ny * nx);
+  const out = new Ctor(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
   const jobs = [];
   for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([
@@ -4365,7 +7227,7 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   const worker = async () => {
     while (idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
-      const resp = await fetch(chunkUrl(kk, jj, ii));
+      const resp = await blobFetch(chunkUrl(kk, jj, ii));
       let gz;
       if (resp.body && onBytes) {
         const parts = [];
@@ -4411,6 +7273,7 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   }, worker));
   return {
     data: out,
+    dtype: z.dtype,
     dims: [
       nx,
       ny,
@@ -4601,935 +7464,6 @@ var EditableSegmentation = class {
   }
 };
 
-// render/sdf-bake.ts
-var INIT_WGSL2 = (
-  /* wgsl */
-  `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
-@group(0) @binding(0) var t_label : texture_3d<u32>;
-@group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
-@group(0) @binding(2) var<uniform> u : U;
-// PADDED SDF GRID: the seed/SDF textures are LARGER than the labelmap by 'pad' voxels on every side
-// (dims.w). Coord c is a padded-grid coord; the label lives at c-pad, and everything outside the label
-// range is background (0). This gives a real spatial margin of background BEYOND the segmentation, so
-// a segment touching the labelmap edge closes as a genuine capped surface with room for the SDF to go
-// positive \u2014 and gradient/finite-difference samples near that cap stay in-bounds (they read real
-// background) instead of hitting the out-of-volume cull sentinel, which used to poison the normal.
-fn labelAt(c : vec3<i32>) -> u32 {
-  let pad = i32(u.dims.w);
-  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);   // label dims = padded dims - 2\xB7pad
-  let lc = c - vec3<i32>(pad);
-  if (any(lc < vec3<i32>(0)) || any(lc >= ld)) { return 0u; }
-  return textureLoad(t_label, lc, 0).r;
-}
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let my = labelAt(c);
-  let meIn = my != 0u;
-  let allMode = u.params.y > 0.5;                   // 0 = outer boundary only; 1 = ANY label change (multi-material interfaces)
-  var boundary = false;
-  var region = my;                                  // inside voxel \u2192 own label
-  let offs = array<vec3<i32>, 6>(vec3<i32>(1,0,0), vec3<i32>(-1,0,0), vec3<i32>(0,1,0), vec3<i32>(0,-1,0), vec3<i32>(0,0,1), vec3<i32>(0,0,-1));
-  for (var i = 0; i < 6; i = i + 1) {
-    let nl = labelAt(c + offs[i]);
-    // outer mode: boundary at inside\u2194outside (segment\u2194background). all mode: boundary at ANY label change
-    // (segment\u2194background AND segment\u2194segment) so embedded/nested structures get an interface shell too.
-    let isChange = select((nl != 0u) != meIn, nl != my, allMode);
-    // outer: a background boundary voxel adopts the neighbour's label (so the outer shell renders on both
-    // sides). all: every voxel keeps its OWN label (background stays 0 = transparent), so the region
-    // COLOUR changes across EVERY interface \u2014 including the outer one \u2014 which the shader's on-the-fly
-    // re-signing needs to recover a clean inside/outside normal there too.
-    if (isChange) { boundary = true; if (my == 0u && !allMode) { region = nl; } }
-  }
-  var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz, f32(region)); }
-  textureStore(t_seed_out, c, seed);
-}`
-);
-var JFA_WGSL = (
-  /* wgsl */
-  `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
-@group(0) @binding(0) var t_seed_in : texture_3d<f32>;
-@group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
-@group(0) @binding(2) var<uniform> u : U;
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
-  let step = i32(u.params.x);
-  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
-  var best = textureLoad(t_seed_in, c, 0);
-  var bestD = select(1e30, distance(p, best.xyz), best.w > 0.5);
-  for (var dz = -1; dz <= 1; dz = dz + 1) {
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-      for (var dx = -1; dx <= 1; dx = dx + 1) {
-        if (dx == 0 && dy == 0 && dz == 0) { continue; }
-        let nc = clamp(c + vec3<i32>(dx, dy, dz) * step, vec3<i32>(0), dmax);
-        let s = textureLoad(t_seed_in, nc, 0);
-        if (s.w > 0.5) {
-          let d = distance(p, s.xyz);
-          if (d < bestD) { bestD = d; best = s; }
-        }
-      }
-    }
-  }
-  textureStore(t_seed_out, c, best);
-}`
-);
-var FINAL_WGSL = (
-  /* wgsl */
-  `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
-@group(0) @binding(0) var t_seed_in : texture_3d<f32>;
-@group(0) @binding(1) var t_label : texture_3d<u32>;
-@group(0) @binding(2) var t_out : texture_storage_3d<rgba16float, write>;
-@group(0) @binding(3) var<uniform> u : U;
-@group(0) @binding(4) var<uniform> u_pal : array<vec4<f32>, 256>;
-@group(0) @binding(5) var t_attr : texture_storage_3d<rgba16float, write>;
-@group(0) @binding(6) var<uniform> u_mode : array<vec4<f32>, 256>;   // .x = shading mode (0 surface, 1 volume)
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
-  let s = textureLoad(t_seed_in, c, 0);
-  let valid = s.w > 0.5;
-  let dist = select(1e3, distance(p, s.xyz), valid);
-  let pad = i32(u.dims.w);                                       // label is offset by pad; pad region = background (outside)
-  let lc = c - vec3<i32>(pad);
-  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);
-  let inRange = all(lc >= vec3<i32>(0)) && all(lc < ld);
-  let ins = inRange && textureLoad(t_label, lc, 0).r != 0u;
-  // outer mode: SIGNED (neg inside the union) \u2014 smooth zero-crossing = clean normals. all mode:
-  // UNSIGNED distance to the nearest interface (every label change is a wall; no global inside/outside).
-  let sdf = select(select(dist, -dist, ins), dist, u.params.y > 0.5);
-  let lbl = u32(s.w + 0.5) & 255u;
-  let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
-  let mode = select(0.0, u_mode[lbl].x, valid);
-  // PREMULTIPLIED colour (rgb\xB7opacity): the colour-seam blur then can't bleed a HIDDEN (opacity 0)
-  // segment's colour into a visible neighbour \u2014 an invisible organ was still tinting the organ it
-  // abutted (looked like half-opacity). The shader divides by the per-segment opacity to recover the
-  // true colour, so a 0-opacity region contributes nothing to the blend.
-  textureStore(t_out, c, vec4<f32>(pal.rgb * pal.a, sdf));
-  // .r = opacity, .g = shading mode, .b = distance (seam-blurred \u2192 SMOOTH distance for the interface-mode
-  // normal; sdfTex.a stays sharp for shell membership), .a = CRISP presence (1 inside a real segment, 0
-  // background) \u2014 the FULLBLUR carries it unblurred so the shader can tell a genuine in-segment voxel
-  // from one that merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
-  textureStore(t_attr, c, vec4<f32>(pal.a, mode, sdf, select(0.0, 1.0, ins)));
-}`
-);
-var BLUR_WGSL2 = (
-  /* wgsl */
-  `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
-@group(0) @binding(0) var t_in : texture_3d<f32>;
-@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
-@group(0) @binding(2) var<uniform> u : BU;
-fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
-  var av = vec3<i32>(0);
-  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
-  let center = textureLoad(t_in, c, 0);
-  var sum = center.a * wt(0u);
-  let R = i32(u.axis_r.y);
-  for (var i = 1; i <= R; i = i + 1) {
-    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).a
-                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).a);
-  }
-  textureStore(t_out, c, vec4<f32>(center.rgb, sum));
-}`
-);
-var COLBLUR_WGSL = (
-  /* wgsl */
-  `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
-@group(0) @binding(0) var t_in : texture_3d<f32>;
-@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
-@group(0) @binding(2) var<uniform> u : BU;
-fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
-  var av = vec3<i32>(0);
-  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
-  let center = textureLoad(t_in, c, 0);
-  var sum = center.rgb * wt(0u);
-  let R = i32(u.axis_r.y);
-  for (var i = 1; i <= R; i = i + 1) {
-    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).rgb
-                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).rgb);
-  }
-  textureStore(t_out, c, vec4<f32>(sum, center.a));
-}`
-);
-var FULLBLUR_WGSL = (
-  /* wgsl */
-  `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
-@group(0) @binding(0) var t_in : texture_3d<f32>;
-@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
-@group(0) @binding(2) var<uniform> u : BU;
-fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
-@compute @workgroup_size(4, 4, 4)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let c = vec3<i32>(gid) + u.origin.xyz;
-  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
-  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
-  var av = vec3<i32>(0);
-  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
-  let center = textureLoad(t_in, c, 0);
-  var gb = center.gb * wt(0u);
-  let R = i32(u.axis_r.y);
-  for (var i = 1; i <= R; i = i + 1) {
-    gb = gb + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).gb
-                          + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).gb);
-  }
-  textureStore(t_out, c, vec4<f32>(center.r, gb.x, gb.y, center.a));
-}`
-);
-function gaussHalfKernel2(sigma) {
-  const radius = Math.max(1, Math.min(15, Math.ceil(3 * sigma)));
-  const raw = new Float32Array(radius + 1);
-  let total = 0;
-  for (let i = 0; i <= radius; i++) {
-    raw[i] = Math.exp(-(i * i) / (2 * sigma * sigma));
-    total += (i === 0 ? 1 : 2) * raw[i];
-  }
-  const w = new Float32Array(16);
-  for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
-  return {
-    radius,
-    w
-  };
-}
-var JfaSdfBaker = class {
-  labelTex;
-  dims;
-  ijkToRAS;
-  dev;
-  seed;
-  sdfTex;
-  attrTex;
-  attrScratch;
-  lastSeed;
-  sdfScratch;
-  uni;
-  palBuf;
-  modeBuf;
-  initPipe;
-  jfaPipe;
-  finalPipe;
-  blurPipe;
-  colBlurPipe;
-  fullBlurPipe;
-  g;
-  steps;
-  smoothSigma;
-  pad;
-  labelDims;
-  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
-  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
-  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
-  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
-  bmode;
-  constructor(dev, labelTex, dims, ijkToRAS, smoothSigmaVoxels = 1, pad = 2, boundaryMode = "outer") {
-    this.labelTex = labelTex;
-    this.dims = dims;
-    this.ijkToRAS = ijkToRAS;
-    this.lastSeed = 0;
-    this.dev = dev;
-    this.smoothSigma = smoothSigmaVoxels;
-    this.bmode = boundaryMode === "all" ? 1 : 0;
-    this.pad = pad;
-    this.labelDims = [
-      dims[0],
-      dims[1],
-      dims[2]
-    ];
-    this.dims = [
-      dims[0] + 2 * pad,
-      dims[1] + 2 * pad,
-      dims[2] + 2 * pad
-    ];
-    const m = ijkToRAS.slice();
-    for (let r = 0; r < 3; r++) m[r * 4 + 3] -= pad * (m[r * 4] + m[r * 4 + 1] + m[r * 4 + 2]);
-    this.ijkToRAS = m;
-    const [dx, dy, dz] = this.dims;
-    const mk = (fmt, extra = 0) => dev.createTexture({
-      size: this.dims,
-      dimension: "3d",
-      format: fmt,
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra
-    });
-    const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    this.seed = [
-      mk("rgba32float", seedUsage),
-      mk("rgba32float", seedUsage)
-    ];
-    this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);
-    this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);
-    this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.uni = dev.createBuffer({
-      size: 112,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.palBuf = dev.createBuffer({
-      size: 256 * 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.modeBuf = dev.createBuffer({
-      size: 256 * 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const mod = (code) => dev.createComputePipeline({
-      layout: "auto",
-      compute: {
-        module: dev.createShaderModule({
-          code
-        }),
-        entryPoint: "main"
-      }
-    });
-    this.initPipe = mod(INIT_WGSL2);
-    this.jfaPipe = mod(JFA_WGSL);
-    this.finalPipe = mod(FINAL_WGSL);
-    this.blurPipe = mod(BLUR_WGSL2);
-    this.colBlurPipe = mod(COLBLUR_WGSL);
-    this.fullBlurPipe = mod(FULLBLUR_WGSL);
-    this.g = [
-      Math.ceil(dx / 4),
-      Math.ceil(dy / 4),
-      Math.ceil(dz / 4)
-    ];
-    const maxDim = Math.max(dx, dy, dz);
-    const steps = [];
-    for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
-    this.steps = steps;
-  }
-  /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
-   *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
-   *  place. */
-  sdfTexture() {
-    return this.sdfTex;
-  }
-  /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
-  attrTexture() {
-    return this.attrTex;
-  }
-  /** The PADDED grid the SDF/attr textures live on (labelDims + 2·pad), and the ijkToRAS that maps it
-   *  to RAS — hand these to the SegmentField so its patient→texture transform covers the padded extent. */
-  sdfDims() {
-    return this.dims;
-  }
-  sdfIjkToRAS() {
-    return this.ijkToRAS;
-  }
-  /** Background margin (voxels) padded on each side; readDistance() is on the padded grid, so a label
-   *  voxel (x,y,z) is at padded (x+pad, y+pad, z+pad). */
-  padVoxels() {
-    return this.pad;
-  }
-  /** Read back the per-voxel signed distance (sdfTex .a, mm) to CPU. For accuracy comparison/tests. */
-  async readDistance() {
-    const [dx, dy, dz] = this.dims;
-    const bpr = Math.ceil(dx * 8 / 256) * 256;
-    const rowU16 = bpr / 2;
-    const buf = this.dev.createBuffer({
-      size: bpr * dy * dz,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
-    const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({
-      texture: this.sdfTex
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: dy
-    }, [
-      dx,
-      dy,
-      dz
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
-    await buf.mapAsync(GPUMapMode.READ);
-    const u16 = new Uint16Array(buf.getMappedRange());
-    const h2f = (h) => {
-      const s = h & 32768 ? -1 : 1, e = (h & 31744) >> 10, f = h & 1023;
-      if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
-      if (e === 31) return f ? NaN : s * Infinity;
-      return s * Math.pow(2, e - 15) * (1 + f / 1024);
-    };
-    const out = new Float32Array(dx * dy * dz);
-    for (let z = 0; z < dz; z++) for (let y = 0; y < dy; y++) for (let x = 0; x < dx; x++) {
-      out[(z * dy + y) * dx + x] = h2f(u16[(z * dy + y) * rowU16 + x * 4 + 3]);
-    }
-    buf.unmap();
-    buf.destroy();
-    return out;
-  }
-  /** Set the label→colour palette (256 × rgba f32: rgb = colour, a = opacity). Call before bake(). */
-  setPalette(palette) {
-    const pal = new Float32Array(256 * 4);
-    pal.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
-    this.dev.queue.writeBuffer(this.palBuf, 0, pal);
-  }
-  /** Set the per-label shading mode palette (256 × vec4; .x = 0 surface shell / 1 volume DVR fill). */
-  setModePalette(modes) {
-    const m = new Float32Array(256 * 4);
-    m.set(modes.subarray(0, Math.min(modes.length, 256 * 4)));
-    this.dev.queue.writeBuffer(this.modeBuf, 0, m);
-  }
-  writeUni(step, origin = [
-    0,
-    0,
-    0
-  ]) {
-    const ab = new ArrayBuffer(112);
-    const f = new Float32Array(ab), u = new Uint32Array(ab);
-    f.set(transpose4(this.ijkToRAS), 0);
-    u[16] = this.dims[0];
-    u[17] = this.dims[1];
-    u[18] = this.dims[2];
-    u[19] = this.pad;
-    f[20] = step;
-    f[21] = this.bmode;
-    f[22] = 0;
-    f[23] = 0;
-    const i32v = new Int32Array(ab);
-    i32v[24] = origin[0];
-    i32v[25] = origin[1];
-    i32v[26] = origin[2];
-    i32v[27] = 0;
-    this.dev.queue.writeBuffer(this.uni, 0, ab);
-  }
-  /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
-   *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
-   *  edit settles and refine() runs. */
-  bake() {
-    this.sweep([], this.smoothSigma, 0);
-  }
-  /** REFINE for a STATIC labelmap (run once the edit settles): JFA+2 extra passes → a near-exact
-   *  Voronoi/SDF (fixes the small JFA mistakes near close/overlapping segments) and a colour-seam blur
-   *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
-   *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
-   *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
-  refine() {
-    this.sweep([
-      2,
-      1
-    ], this.smoothSigma, 1);
-  }
-  /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
-   *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
-   *  whole volume, which is what makes level stepping feel instant. The seed ping-pong pair is
-   *  first made consistent with a full-texture copy, so region passes can ping-pong while JFA
-   *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
-   *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
-   *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
-  refineRegion(regionIjk) {
-    const dev = this.dev, [dx, dy, dz] = this.dims;
-    const lo = [
-      Math.max(0, regionIjk.lo[0]),
-      Math.max(0, regionIjk.lo[1]),
-      Math.max(0, regionIjk.lo[2])
-    ];
-    const hi = [
-      Math.min(dx, regionIjk.hi[0]),
-      Math.min(dy, regionIjk.hi[1]),
-      Math.min(dz, regionIjk.hi[2])
-    ];
-    const [rx, ry, rz] = [
-      hi[0] - lo[0],
-      hi[1] - lo[1],
-      hi[2] - lo[2]
-    ];
-    if (rx <= 0 || ry <= 0 || rz <= 0) return;
-    const g = [
-      Math.ceil(rx / 4),
-      Math.ceil(ry / 4),
-      Math.ceil(rz / 4)
-    ];
-    const region = {
-      lo,
-      hi
-    };
-    let src = this.lastSeed;
-    let enc = dev.createCommandEncoder();
-    enc.copyTextureToTexture({
-      texture: this.seed[src]
-    }, {
-      texture: this.seed[src ^ 1]
-    }, this.dims);
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    this.writeUni(0, lo);
-    enc = dev.createCommandEncoder();
-    {
-      const b = dev.createBindGroup({
-        layout: this.initPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.labelTex.createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
-      const p2 = enc.beginComputePass();
-      p2.setPipeline(this.initPipe);
-      p2.setBindGroup(0, b);
-      p2.dispatchWorkgroups(g[0], g[1], g[2]);
-      p2.end();
-    }
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    const maxDim = Math.max(rx, ry, rz);
-    const steps = [];
-    for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
-    steps.push(2, 1);
-    for (const step of steps) {
-      this.writeUni(step, lo);
-      const dst = src ^ 1;
-      enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({
-        layout: this.jfaPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[dst].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
-      const p2 = enc.beginComputePass();
-      p2.setPipeline(this.jfaPipe);
-      p2.setBindGroup(0, b);
-      p2.dispatchWorkgroups(g[0], g[1], g[2]);
-      p2.end();
-      dev.queue.submit([
-        enc.finish()
-      ]);
-      src = dst;
-    }
-    this.lastSeed = src;
-    this.writeUni(0, lo);
-    enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[src].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfTex.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
-    const p = enc.beginComputePass();
-    p.setPipeline(this.finalPipe);
-    p.setBindGroup(0, bf);
-    p.dispatchWorkgroups(g[0], g[1], g[2]);
-    p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.colBlurPipe, 1, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
-  }
-  /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
-   *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
-   *  routed to the scratch texture (discarded — the blurred resident sdfTex stays pristine) and
-   *  re-blur the attribute seams. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
-   *  what makes per-vertebra focus switching real-time. */
-  rebakeAttr(blurSeams = false, regionIjk) {
-    const dev = this.dev, [dx, dy, dz] = this.dims;
-    const region = regionIjk && {
-      lo: [
-        Math.max(0, regionIjk.lo[0]),
-        Math.max(0, regionIjk.lo[1]),
-        Math.max(0, regionIjk.lo[2])
-      ],
-      hi: [
-        Math.min(dx, regionIjk.hi[0]),
-        Math.min(dy, regionIjk.hi[1]),
-        Math.min(dz, regionIjk.hi[2])
-      ]
-    };
-    const [gx, gy, gz] = region ? [
-      Math.ceil((region.hi[0] - region.lo[0]) / 4),
-      Math.ceil((region.hi[1] - region.lo[1]) / 4),
-      Math.ceil((region.hi[2] - region.lo[2]) / 4)
-    ] : this.g;
-    if (region && (gx <= 0 || gy <= 0 || gz <= 0)) return;
-    this.writeUni(0, region ? region.lo : [
-      0,
-      0,
-      0
-    ]);
-    const enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[this.lastSeed].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfScratch.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
-    const p = enc.beginComputePass();
-    p.setPipeline(this.finalPipe);
-    p.setBindGroup(0, bf);
-    p.dispatchWorkgroups(gx, gy, gz);
-    p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    if (blurSeams) this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
-  }
-  /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
-   *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
-  blurAttrOnly() {
-    this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch);
-  }
-  /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
-  sweep(extraSteps, distSigma, colorSigma) {
-    const dev = this.dev, [gx, gy, gz] = this.g;
-    this.writeUni(0);
-    let enc = dev.createCommandEncoder();
-    {
-      const b = dev.createBindGroup({
-        layout: this.initPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.labelTex.createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[0].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
-      const p2 = enc.beginComputePass();
-      p2.setPipeline(this.initPipe);
-      p2.setBindGroup(0, b);
-      p2.dispatchWorkgroups(gx, gy, gz);
-      p2.end();
-    }
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    let src = 0;
-    for (const step of [
-      ...this.steps,
-      ...extraSteps
-    ]) {
-      this.writeUni(step);
-      const dst = src ^ 1;
-      enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({
-        layout: this.jfaPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[dst].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
-      const p2 = enc.beginComputePass();
-      p2.setPipeline(this.jfaPipe);
-      p2.setBindGroup(0, b);
-      p2.dispatchWorkgroups(gx, gy, gz);
-      p2.end();
-      dev.queue.submit([
-        enc.finish()
-      ]);
-      src = dst;
-    }
-    this.lastSeed = src;
-    enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[src].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfTex.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
-    const p = enc.beginComputePass();
-    p.setPipeline(this.finalPipe);
-    p.setBindGroup(0, bf);
-    p.dispatchWorkgroups(gx, gy, gz);
-    p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    if (distSigma > 0) this.blurStage(this.blurPipe, distSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.fullBlurPipe, colorSigma, this.attrTex, this.attrScratch);
-  }
-  /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
-   *  ending in scratch → copied back to `tex` so its identity stays stable for the renderer. */
-  blurStage(pipe, sigma, tex, scratch, region) {
-    const dev = this.dev, [dx, dy, dz] = this.dims;
-    const { radius, w } = gaussHalfKernel2(sigma);
-    const passes = [
-      [
-        tex,
-        scratch,
-        0
-      ],
-      [
-        scratch,
-        tex,
-        1
-      ],
-      [
-        tex,
-        scratch,
-        2
-      ]
-    ];
-    const enc = dev.createCommandEncoder();
-    let passIdx = 0;
-    for (const [srcT, dstT, axis] of passes) {
-      const expand = region ? (2 - passIdx) * radius : 0;
-      const lo = region ? [
-        Math.max(0, region.lo[0] - expand),
-        Math.max(0, region.lo[1] - expand),
-        Math.max(0, region.lo[2] - expand)
-      ] : [
-        0,
-        0,
-        0
-      ];
-      const hi = region ? [
-        Math.min(dx, region.hi[0] + expand),
-        Math.min(dy, region.hi[1] + expand),
-        Math.min(dz, region.hi[2] + expand)
-      ] : [
-        dx,
-        dy,
-        dz
-      ];
-      const ab = new ArrayBuffer(112);
-      const u32 = new Uint32Array(ab), f32 = new Float32Array(ab), i32 = new Int32Array(ab);
-      u32[0] = dx;
-      u32[1] = dy;
-      u32[2] = dz;
-      u32[4] = axis;
-      u32[5] = radius;
-      f32.set(w, 8);
-      i32[24] = lo[0];
-      i32[25] = lo[1];
-      i32[26] = lo[2];
-      const ub = dev.createBuffer({
-        size: 112,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-      });
-      dev.queue.writeBuffer(ub, 0, ab);
-      const b = dev.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: srcT.createView()
-          },
-          {
-            binding: 1,
-            resource: dstT.createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: ub
-            }
-          }
-        ]
-      });
-      const bp = enc.beginComputePass();
-      bp.setPipeline(pipe);
-      bp.setBindGroup(0, b);
-      bp.dispatchWorkgroups(Math.ceil((hi[0] - lo[0]) / 4), Math.ceil((hi[1] - lo[1]) / 4), Math.ceil((hi[2] - lo[2]) / 4));
-      bp.end();
-      passIdx++;
-    }
-    if (region) {
-      const sz = [
-        region.hi[0] - region.lo[0],
-        region.hi[1] - region.lo[1],
-        region.hi[2] - region.lo[2]
-      ];
-      enc.copyTextureToTexture({
-        texture: scratch,
-        origin: region.lo
-      }, {
-        texture: tex,
-        origin: region.lo
-      }, sz);
-    } else {
-      enc.copyTextureToTexture({
-        texture: scratch
-      }, {
-        texture: tex
-      }, this.dims);
-    }
-    dev.queue.submit([
-      enc.finish()
-    ]);
-  }
-  destroy() {
-    this.seed[0].destroy();
-    this.seed[1].destroy();
-    this.sdfTex.destroy();
-    this.attrTex.destroy();
-    this.attrScratch.destroy();
-    this.sdfScratch.destroy();
-    this.uni.destroy();
-    this.palBuf.destroy();
-    this.modeBuf.destroy();
-  }
-};
-
 // logic/segmentation-logic.ts
 function invertAffine(m) {
   const r = [
@@ -5579,11 +7513,10 @@ function invertAffine(m) {
     1
   ];
 }
-var SegmentationLogic = class {
+var SegmentationLogic = class _SegmentationLogic {
   seg;
   renderMode;
   clippable;
-  attrSettleTimer;
   sdf;
   baker;
   presenceTex;
@@ -5598,6 +7531,7 @@ var SegmentationLogic = class {
   refineTimer;
   refineDelayMs;
   boundaryMode;
+  regionReflood;
   constructor(device, seg, opts = {}) {
     this.seg = seg;
     this.palette = new Float32Array(256 * 4);
@@ -5610,13 +7544,14 @@ var SegmentationLogic = class {
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
     this.clippable = opts.clippable ?? false;
+    this.regionReflood = opts.regionReflood ?? false;
     this.setLabelColor(1, opts.color ?? [
       0.3,
       0.85,
       0.55
     ]);
     if (this.renderMode === "sdf") {
-      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, 1, 2, this.boundaryMode);
+      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, this.sigma, 2, this.boundaryMode);
     } else {
       this.baker = new ColorizeBaker(device, seg.masterTexture(), seg.dims);
       this.presenceTex = this.baker.output();
@@ -5688,8 +7623,23 @@ var SegmentationLogic = class {
    *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
    *  seam blur run region-limited in one shot — full settled quality lands immediately, no
    *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
-  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
-  regionToIjk(regionRAS, M = 8) {
+  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel HALO.
+  *
+  *  The halo is not just room for the shell band and the blur radii. A region re-flood reuses the
+  *  previous flood's seeds outside the box, and a seed OUTSIDE the box that pointed at a surface
+  *  just DELETED inside it is stale — a voxel in the box that taps it inherits a phantom surface
+  *  that is no longer there. Re-initialising over a wide halo rebuilds those seeds, so the halo has
+  *  to be at least as wide as the spacing to the next real structure (~15-20 mm between vertebrae);
+  *  at 8 voxels it was not, and one arrow step left a sliver of the hidden level on screen. The box
+  *  is still a few per cent of the grid, so this costs essentially nothing (measured: a level step
+  *  stays ~14 ms against ~390 ms for a full rebake). */
+  static HALO = 32;
+  /** Largest JFA step a region patch may use: capped so a tap (reach = 2·step - 1) stays inside the
+   *  halo this patch re-seeded, and can never read a seed left over from an older bake. */
+  static haloMaxStep() {
+    return 1 << Math.floor(Math.log2((_SegmentationLogic.HALO + 1) / 2));
+  }
+  regionToIjk(regionRAS, M = _SegmentationLogic.HALO) {
     const inv = invertAffine(this.sdf.sdfIjkToRAS());
     const lo = [
       Infinity,
@@ -5743,13 +7693,24 @@ var SegmentationLogic = class {
       this.rebake();
       return;
     }
+    const region = this.regionToIjk(regionRAS);
+    const core = this.regionToIjk(regionRAS, 0);
+    const reach = 2 * _SegmentationLogic.haloMaxStep();
+    if (!this.regionReflood || [
+      0,
+      1,
+      2
+    ].some((d) => core.hi[d] - core.lo[d] > reach)) {
+      this.refineNow();
+      return;
+    }
     if (this.refineTimer !== void 0) {
       clearTimeout(this.refineTimer);
       this.refineTimer = void 0;
     }
     this.sdf.setPalette(this.palette);
     this.sdf.setModePalette(this.modePalette);
-    this.sdf.refineRegion(this.regionToIjk(regionRAS));
+    this.sdf.refineRegion(region, _SegmentationLogic.haloMaxStep());
     for (const cb of this.redrawCbs) cb();
   }
   refreshOpacity(regionRAS) {
@@ -5763,16 +7724,8 @@ var SegmentationLogic = class {
       for (const cb of this.redrawCbs) cb();
       return;
     }
-    this.sdf.rebakeAttr(false);
+    this.sdf.rebakeAttr(true);
     for (const cb of this.redrawCbs) cb();
-    if (this.attrSettleTimer !== void 0) clearTimeout(this.attrSettleTimer);
-    this.attrSettleTimer = setTimeout(() => {
-      this.attrSettleTimer = void 0;
-      if (this.sdf) {
-        this.sdf.blurAttrOnly();
-        for (const cb of this.redrawCbs) cb();
-      }
-    }, 600);
   }
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits
    *  update it in place. Colour comes from the texture (per-label); the uniform supplies opacity. */
@@ -5803,6 +7756,8 @@ var SegmentationLogic = class {
         attrTexture: this.sdf ? this.sdf.attrTexture() : void 0,
         interfaceMode
       });
+      this.segField.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
+      this.segField.setSmoothingVox(this.sigma);
     }
     return this.segField;
   }
@@ -5811,6 +7766,28 @@ var SegmentationLogic = class {
   setGlobalOpacity(o) {
     this.opacity = o;
     this.segField?.setOpacity(o);
+  }
+  /** Surface smoothing, σ in VOXELS (0 = none) — the RECONSTRUCTION WIDTH of the band-limited label
+   *  field. In sdf/outer mode the rendered surface is the 0.5 level set of p = G_σ * 1(label != 0):
+   *  σ ≈ 0.5 is the grid's Nyquist limit, the most faithful rendition of the labels that is not
+   *  aliased; below that it approaches the trilinear (voxel-faceted) reconstruction and at 0 it
+   *  switches to literal cubes; above it the surface is deliberately modelled, trading ≈ σ²/2R of
+   *  inward motion on convex features for smoothness. In interface ("all") mode σ still only blurs
+   *  the shading distance. In surface (Gaussian presence) mode it is the presence-field Gaussian.
+   *
+   *  Re-bakes immediately (fast path, so a slider stays responsive) and schedules the settle
+   *  refine, exactly as an edit does. */
+  setSmoothing(sigmaVoxels) {
+    this.sigma = Math.max(0, sigmaVoxels);
+    this.sdf?.setSmoothing(this.sigma);
+    this.segField?.setSmoothingVox(this.sigma);
+    this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
+    if (this.sdf) this.sdf.resmooth();
+    else this.baker.bakeInto(this.presenceTex, this.palette, this.sigma);
+    for (const cb of this.redrawCbs) cb();
+  }
+  smoothing() {
+    return this.sigma;
   }
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb) {
@@ -6103,9 +8080,9 @@ function levelGeometry(lab, dims, ijkToRAS) {
   return out;
 }
 var DISC_COLOR = [
-  0.72,
-  0.72,
-  0.66
+  0.96,
+  0.96,
+  0.94
 ];
 var isDisc = (label) => label > 100;
 var CT_WIN = 1400;
@@ -6196,9 +8173,17 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     label: null,
     count: 99
   };
+  let segSigma = 1;
+  const budget = gpuBudget(gpu.adapter);
+  const voxelCap = sdfVoxelCap(budget.bytes, 2);
+  const memNote = [];
+  let coarsenedAny = false;
   const makeRow = (key, lab) => {
     const overlayTex = bakeOverlay(lab);
-    const cap = resampleIsotropic(lab, medDims, medRAS, 256);
+    const cap = resampleIsotropic(lab, medDims, medRAS, 256, voxelCap);
+    const capBytes = JfaSdfBaker.estimateBytes(cap.dims);
+    memNote.push(`${key}: ${cap.dims.join("\xD7")} @ ${cap.vox.toFixed(2)}mm = ${formatBytes(capBytes)}${cap.coarsened ? " (coarsened to fit)" : ""}`);
+    if (cap.coarsened) coarsenedAny = true;
     const editable = new EditableSegmentation(dev, cap.dims, {
       ijkToRAS: cap.ijkToRAS
     });
@@ -6208,6 +8193,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       boundaryMode: outerShell ? "outer" : "all",
       opacity: 1,
       clippable: true,
+      sigmaVoxels: segSigma,
       bandMm: shellOpts?.bandVox !== void 0 ? shellOpts.bandVox * cap.vox : void 0
     });
     const levels = levelGeometry(lab, medDims, medRAS);
@@ -6231,81 +8217,6 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       }
       editable.loadLabelmap(f);
       logic.refineNow();
-    };
-    const capInv = invertAffine2(cap.ijkToRAS);
-    const rebakeShellRegion = (regionRAS) => {
-      const vis = visOf();
-      visKey = vis.join("");
-      const lo = [
-        Infinity,
-        Infinity,
-        Infinity
-      ], hi = [
-        -Infinity,
-        -Infinity,
-        -Infinity
-      ];
-      for (const x of [
-        regionRAS.lo[0],
-        regionRAS.hi[0]
-      ]) for (const y of [
-        regionRAS.lo[1],
-        regionRAS.hi[1]
-      ]) for (const z of [
-        regionRAS.lo[2],
-        regionRAS.hi[2]
-      ]) {
-        const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
-        const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
-        const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
-        for (let d = 0; d < 3; d++) {
-          const v = [
-            i,
-            j,
-            k
-          ][d];
-          if (v < lo[d]) lo[d] = v;
-          if (v > hi[d]) hi[d] = v;
-        }
-      }
-      const rlo = [
-        0,
-        0,
-        0
-      ], rhi = [
-        0,
-        0,
-        0
-      ];
-      for (let d = 0; d < 3; d++) {
-        rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
-        rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
-        if (rhi[d] <= rlo[d]) return;
-      }
-      const [sx, sy, sz] = [
-        rhi[0] - rlo[0],
-        rhi[1] - rlo[1],
-        rhi[2] - rlo[2]
-      ];
-      const out = new Uint32Array(sx * sy * sz);
-      const [dx, dy] = [
-        cap.dims[0],
-        cap.dims[1]
-      ];
-      let w = 0;
-      for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
-        let r = (z * dy + y) * dx + rlo[0];
-        for (let x = 0; x < sx; x++, r++, w++) {
-          const l = cap.lab[r];
-          if (vis[l]) out[w] = l;
-        }
-      }
-      editable.writeLabelRegion(out, rlo, [
-        sx,
-        sy,
-        sz
-      ]);
-      logic.rebakeShellRegion(regionRAS);
     };
     if (outerShell) rebakeShellFull();
     else {
@@ -6333,8 +8244,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       applyShellVisibility(regionRAS) {
         if (!outerShell) return false;
         if (visOf().join("") === visKey) return false;
-        if (regionRAS) rebakeShellRegion(regionRAS);
-        else rebakeShellFull();
+        rebakeShellFull();
         return true;
       },
       destroy() {
@@ -6370,8 +8280,12 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       rowSp,
       rowRef
     ],
+    // The 2D overlay follows the SAME per-method control as the 3D surface: "hide SPINEPS" that
+    // leaves SPINEPS labels painted over the CT is not hiding SPINEPS. 0.5 is the overlay's normal
+    // strength over the CT; the control scales it, so the tri-state reads the same in both places.
     bindRowSlice(key) {
       slice.setTextures(ctField.volumeTexture(), rowOf(key).overlayTex);
+      slice.setOverlayOpacity(0.5 * methodOp[key]);
     },
     upgraded: Promise.resolve(),
     setMethodOpacity(key, o) {
@@ -6414,7 +8328,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           }
           if (!changed.length) continue;
           let bbox = null;
-          if (changed.length <= row.levels.size / 2) {
+          if (changed.length <= 6 && extentState.count <= 1) {
             const lo2 = [
               Infinity,
               Infinity,
@@ -6526,6 +8440,22 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       this.setExtent(extentState.label, extentState.count);
     },
     discOpacity: () => discOp,
+    memory: () => ({
+      budgetBytes: budget.bytes,
+      why: budget.why,
+      rows: [
+        ...memNote
+      ],
+      coarsened: coarsenedAny
+    }),
+    setSegSmoothing(sigmaVoxels) {
+      segSigma = Math.max(0, sigmaVoxels);
+      rowSp.logic.setSmoothing(segSigma);
+      rowRef.logic.setSmoothing(segSigma);
+      rowSp.scene.syncUniforms();
+      rowRef.scene.syncUniforms();
+    },
+    segSmoothing: () => segSigma,
     destroy() {
       rowSp.destroy();
       rowRef.destroy();
@@ -6589,6 +8519,24 @@ async function main() {
     return;
   }
   const gpu = await initDevice();
+  let budgetInUse = 75e7;
+  gpu.device.lost.then((info) => {
+    if (info.reason === "destroyed") return;
+    status(`GPU device lost (${info.reason}) \u2014 the views stopped updating.`, true);
+    const warn = document.createElement("div");
+    warn.style.cssText = "position:fixed;inset:auto 0 0 0;padding:10px 14px;background:#3a1216;color:#ffd7da;font:13px/1.4 system-ui;z-index:9999;border-top:1px solid #6b2630;display:flex;gap:12px;align-items:center";
+    const txt = document.createElement("span");
+    txt.textContent = "The GPU dropped this page" + (info.message ? ` (${info.message})` : "") + ". Running out of GPU memory is the usual cause.";
+    const btn = document.createElement("button");
+    btn.textContent = "Reload at lower resolution";
+    btn.style.cssText = "padding:5px 10px;border-radius:6px;border:1px solid #8a3340;background:#5a1d24;color:#ffd7da;cursor:pointer";
+    btn.addEventListener("click", () => {
+      reduceBudget(budgetInUse);
+      location.reload();
+    });
+    warn.append(txt, btn);
+    document.body.appendChild(warn);
+  });
   const preferred = navigator.gpu.getPreferredCanvasFormat();
   const srgb = preferred + "-srgb";
   status("loading case list\u2026");
@@ -6627,6 +8575,12 @@ async function main() {
     shell: PARAMS.get("shell") === "all" ? "all" : "outer",
     bandVox: PARAMS.get("band") ? Number(PARAMS.get("band")) : void 0
   });
+  {
+    const m = sc.memory();
+    budgetInUse = m.budgetBytes;
+    console.info(`spine-compare GPU budget: ${(m.budgetBytes / 1e9).toFixed(2)} GB (${m.why})
+  ` + m.rows.join("\n  "));
+  }
   sc.upgraded.then(() => {
     drawAll();
     status(`${coll}/${pid} \u2014 full-res CT loaded`);
@@ -6906,14 +8860,14 @@ async function main() {
     ]
   ];
   const SLICE_MARGIN = 1.5;
-  const frameCamera = (center, radius) => {
+  const frameCamera = (center, radius, keepDistance = false) => {
     const d = [
       camera.focalPoint[0] - camera.position[0],
       camera.focalPoint[1] - camera.position[1],
       camera.focalPoint[2] - camera.position[2]
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
-    const dist = radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
+    const dist = keepDistance ? len : radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
     camera.focalPoint = [
       ...center
     ];
@@ -6923,9 +8877,28 @@ async function main() {
       center[2] - d[2] / len * dist
     ];
   };
-  const applyFocus = () => {
+  const emptyNote = {};
+  for (const k of keys) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    cv[`c-${k}-threeD`].parentElement.appendChild(d);
+    emptyNote[k] = d;
+  }
+  const updateEmptyNotes = () => {
+    for (const k of keys) {
+      const none = sc.visibleLevels(k).length === 0;
+      emptyNote[k].classList.toggle("on", none);
+      if (none) {
+        const lvl = currentLevel == null ? "" : ` at ${LEVEL_NAME[currentLevel] ?? currentLevel}`;
+        const span = extent === 0 ? "" : ` \xB1${extent}`;
+        emptyNote[k].textContent = `${k === "spineps" ? "SPINEPS" : "Reference"} has no label${lvl}${span}`;
+      }
+    }
+  };
+  const applyFocus = (refit = false) => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
+    updateEmptyNotes();
     if (box) {
       const c = [
         (box.lo[0] + box.hi[0]) / 2,
@@ -6937,41 +8910,69 @@ async function main() {
         box.hi[1] - box.lo[1],
         box.hi[2] - box.lo[2]
       ];
-      const fov = (a, b) => [
-        Math.max(30, ext[a] * SLICE_MARGIN),
-        Math.max(30, ext[b] * SLICE_MARGIN)
-      ];
-      const [axU, axV] = fov(0, 1);
-      sc.slice.setMirrorFrame("axial", c, axU, axV);
-      const [coU, coV] = fov(0, 2);
-      sc.slice.setMirrorFrame("coronal", c, coU, coV);
-      const [saU, saV] = fov(1, 2);
-      sc.slice.setMirrorFrame("sagittal", c, saU, saV);
-      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15);
-    } else {
+      if (refit) {
+        const fov = (a, b) => [
+          Math.max(30, ext[a] * SLICE_MARGIN),
+          Math.max(30, ext[b] * SLICE_MARGIN)
+        ];
+        const [axU, axV] = fov(0, 1);
+        sc.slice.setMirrorFrame("axial", c, axU, axV);
+        const [coU, coV] = fov(0, 2);
+        sc.slice.setMirrorFrame("coronal", c, coU, coV);
+        const [saU, saV] = fov(1, 2);
+        sc.slice.setMirrorFrame("sagittal", c, saU, saV);
+      } else {
+        for (const o of ORIENTS) sc.slice.recenter(o, c);
+      }
+      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15, !refit);
+    } else if (refit) {
       for (const o of ORIENTS) sc.slice.resetView(o);
       frameCamera(sc.center, sc.radius);
     }
     requestDraw();
   };
-  for (const [id, n] of extents) el(id)?.addEventListener("click", () => {
-    extent = n;
-    applyFocus();
-  });
+  const nearestLevel = (p) => {
+    let best = null, bd = Infinity;
+    for (const row of sc.rows) {
+      for (const [l, g] of row.levels) {
+        if (isDisc(l)) continue;
+        const d = Math.hypot(g.centroid[0] - p[0], g.centroid[1] - p[1], g.centroid[2] - p[2]);
+        if (d < bd) {
+          bd = d;
+          best = l;
+        }
+      }
+    }
+    return best;
+  };
+  for (const [id, n] of extents) {
+    el(id)?.addEventListener("click", () => {
+      extent = n;
+      if (n < 99 && currentLevel == null) {
+        const l = nearestLevel(xhair.ras ?? sc.center);
+        if (l != null) {
+          selectLevel(l, true);
+          return;
+        }
+      }
+      applyFocus(true);
+    });
+  }
   const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [
     s,
     Number(n)
   ]));
   const strip = el("levels");
-  const selectLevel = (label) => {
+  const selectLevel = (label, refit = false) => {
     currentLevel = label;
-    if (extent >= 99) extent = 0;
+    const modeChanged = extent >= 99;
+    if (modeChanged) extent = 0;
     const g = sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label);
     if (g) {
       xhair.set(g.centroid);
       jumpAll(g.centroid);
     }
-    applyFocus();
+    applyFocus(refit || modeChanged);
     for (const bb of strip.querySelectorAll("button")) {
       bb.classList.toggle("sel", bb.dataset.label === String(label));
     }
@@ -7035,20 +9036,20 @@ async function main() {
   });
   const controls = [
     {
-      label: "SPINEPS shell",
+      label: "SPINEPS segmentation",
       getOpacity: () => sc.methodOpacity("spineps"),
       setOpacity: (o) => {
         sc.setMethodOpacity("spineps", o);
-        drawAll3d();
+        requestDraw();
       },
       color: METHOD_COLORS.spineps
     },
     {
-      label: "Reference shell",
+      label: "Reference segmentation",
       getOpacity: () => sc.methodOpacity("ref"),
       setOpacity: (o) => {
         sc.setMethodOpacity("ref", o);
-        drawAll3d();
+        requestDraw();
       },
       color: METHOD_COLORS.ref
     },
@@ -7072,11 +9073,27 @@ async function main() {
         sc.setDiscOpacity(o);
         requestDraw();
       },
-      color: [
-        0.72,
-        0.72,
-        0.66
-      ]
+      color: DISC_COLOR
+    },
+    // Surface smoothing — the reconstruction width of the band-limited label field the surface is
+    // the 0.5 level set of. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the surface follows the labelmap voxel for voxel, which is what you need to see
+    // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
+    // up turns the same labels into a modelled surface, which is what you need when several
+    // vertebrae are on screen and the question is which bone is which.
+    {
+      label: "Surface smoothing",
+      slider: {
+        min: 0,
+        max: 2,
+        step: 0.25,
+        get: () => sc.segSmoothing(),
+        set: (v) => {
+          sc.setSegSmoothing(v);
+          drawAll3d();
+        },
+        format: (v) => v > 0 ? `\u03C3 ${v.toFixed(2)} vox` : "voxels"
+      }
     }
   ];
   installChrome({
@@ -7084,7 +9101,9 @@ async function main() {
     anchor: cv["c-ref-threeD"].parentElement ?? void 0
   });
   const cmp = entry?.compare;
-  el("info").textContent = `${coll}/${pid} \xB7 ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree \xB7 ${cmp.n_shifted} shifted \xB7 mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}`;
+  const mem = sc.memory();
+  const memNote = budgetWasReduced() ? ` \xB7 reduced GPU budget after a device loss \u2014 3D surfaces at ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "lower res"}` : mem.coarsened ? ` \xB7 3D surfaces coarsened to ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "fit"} to fit GPU memory` : "";
+  el("info").textContent = `${coll}/${pid} \xB7 ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree \xB7 ${cmp.n_shifted} shifted \xB7 mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}${memNote}`;
   const caseBtn = el("case-btn");
   const panel = el("case-panel");
   const listEl = el("case-list");
@@ -7165,8 +9184,35 @@ async function main() {
       ],
       focalPoint: [
         ...camera.focalPoint
-      ]
+      ],
+      viewUp: [
+        ...camera.viewUp
+      ],
+      viewAngle: camera.viewAngle
     }),
+    setCamera: (p, f, up, va) => {
+      camera.position = [
+        p[0],
+        p[1],
+        p[2]
+      ];
+      camera.focalPoint = [
+        f[0],
+        f[1],
+        f[2]
+      ];
+      if (up) camera.viewUp = [
+        up[0],
+        up[1],
+        up[2]
+      ];
+      if (typeof va === "number") camera.viewAngle = va;
+      drawAll3d();
+    },
+    // Raw scene handles, for bisecting a render artifact from the console/CDP without going
+    // through the UI (which refits the camera every time the extent changes).
+    scenes: () => sc.rows.map((r) => r.scene),
+    redraw: () => drawAll3d(),
     levels: (k) => [
       ...rowOf(k).levels.values()
     ].filter((g) => g.label < 100).map((g) => ({
@@ -7183,18 +9229,34 @@ async function main() {
       return g?.centroid ?? null;
     },
     zoom: (o) => sc.slice.zoom(o),
+    zoomAbout: (o, f) => {
+      const c = cv[`c-ref-${o}`];
+      sc.slice.zoomAbout(o, f, 0.5, 0.5, c.width || 1, c.height || 1);
+      requestDraw();
+    },
     visibleLevels: (k) => sc.visibleLevels(k),
     currentLevel: () => currentLevel,
     stepLevel: (d) => stepLevel(d),
     extent: () => extent,
     setExtent: (n) => {
       extent = n;
-      applyFocus();
+      applyFocus(true);
     },
     methodOpacity: (k) => sc.methodOpacity(k),
     setMethodOpacity: (k, o) => {
       sc.setMethodOpacity(k, o);
+      requestDraw();
+    },
+    smoothing: () => sc.segSmoothing(),
+    setSmoothing: (v) => {
+      sc.setSegSmoothing(v);
       drawAll3d();
+    },
+    discOpacity: () => sc.discOpacity(),
+    mem: () => sc.memory(),
+    setDiscOpacity: (v) => {
+      sc.setDiscOpacity(v);
+      requestDraw();
     }
   };
 }

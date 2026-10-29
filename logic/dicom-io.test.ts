@@ -8,6 +8,10 @@ import dcmjs from "./dcmjs.ts";
 import { dicomIO, setDicomLibrary } from "./dicom-io.ts";
 
 const ALLOWED = new Set(["logic/dicom-io.ts", "logic/dcmjs.ts", "logic/dcmjs-version.ts"]);
+// Steve Pieper's MRCOM module (2026-10-28) reaches dcmjs through its own seam (logic/mrcom/dcmjs.ts) and needs the raw
+// library for its private block; his shared test fixture builds files with it. Albula's code still goes through
+// logic/dicom-io.ts. The same library either way: logic/dcmjs-version.ts pins the one build.
+const ALLOWED_STEVE = [/^logic\/mrcom\//, /^logic\/readers\/synthetic-dicom\.ts$/];
 // The library's own names. A call to any of them outside the module is a second place.
 const REACHES_IN = /\bloadDcmjs\s*\(|\.data\.(DicomMessage|DicomMetaDictionary|datasetToDict|DicomDict|Colors)\b|\.normalizers\.|\.derivations\.|\bDicomMetaDictionary\.|\bDicomMessage\./;
 
@@ -22,7 +26,7 @@ Deno.test("no application file reaches into dcmjs except logic/dicom-io.ts", asy
       if (e.isDirectory) { if (!["node_modules", "vendor", "harness", "scratchpad"].includes(e.name)) walk(p); continue; }
       if (!e.name.endsWith(".ts") || /\.(test|bench|gpu-bench|engine-bench)\.ts$/.test(e.name)) continue;
       const rel = p.slice(root.length + 1);
-      if (ALLOWED.has(rel)) continue;
+      if (ALLOWED.has(rel) || ALLOWED_STEVE.some((r) => r.test(rel))) continue;
       Deno.readTextFileSync(p).split("\n").forEach((line, i) => {
         const t = line.trimStart();
         if (t.startsWith("//") || t.startsWith("*")) return;
@@ -88,4 +92,24 @@ Deno.test("DS numbers inside an object-form sequence keep their exponent too", a
   const item = Array.isArray(sq) ? sq[0] : sq;
   const pm = Array.isArray(item.PixelMeasuresSequence) ? item.PixelMeasuresSequence[0] : item.PixelMeasuresSequence;
   assertEquals(Math.abs(Number(pm.SliceThickness) - 3.5163338899999997e-10) < 1e-18, true, `read ${pm.SliceThickness}`);
+});
+
+// PRIVATE TAGS IN THE ODD REPEATING GROUPS KEEP THEIR NUMBER (logic/dicom-io.ts, naturalizeKeepingOdd; 2026-10-28). dcmjs
+// from 0.50 names (6001,0010) and (6000,0010) both OverlayRows, so one value was lost, and GE's (7FD1,0010) became
+// RETIRED_VariablePixelData, written back as (7F00,0010).
+Deno.test("odd groups in the curve, overlay and pixel-data ranges keep their number; the real overlay keeps its value", async () => {
+  setDicomLibrary(dcmjs);
+  const io = await dicomIO();
+  const nat = io.naturalize({
+    "00080060": { vr: "CS", Value: ["CT"] }, "60000010": { vr: "US", Value: [512] }, "60010010": { vr: "LO", Value: ["VENDOR B"] },
+    "50010010": { vr: "LO", Value: ["VENDOR A"] }, "7FD10010": { vr: "LO", Value: ["GEIIS"] },
+    "00081115": { vr: "SQ", Value: [{ "0020000E": { vr: "UI", Value: ["1.2.3"] }, "7FD10010": { vr: "LO", Value: ["IN AN ITEM"] } }] },
+  });
+  assertEquals(nat.OverlayRows, 512, "the real overlay's value");
+  assertEquals([nat["60010010"], nat["50010010"], nat["7FD10010"]], ["VENDOR B", "VENDOR A", "GEIIS"]);
+  assertEquals(Object.keys(nat).some((k) => /^RETIRED_(NumberOfPoints|VariablePixelData)$/.test(k)), false);
+  const item = (Array.isArray(nat.ReferencedSeriesSequence) ? nat.ReferencedSeriesSequence[0] : nat.ReferencedSeriesSequence) as Record<string, unknown>;
+  assertEquals([item.SeriesInstanceUID, item["7FD10010"]], ["1.2.3", "IN AN ITEM"]);
+  // Written back: the numbered keys are left out, as 0.41 left them; nothing lands in group 7F00.
+  assertEquals(Object.keys(io.denaturalize(nat)).filter((t) => t.startsWith("7F") || t.startsWith("5001") || t.startsWith("6001")), []);
 });

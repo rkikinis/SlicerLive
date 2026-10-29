@@ -17,7 +17,7 @@
 // database already has them, and the tool says so instead of making a duplicate. Each kind of object also carries its
 // writer's rule number (IMAGE_RULE, DWI_RULE, MASK_RULE): when a fix changes what an object holds, bumping its rule gives
 // the corrected object new series and instance UIDs under the SAME study, and the tool can then remove the older one
-// (--replace-older). The study and frame-of-reference UIDs never carry a rule. PatientName "<dataset name> <subject>", PatientID "<accession>-<subject>". The dataset's
+// (--replace-older). The study UID never carries a rule; the frame of reference has its own (FRAME_RULE). PatientName "<dataset name> <subject>", PatientID "<accession>-<subject>". The dataset's
 // attribution goes where DICOM keeps it for public data (the Clinical Trial Subject module: sponsor, protocol, subject)
 // and into PatientComments (DOI, license, authors). Sex and age come from participants.tsv when it has them.
 // Nothing is invented: what BIDS does not say is left empty, as the standard allows for Type 2 attributes -- including
@@ -46,6 +46,15 @@ export const BIDS_IMPORT_VERSION = 2;
  *  invented study dates, the sidecar's who-and-where left out, ISOTROPIC for a direction-less b > 0, UUID-form UIDs. */
 export const IMAGE_RULE = 2;
 export const MASK_RULE = 3;
+/** THE FRAME OF REFERENCE (Ron, 2026-10-26: "fix"). Rule 1: one for every series of a subject's session -- which tells
+ *  every DICOM reader that the scans share the scanner's coordinates. BIDS does not say that: a session folder can hold
+ *  scans made at separate sittings (HCP-type data: the T1 and the diffusion scans 5-42 mm apart, the person off the table
+ *  between them). Rule 2: each series its own frame of reference, as nothing in BIDS states otherwise. The session's first
+ *  T1 by file name (the one its masks are drawn on, when it is the only T1; with several, no mask is drawn) keeps the frame UID rule 1 gave it: its content is unchanged, so it and everything
+ *  drawn on it keep their UIDs. Every other series' UIDs carry the rule (`frameRole`), so its corrected object is new and
+ *  --replace-older removes the old one. A kind of an extension asks for its series' frame (BidsKindContext.frameOf). */
+export const FRAME_RULE = 2;
+const frameRole = `frame rule ${FRAME_RULE}`;
 
 /** Sidecar fields NOT kept in an object's private block (a kind of an extension keeps its sidecar there), as they are not written for the anatomical series
  *  either: who and where, not how the scan was made (critic 2026-09-28, finding 2). */
@@ -260,10 +269,12 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
   const uid = (...role: string[]) => derivedUid(key, sub, ses ?? "", ...role);
   const objects: BuiltObject[] = [];
   let seriesNumber = 1;
+  // Each series' own frame of reference (FRAME_RULE 2): from its source file's name, like its other UIDs.
+  const frameOf = (stem: string) => uid(stem, "frame of reference");
   const kindCtx: BidsKindContext = {
     dir, files: (folder) => files(`${dir}/${folder}`), readText,
     study: { patientName, patientID, studyInstanceUID: studyUID, frameOfReferenceUID: forUID, studyDescription, comments, extra, studyDate, studyTime, newStudy },
-    uid, nextSeriesNumber: () => seriesNumber++, sidecarLeftOut: SIDECAR_LEFT_OUT, options: opts as unknown as Record<string, unknown>, skip, say,
+    uid, frameOf, frameRule: FRAME_RULE, nextSeriesNumber: () => seriesNumber++, sidecarLeftOut: SIDECAR_LEFT_OUT, options: opts as unknown as Record<string, unknown>, skip, say,
   };
   // Checked before anything is built (critic finding 8), each kind its own conditions.
   for (const k of bidsKinds()) await k.check?.(kindCtx);
@@ -271,7 +282,10 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
   // ANATOMICAL SCANS -> MR image series, one file per slice.
   const anat = `${dir}/anat`;
   const t1s: { volume: Volume; instances: ArrayBuffer[]; seriesUID: string; file: string }[] = [];
-  for (const e of await files(anat)) {
+  const anatFiles = await files(anat);
+  // THE SESSION'S FIRST T1 keeps the session's frame and its UIDs (FRAME_RULE); every other anatomical series has its own.
+  const firstT1 = anatFiles.find((e) => /_T1w\.nii(\.gz)?$/.test(e));
+  for (const e of anatFiles) {
     const m = /^(.*_(T1w|T2w|FLAIR|PDw|T2starw))\.nii(\.gz)?$/.exec(e);
     if (!m) continue;
     say(`reading ${e}`);
@@ -281,11 +295,12 @@ export async function buildBidsSubject(ds: BidsDataset, subject: string, session
       const v = vols[0];
       const side = JSON.parse((await readText(`${anat}/${m[1]}.json`)) ?? "{}");
       const desc = String(side.SeriesDescription ?? m[2]).slice(0, 64);
-      const sops = await Promise.all(Array.from({ length: v.dims[2] }, (_, k) => uid(m[1], `image rule ${IMAGE_RULE}`, "slice", String(k))));
+      const keeps = e === firstT1, rule = keeps ? [`image rule ${IMAGE_RULE}`] : [`image rule ${IMAGE_RULE}`, frameRole];
+      const sops = await Promise.all(Array.from({ length: v.dims[2] }, (_, k) => uid(m[1], ...rule, "slice", String(k))));
       const exp = await volumeToDicomSeries(v.data as ArrayLike<number>, v.dims, v.ijkToRAS, [], {
-        subject: { patientName, patientID, comments, studyDescription, modality: "MR", studyInstanceUID: studyUID, frameOfReferenceUID: forUID, studyDate, studyTime, extra: { ...extra, ...sidecarToDicom(side) } },
+        subject: { patientName, patientID, comments, studyDescription, modality: "MR", studyInstanceUID: studyUID, frameOfReferenceUID: keeps ? forUID : await frameOf(m[1]), studyDate, studyTime, extra: { ...extra, ...sidecarToDicom(side) } },
         seriesDescription: desc, seriesNumber: seriesNumber++,
-        uids: { series: await uid(m[1], `image rule ${IMAGE_RULE}`, "series"), sops },
+        uids: { series: await uid(m[1], ...rule, "series"), sops },
         // Truly fractional values (a resampled float NIfTI) become 16-bit stored numbers with one Rescale Slope, the
         // rounding stated in the series (export-dicom-image.ts quantizeTo16; Ron, 2026-10-07). Whole numbers, and whole
         // numbers times a scale, are written exactly as before.

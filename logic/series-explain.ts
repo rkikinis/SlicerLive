@@ -196,3 +196,18 @@ export function explainSeries(desc: string, count: number, head: DicomHead | nul
   if (by.length) lines.push(`Made ${by.join(" · ")}.`);
   return lines.join("\n");
 }
+
+/**
+ * A DIFFUSION SCAN, FOR SOMEONE WITHOUT TECHNICAL BACKGROUND (Ron, 2026-10-27: "how would you describe the scan to a lay
+ * person?"; his "yes" to this wording; the mockup docs/mockups/tract-sets-in-browser-2026-10-27.html in the workspace).
+ * The DICOM browser's title for a scan that has fiber tracts made from it, and the first lines of its tooltip; the
+ * scanner's own name follows in gray.
+ */
+export const DIFFUSION_SCAN = {
+  title: "Diffusion MRI — nerve fiber scan",
+  tip: (images: number, scannerName: string) =>
+    "An MRI scan that measures how water moves in the brain. Water moves most easily along nerve fibers, so this scan " +
+    "shows which way the fibers run, and the brain's nerve fiber pathways can be traced from it." +
+    (images > 1 ? ` ${images} images, each taken with the movement measured in a different direction.` : "") +
+    (scannerName ? ` The scanner called it ${scannerName}.` : ""),
+} as const;

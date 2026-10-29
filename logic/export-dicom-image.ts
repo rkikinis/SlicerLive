@@ -422,7 +422,10 @@ export async function volumeToDicomSeries(
   // WHAT THE KIND OF IMAGE REQUIRES, present and empty when nothing says it (dciodvfy on CTHead.nrrd written as a CT,
   // 2026-10-21): Laterality (General Series, Type 2C), PatientPosition (Type 2C for CT and MR) and, for a CT, the kVp
   // (CT Image, Type 2). A file does not say them; empty is the standard's "unknown".
-  for (const k of ["Laterality", ...(modality === "CT" || modality === "MR" ? ["PatientPosition"] : []), ...(modality === "CT" ? ["KVP"] : [])]) {
+  // Laterality only when no body part is named: with one named (BRAIN, unpaired) the standard's condition is unsatisfied
+  // and the attribute must be ABSENT -- the BIDS import leaves it out for that reason (logic/import/bids.ts), and this
+  // rule put it back for every T1 whose sidecar names its body part (dciodvfy on OpenNeuro ds005123, 2026-10-22).
+  for (const k of [...("BodyPartExamined" in base ? [] : ["Laterality"]), ...(modality === "CT" || modality === "MR" ? ["PatientPosition"] : []), ...(modality === "CT" ? ["KVP"] : [])]) {
     if (!(k in base)) base[k] = "";
   }
   // The Clinical Trial Subject module, when the source carries one (a public dataset's attribution): its Type 2 too.

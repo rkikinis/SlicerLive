@@ -6,7 +6,8 @@ import { serveDir } from "jsr:@std/http@1/file-server";
 import { handleSettingsRequest } from "./settings-file.ts";
 import { handleHaversackRequest, handleOpenRequest } from "./haversack-proxy.ts";
 import { handleDbRequest, registeredDatabases } from "./db-serve.ts";
-import { handleJobsRequest, startExtensionJobs } from "./extension-jobs.ts";
+import { startSharing } from "./sharing.ts";
+import { handleJobsRequest, handleJobsRunRequest, startExtensionJobs } from "./extension-jobs.ts";
 import { handleHeadsetRequest } from "./headset.ts";
 import { handleLogRequest, startSessionLog } from "./session-log.ts";
 import { handleWindowRequest } from "./window-frame.ts";
@@ -89,6 +90,8 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             listening = addr.port; (self as unknown as Worker).postMessage({ port: addr.port });
             // The extensions' import-time work (extension-jobs.ts): after imports, and once over every database.
             startExtensionJobs({ port: addr.port, databases: () => registeredDatabases(root), galleryRoot: root });   // { id, path, exists }
+            // Sharing this Mac's databases with its other Macs, when switched on and on an allowed network (sharing.ts).
+            startSharing(root);
           },
         },
         // Three dynamic routes; everything else is the static gallery.
@@ -114,6 +117,7 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             (await handlePictureRequest(req, root)) ??
             (await handleModelRequest(req)) ??
             (await handleHeadsetRequest(req)) ??
+            (await handleJobsRunRequest(req)) ??
             handleJobsRequest(req) ??
             await serveCode(req, root),
       );

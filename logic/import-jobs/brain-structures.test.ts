@@ -65,7 +65,7 @@ Deno.test("one brain per study: a plain T1 before one after contrast or a subtra
   assertEquals(studyOrder(d, n)[0].seriesUID, "plain");
 });
 
-Deno.test("FastSurfer's grid, as haversack 0.15.0 conforms (voxel floor 0.7 mm, the cube from the field of view, a large field on the host); a cube past the largest known to work on the card is refused", async () => {
+Deno.test("FastSurfer's grid, as haversack 0.16.0 conforms (voxel floor 0.7 mm, the cube from the field of view, a large field on the host); a cube past the largest known to work on the card is refused", async () => {
   const { conformedGrid, CONFORM_FOLLOWS } = await import("./brain-structures.ts");
   const { HAVERSACK_VERSION } = await import("../../desktop/haversack-proxy.ts");
   // The model follows one haversack version; when the pin moves, this fails until the conform is read again.

@@ -21,10 +21,11 @@ const SHADER = /* wgsl */ `
 struct U {
   p2t : mat4x4<f32>,     // RAS -> texture[0,1] (folds in ijkToRAS: rotation + anisotropy)
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
-  uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
+  uvec : vec4<f32>,      // xyz: RAS vector spanning the view width (isotropic mm); w: segmentation
+                         //      outline width in SCREEN PIXELS (see setOutlineWidth)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, bgLutMode (0 gray, 1 LUT row 0)
+  size : vec4<f32>,      // sizeX, sizeY, label LAYERS of overlay A (0 = the rgba overlay; Steve, 2026-10), bgLutMode (0 gray, 1 LUT row 0, 2 see setLut)
   // ── Slicer slice-composite layers (vtkMRMLSliceCompositeNode): a FOREGROUND volume blended over the
   //    background with its own geometry, W/L and LUT, and a LABEL volume coloured through a colour table.
   p2tFg : mat4x4<f32>,   // RAS -> foreground texture[0,1]
@@ -73,23 +74,35 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
-/** Overlay A at a RAS point: label mode reads its own labelmap through its own matrix, otherwise
- *  the pre-colored rgba volume through the background's. 0 outside that volume. */
-fn ovA_at(ras : vec3<f32>) -> vec4<f32> {
+/** The overlay colour of ONE label layer at a texture coordinate.
+ *
+ *  size.z is the number of label layers (0 = the pre-coloured rgba overlay, which is one layer by
+ *  definition). The layers are stacked along z in a single label texture — depth = nz * layers —
+ *  because DICOM SEG segments may overlap and one label per voxel cannot hold that: segments that
+ *  overlap are decoded into different layers and composited here, the way OHIF composites one
+ *  representation per layer. */
+fn ov_layer(t : vec3<f32>, layer : i32) -> vec4<f32> {
   if (u.size.z > 0.5) {
-    let t = (u.p2tSegA * vec4<f32>(ras, 1.0)).xyz;
-    if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-    let d = vec3<f32>(textureDimensions(t_labels));
+    let full = vec3<f32>(textureDimensions(t_labels));
+    let nz = full.z / max(u.size.z, 1.0);                    // depth of ONE layer
+    let d = vec3<f32>(full.x, full.y, nz);
     let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
-    let lab = i32(textureLoad(t_labels, vi, 0).r);
+    let lab = i32(textureLoad(t_labels, vec3<i32>(vi.x, vi.y, vi.z + layer * i32(nz)), 0).r);
     if (lab == 0) { return vec4<f32>(0.0); }
     return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
   }
-  let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
-  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  if (layer > 0) { return vec4<f32>(0.0); }
   return textureSampleLevel(t_overlay, s_nn, t, 0.0);
 }
-/** Overlay B: label mode only — the rgba form was never more than one binding. */
+/** Overlay A at a RAS point, one layer: label mode reads its own labelmap through its own matrix (p2tSegA: a
+ *  segmentation on another grid than the background), the pre-colored rgba volume through the background's. 0 outside. */
+fn ovA_at(ras : vec3<f32>, layer : i32) -> vec4<f32> {
+  var t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
+  if (u.size.z > 0.5) { t = (u.p2tSegA * vec4<f32>(ras, 1.0)).xyz; }
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  return ov_layer(t, layer);
+}
+/** Overlay B: label mode only, one layer -- the rgba form was never more than one binding. */
 fn ovB_at(ras : vec3<f32>) -> vec4<f32> {
   if (u.segParams.x < 0.5) { return vec4<f32>(0.0); }
   let t = (u.p2tSegB * vec4<f32>(ras, 1.0)).xyz;
@@ -100,23 +113,90 @@ fn ovB_at(ras : vec3<f32>) -> vec4<f32> {
   if (lab == 0) { return vec4<f32>(0.0); }
   return textureLoad(t_paletteB, vec2<i32>(lab, 1), 0);
 }
-/** Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary OUTLINE
- *  with independent opacities. The outline is screen-space (constant pixel width under zoom), drawn
- *  in the segment's own color along its inner edge, at both label<->label and label<->background
- *  boundaries -- hence the four neighbor samples the caller passes in. */
-fn seg_alpha(c : vec4<f32>, n0 : vec4<f32>, n1 : vec4<f32>, n2 : vec4<f32>, n3 : vec4<f32>, fillO : f32, outO : f32) -> f32 {
-  let fillA = clamp(c.a * fillO, 0.0, 1.0);
-  var outA = 0.0;
-  if (outO > 0.0) {
-    let e = max(max(distance(n0.rgb, c.rgb) + abs(n0.a - c.a), distance(n1.rgb, c.rgb) + abs(n1.a - c.a)),
-                max(distance(n2.rgb, c.rgb) + abs(n2.a - c.a), distance(n3.rgb, c.rgb) + abs(n3.a - c.a)));
-    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
-    outA = clamp(c.a * outO * edge, 0.0, 1.0);
+/** THE SEGMENTATION OVERLAYS AT ONE POINT, as premultiplied color and alpha: the fill, then the contours over it.
+ *  Steve's per-layer compositing (an overlap more opaque, in the blend of its colors; each layer's own contour by exact
+ *  comparison on eight neighbors, uvec.w pixels wide), over Albula's two overlays (A, any number of layers, on its own
+ *  grid; B, one layer, on its own grid with its own opacities). One function for the main pass and the overlay-only pass,
+ *  so the two draw the same thing. */
+fn seg_over(ras : vec3<f32>) -> vec4<f32> {
+  // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
+  // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
+  // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
+  // inner edge — at both label↔label and label↔background boundaries.
+  //
+  // Each label layer composites over the one below, so a voxel claimed by two segments comes out
+  // MORE OPAQUE than either alone (1-(1-a1)(1-a2)) and in the blend of their colours — which is
+  // how an overlap reads as an overlap rather than as whichever segment was decoded last. Each
+  // layer is also edge-tested on its OWN labels, so every segment keeps its own contour through
+  // the region it shares; the contours blend only where they coincide.
+  let nL = max(i32(u.size.z), 1);
+  let w = max(u.uvec.w, 1.0);
+  let du = u.uvec.xyz / u.size.x * w;     // w px right, in RAS
+  let dv = u.vvec.xyz / u.size.y * w;     // w px up
+  let dd = 0.70710678;                    // diagonals at the same distance
+  var fillC = vec3<f32>(0.0); var fillA = 0.0;   // premultiplied
+  var edgeC = vec3<f32>(0.0); var edgeA = 0.0;
+  for (var l = 0; l < nL; l = l + 1) {
+    let ov = ovA_at(ras, l);
+    if (ov.a <= 0.0) { continue; }                 // segment hidden, or no label in this layer
+    // The display alpha is folded in PER LAYER, before compositing — that is what makes an
+    // overlap more opaque: one layer gives exactly a, two give 1-(1-a)^2.
+    let fa = clamp(ov.a * u.params.z, 0.0, 1.0);
+    fillC = ov.rgb * fa + fillC * (1.0 - fa);
+    fillA = fa + fillA * (1.0 - fa);
+    if (u.params.w <= 0.0) { continue; }
+    // The contour is the band of voxels within w SCREEN pixels of a boundary, so it keeps the
+    // same visual weight at every zoom. Eight neighbours, not four: at four, a boundary running
+    // diagonally is only sampled across its corners and the line thins and breaks up as w grows.
+    // A neighbour is a DIFFERENT segment iff its overlay texel differs at all. The overlay is
+    // sampled NEAREST from a crisp per-voxel bake, so every texel is an exact palette entry and
+    // an exact comparison is the label test: two touching segments whose colours happen to be
+    // close still get a boundary, where a distance threshold used to merge them into one blob.
+    // A hidden segment (palette alpha 0) differs from a visible neighbour, so the visible one
+    // keeps its contour there; and its own voxels have ov.a = 0, so it draws nothing itself.
+    let n0 = ovA_at(ras + du, l); let n1 = ovA_at(ras - du, l);
+    let n2 = ovA_at(ras + dv, l); let n3 = ovA_at(ras - dv, l);
+    let n4 = ovA_at(ras + (du + dv) * dd, l); let n5 = ovA_at(ras + (du - dv) * dd, l);
+    let n6 = ovA_at(ras - (du + dv) * dd, l); let n7 = ovA_at(ras - (du - dv) * dd, l);
+    if (any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov) ||
+        any(n4 != ov) || any(n5 != ov) || any(n6 != ov) || any(n7 != ov)) {
+      let ea = clamp(ov.a * u.params.w, 0.0, 1.0);
+      edgeC = ov.rgb * ea + edgeC * (1.0 - ea);
+      edgeA = ea + edgeA * (1.0 - ea);
+    }
   }
-  return max(fillA, outA);
-}
-fn blend_seg(col : vec3<f32>, c : vec4<f32>, n0 : vec4<f32>, n1 : vec4<f32>, n2 : vec4<f32>, n3 : vec4<f32>, fillO : f32, outO : f32) -> vec3<f32> {
-  return mix(col, c.rgb, seg_alpha(c, n0, n1, n2, n3, fillO, outO));
+  // A, COMPLETE (its fills, then its contours), before B: Scene's order puts B over all of A, as before the merge (the
+  // critic, qa/2026-10-26-steve-merge-overlay.md, finding 4: composited together, A's contour landed on B's fill).
+  let aRGB = edgeC + fillC * (1.0 - edgeA);
+  let aA = edgeA + fillA * (1.0 - edgeA);
+  fillC = vec3<f32>(0.0); fillA = 0.0; edgeC = vec3<f32>(0.0); edgeA = 0.0;
+  // OVERLAY B (Albula, 2026-09-11: a second segmentation of the study on its own grid, read against the first), with its
+  // own fill and outline opacities (segParams.y / .z), composited the same way, then over A.
+  if (u.segParams.x > 0.5) {
+    let ov = ovB_at(ras);
+    if (ov.a > 0.0) {
+      let fa = clamp(ov.a * u.segParams.y, 0.0, 1.0);
+      fillC = ov.rgb * fa + fillC * (1.0 - fa);
+      fillA = fa + fillA * (1.0 - fa);
+      if (u.segParams.z > 0.0) {
+        let n0 = ovB_at(ras + du); let n1 = ovB_at(ras - du);
+        let n2 = ovB_at(ras + dv); let n3 = ovB_at(ras - dv);
+        let n4 = ovB_at(ras + (du + dv) * dd); let n5 = ovB_at(ras + (du - dv) * dd);
+        let n6 = ovB_at(ras - (du + dv) * dd); let n7 = ovB_at(ras - (du - dv) * dd);
+        if (any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov) ||
+            any(n4 != ov) || any(n5 != ov) || any(n6 != ov) || any(n7 != ov)) {
+          let ea = clamp(ov.a * u.segParams.z, 0.0, 1.0);
+          edgeC = ov.rgb * ea + edgeC * (1.0 - ea);
+          edgeA = ea + edgeA * (1.0 - ea);
+        }
+      }
+    }
+  }
+  // Within each: fill first, then the contours over it (the contour of a segment reads over its own fill and over anything
+  // it overlaps). Then B over A.
+  let bRGB = edgeC + fillC * (1.0 - edgeA);
+  let bA = edgeA + fillA * (1.0 - edgeA);
+  return vec4<f32>(bRGB + aRGB * (1.0 - bA), bA + aA * (1.0 - bA));
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -131,24 +211,8 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
     // OVERLAY-ONLY: the two overlays as premultiplied color and alpha, B over A, to be blended
     // over the frame that is already there. Outside the volume nothing is drawn.
     if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-    let du2 = u.uvec.xyz / u.size.x * 1.5;
-    let dv2 = u.vvec.xyz / u.size.y * 1.5;
-    var rgb = vec3<f32>(0.0);
-    var alpha = 0.0;
-    let a2 = ovA_at(ras);
-    if (a2.a > 0.0) {
-      alpha = seg_alpha(a2, ovA_at(ras + du2), ovA_at(ras - du2), ovA_at(ras + dv2), ovA_at(ras - dv2), u.params.z, u.params.w);
-      rgb = a2.rgb * alpha;
-    }
-    if (u.segParams.x > 0.5) {
-      let b2 = ovB_at(ras);
-      if (b2.a > 0.0) {
-        let ab = seg_alpha(b2, ovB_at(ras + du2), ovB_at(ras - du2), ovB_at(ras + dv2), ovB_at(ras - dv2), u.segParams.y, u.segParams.z);
-        rgb = b2.rgb * ab + rgb * (1.0 - ab);
-        alpha = ab + alpha * (1.0 - ab);
-      }
-    }
-    return vec4<f32>(srgb2physical(rgb), alpha);
+    let so = seg_over(ras);
+    return vec4<f32>(srgb2physical(so.rgb), so.a);
   }
   if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, 1.0 - u.segParams.w); }
   let s4 = textureSampleLevel(t_scalar, s_lin, tex, 0.0);
@@ -189,23 +253,8 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
       }
     }
   }
-  // ── segmentation overlays: A first, then B over it, each with its own opacities. Drawing them in
-  //    order rather than letting one win means a structure that only the second network found reads
-  //    against the first one's neighbors instead of replacing them.
-  let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
-  let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
-  // A transparent center contributes neither fill nor outline (both scale by c.a), so the four
-  // neighbor samples are only worth taking inside a segment.
-  let a = ovA_at(ras);
-  if (a.a > 0.0) {
-    col = blend_seg(col, a, ovA_at(ras + du), ovA_at(ras - du), ovA_at(ras + dv), ovA_at(ras - dv), u.params.z, u.params.w);
-  }
-  if (u.segParams.x > 0.5) {
-    let b = ovB_at(ras);
-    if (b.a > 0.0) {
-      col = blend_seg(col, b, ovB_at(ras + du), ovB_at(ras - du), ovB_at(ras + dv), ovB_at(ras - dv), u.segParams.y, u.segParams.z);
-    }
-  }
+  let so = seg_over(ras);
+  col = col * (1.0 - so.a) + so.rgb;
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `;
@@ -516,11 +565,17 @@ export class SliceRenderer {
   /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
    *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
    *  nulls to go back to the rgba overlay. */
-  setLabelOverlay(labels: GPUTexture | null, palette: GPUTexture | null, p2t?: Mat4 | null) {
+  setLabelOverlay(labels: GPUTexture | null, palette: GPUTexture | null, p2tOrLayers?: Mat4 | number | null, layers = 1) {
+    // Two callers, two forms: Albula's passes the overlay's own patient-to-texture matrix (a segmentation on another grid),
+    // Steve's demos the number of label layers (DICOM SEG segments that overlap, stacked along z).
+    if (typeof p2tOrLayers === "number") { layers = p2tOrLayers; p2tOrLayers = undefined; }
     this.labels = labels ?? undefined;
     this.palette = palette ?? undefined;
-    this.segAp2t = p2t ?? undefined;
-    this.u[34] = labels && palette ? 1 : 0;      // size.z = label-overlay mode
+    this.segAp2t = p2tOrLayers ?? undefined;
+    // size.z = the number of label LAYERS (0 = the pre-coloured rgba overlay). A label texture
+    // with more than one layer is nz * layers deep: overlapping segments live in separate
+    // layers and the shader composites them.
+    this.u[34] = labels && palette ? Math.max(1, layers) : 0;
     this.writeSegMats();
     if (this.scalarTex) this.rebind();
   }
@@ -575,6 +630,10 @@ export class SliceRenderer {
   setOutlineOpacity(o: number) { this.u[31] = o; }
   /** Convenience toggle: outline on (opacity 1) / off (0). Composites over the fill. */
   setOverlayOutline(on: boolean) { this.u[31] = on ? 1 : 0; }
+  /** Overlay outline width, in SCREEN pixels (constant under zoom). Rides in uvec.w, which the
+   *  per-frame uniform update writes alongside the view vectors. */
+  setOutlineWidth(px: number) { this.outlineWidth = Math.max(1, px); }
+  private outlineWidth = 2;
 
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
@@ -659,6 +718,18 @@ export class SliceRenderer {
 
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient: Orientation) { this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 }; }
+
+  /** Centre the in-plane view on `centerRAS` WITHOUT touching zoom — move the view, don't refit it.
+   *  setMirrorFrame sets both because it mirrors a slice node's centre AND field of view; an app
+   *  that is following a target from one place to another wants only the pan. */
+  recenter(orient: Orientation, centerRAS: Vec3) {
+    const b = this.basisOf(orient);
+    const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const d: Vec3 = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
+    const vs = this.viewState[orient];
+    vs.panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
+    vs.panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
+  }
 
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState(): Record<Orientation, { panU: number; panV: number; zoom: number }> {
@@ -842,7 +913,7 @@ export class SliceRenderer {
     const { b, c, uS, vS } = this.lastFrame.frame;
     this.u.set(this.p2t, 0);
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;
-    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0;
+    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = this.outlineWidth;   // the same outline width as the first pass (the critic, finding 1)
     this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0;
     this.u[32] = w; this.u[33] = h;
     this.u[111] = this.lastFrame.transparentOutside;
@@ -864,7 +935,8 @@ export class SliceRenderer {
     const { b, c, uS, vS } = frame;
     this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
-    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0; // uvec [20..23]
+    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS;
+    this.u[23] = this.outlineWidth;                                                            // uvec [20..23]
     this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0; // vvec [24..27]
     // params[28..30] set via setWindowLevel/setOverlayOpacity
     this.u[32] = w; this.u[33] = h;                                                            // size [32..35]

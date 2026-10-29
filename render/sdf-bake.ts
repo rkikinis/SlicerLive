@@ -12,6 +12,12 @@
 // just re-floods in place.
 //
 // Distances are computed in RAS mm (seeds store RAS), so anisotropic geometry is handled exactly.
+//
+// WHAT THE SMOOTHING CONTROL DOES (outer mode): it is NOT applied to this distance field. The attr
+// texture's .b carries the labelmap's 0/1 indicator, low-passed by the same separable Gaussian at the
+// caller's σ, and the renderer takes the surface to be the p = 0.5 level set of THAT — a band-limited
+// rendition of the labels, with σ the reconstruction width. The JFA distance stays sharp and is used
+// for the sphere-trace skip horizon and to flood each region's colour/opacity across the shell band.
 
 import { transpose4, type Vec3 } from "./mat4.ts";
 
@@ -128,11 +134,24 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   // abutted (looked like half-opacity). The shader divides by the per-segment opacity to recover the
   // true colour, so a 0-opacity region contributes nothing to the blend.
   textureStore(t_out, c, vec4<f32>(pal.rgb * pal.a, sdf));
-  // .r = opacity, .g = shading mode, .b = distance (seam-blurred → SMOOTH distance for the interface-mode
-  // normal; sdfTex.a stays sharp for shell membership), .a = CRISP presence (1 inside a real segment, 0
-  // background) — the FULLBLUR carries it unblurred so the shader can tell a genuine in-segment voxel
-  // from one that merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
-  textureStore(t_attr, c, vec4<f32>(pal.a, mode, sdf, select(0.0, 1.0, ins)));
+  // .r = opacity, .g = shading mode, .a = CRISP presence (1 inside a real segment, 0 background) —
+  // the FULLBLUR carries .a unblurred so the shader can tell a genuine in-segment voxel from one that
+  // merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
+  //
+  // .b is the BAND-LIMITED LABEL FIELD, and in outer mode it is what the surface IS. It starts as the
+  // crisp 0/1 presence and FULLBLUR low-passes it, so the shader reads p = G_σ * 1(label≠0) and takes
+  // the surface to be its p = 0.5 level set. A labelmap is a SAMPLED indicator function: its voxel
+  // staircase is ALIASING, not data, and the faithful surface is that indicator reconstructed with a
+  // kernel at the grid's Nyquist limit — which is what the smoothing control now sets. Thresholding a
+  // BOUNDED field at 0.5 also cannot do what blurring the unbounded SIGNED DISTANCE did (fuse two
+  // vertebrae across a disc space): in the middle of a 4-voxel gap p ≈ 2·Φ(-2) ≈ 0.05, nowhere near
+  // 0.5, so the gap stays open at every σ in range.
+  //
+  // Interface ("all") mode keeps the blurred DISTANCE here instead: its field is UNSIGNED (distance to
+  // the nearest label change), so a union indicator says nothing about the internal interfaces that
+  // mode exists to show, and its normal still comes from the smoothed distance.
+  let bchan = select(select(0.0, 1.0, ins), sdf, u.params.y > 0.5);
+  textureStore(t_attr, c, vec4<f32>(pal.a, mode, bchan, select(0.0, 1.0, ins)));
 }`;
 
 // Separable Gaussian on the SDF's .a (distance) only, carrying .rgb (colour) from the centre tap.
@@ -189,8 +208,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, c, vec4<f32>(sum, center.a));
 }`;
 
-// Separable Gaussian on ONLY the attribute texture's .g (shading mode) and .b (distance) — those need
-// to transition smoothly (surface↔volume blend; smooth interface normal). Carries .r (opacity) AND .a
+// Separable Gaussian on ONLY the attribute texture's .g (shading mode) and .b (the band-limited label
+// field in outer mode, the interface distance in "all" mode) — .b is THE GEOMETRY in outer mode, so
+// this pass is what band-limits the labelmap; .g needs to transition smoothly for the surface↔volume
+// blend. Carries .r (opacity) AND .a
 // (presence) UNBLURRED: opacity is PER-SEGMENT, so blurring it across a label boundary drags a
 // segment's edge toward its neighbour's opacity — an opaque organ goes half-transparent exactly where
 // it abuts a hidden (0-opacity) one. Keeping .r crisp (linear sampling still gives ~1-voxel AA) renders
@@ -233,9 +254,13 @@ export class JfaSdfBaker {
   private seed: [GPUTexture, GPUTexture];       // rgba32float ping-pong (RAS seed xyz + regionLabel)
   private sdfTex: GPUTexture;                    // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
   private attrTex: GPUTexture;                   // rgba16float: .r = per-segment opacity, .g = shading mode — sampled by SegmentField
-  private attrScratch: GPUTexture;              // rgba16float attr-blur ping-pong
+  // ONE blur scratch, shared by the colour, distance and attribute blurs. They are the same format
+  // and size and blurStage runs them one at a time, so a second copy was 8 B per voxel of pure
+  // duplication — 12% of this pipeline, which is the difference between fitting a device and losing
+  // it. Named `scratch` rather than per-target so it cannot drift back into two.
+  private scratch: GPUTexture;                   // rgba16float blur ping-pong (shared)
   private lastSeed = 0;                          // seed buffer the last sweep finalized from
-  private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
+
   private uni: GPUBuffer;
   private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette (.a = opacity)
   private modeBuf: GPUBuffer;                    // 256 × vec4 label→shading mode (.x = 0 surface / 1 volume)
@@ -277,8 +302,7 @@ export class JfaSdfBaker {
     this.seed = [mk("rgba32float", seedUsage), mk("rgba32float", seedUsage)];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);   // blur copies in; readDistance copies out
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
-    this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
+    this.scratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.uni = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -295,6 +319,33 @@ export class JfaSdfBaker {
     const steps: number[] = [];
     for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
     this.steps = steps;
+  }
+
+  /** GPU bytes this baker holds, and what it WOULD hold for a given label grid.
+   *
+   *  The JFA is the memory-hungry part of the pipeline by a wide margin: the seed ping-pong is two
+   *  rgba32float volumes (32 B/voxel between them) and there are four more rgba16float volumes
+   *  (sdf, attr, and a scratch for each). On the PADDED grid that is 68 B per voxel including the
+   *  r32uint master the caller owns — so a 250³ grid is 1.06 GB, per segmentation. Two of them side
+   *  by side is how a comparison view walks off the end of a laptop's VRAM: the device is lost and
+   *  the canvas goes white, with no error a user can act on. Callers size their grid against this
+   *  (see render/gpu-budget.ts) instead of finding out the hard way. */
+  static bytesPerVoxel(): number {
+    return 2 * 16    // seed ping-pong, rgba32float
+      + 8             // sdfTex, rgba16float
+      + 8             // attrTex, rgba16float
+      + 8             // ONE shared blur scratch, rgba16float
+      + 4;            // the r32uint master the EditableSegmentation owns
+  }
+  /** Bytes for a label grid of `dims` once padded by `pad` voxels on every side. */
+  static estimateBytes(dims: Vec3, pad = 2): number {
+    const n = (dims[0] + 2 * pad) * (dims[1] + 2 * pad) * (dims[2] + 2 * pad);
+    return n * JfaSdfBaker.bytesPerVoxel();
+  }
+  /** Bytes this instance actually holds. */
+  byteSize(): number {
+    const n = this.dims[0] * this.dims[1] * this.dims[2];
+    return n * JfaSdfBaker.bytesPerVoxel();
   }
 
   /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
@@ -363,28 +414,41 @@ export class JfaSdfBaker {
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
 
-  /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
-   *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
-   *  edit settles and refine() runs. */
+  /** Distance-blur σ, in VOXELS, applied to the signed distance on every bake/refine (0 = none).
+   *  The zero level set barely moves, so the silhouette stays where the labelmap put it; what the
+   *  blur smooths is the GRADIENT, i.e. the shading normal — which is what turns a voxel-faceted
+   *  "golf ball" into a surface. Takes effect on the next bake(); the caller decides when that is,
+   *  since a sweep is ~20 compute passes. */
+  setSmoothing(sigmaVoxels: number) { this.smoothSigma = Math.max(0, sigmaVoxels); }
+  smoothing(): number { return this.smoothSigma; }
+
+  /** σ for the COLOUR-seam blur, which is NOT the geometry σ and must not follow it up.
+   *
+   *  The seam blur exists for one narrow job: the region colour is flooded per voxel, so the border
+   *  between two labels is a voxel staircase in COLOUR even when the surface is smooth. A fraction of
+   *  a voxel of blur hides that. Tying it to the geometry σ (it used to be min(1, σ)) meant that
+   *  asking for a smoother SURFACE also dissolved the label boundaries — and a boundary is the entire
+   *  signal in a comparison view. It showed up worst on the SPINEPS disc layer: a near-white disc
+   *  between two saturated vertebra colours, blurred a full voxel, reads as a milky smear over both
+   *  bones instead of a disc. Capped well below a voxel, the seam stays a seam. */
+  private seamSigma(): number { return Math.min(0.4, this.smoothSigma); }
+
+  /** FAST bake for LIVE editing: plain JFA (approximate) + the attr blur that band-limits the label
+   *  field (no colour-seam blur). Cheap, so it keeps up with an in-progress stroke; the colour seams
+   *  stay voxel-jagged until the edit settles and refine() runs. */
   bake() { this.sweep([], this.smoothSigma, 0); }
 
   /** REFINE for a STATIC labelmap (run once the edit settles): JFA+2 extra passes → a near-exact
    *  Voronoi/SDF (fixes the small JFA mistakes near close/overlapping segments) and a colour-seam blur
-   *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
-   *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
-   *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
-  /**
-   * Settle-refine: extra JFA steps, the distance blur, and a COLOR-SEAM blur.
+   *  so neighbouring-label boundaries are smooth, not a voxel staircase. The attr blur stays at the
+   *  caller's σ — it is the geometry, not a quality knob. Higher quality lives in the resident
+   *  texture, so camera renders stay cheap.
    *
-   * `colorSigma` is separable from the geometry on purpose. The seam blur softens the step where two
-   * regions meet, which is right for a handful of large segments and too much for a parcellation
-   * where a hundred parcels all border each other -- Ron, on the FreeSurfer surface: "A little too
-   * washed together, but that is the direction I wanted to go." Lowering it sharpens the boundaries
-   * between parcels while leaving the surface just as smooth, because the distance blur is untouched.
-   *
-   * Default unchanged at 1.0, so SEGRoulette and the segmentation logic behave exactly as before.
-   */
-  refine(colorSigma = 1.0) { this.sweep([2, 1], this.smoothSigma, colorSigma); }
+   *  `colorSigma` (Albula) is separable from the geometry on purpose: right for a handful of large segments, too much
+   *  for a parcellation where a hundred parcels all border each other -- Ron, on the FreeSurfer surface: "A little too
+   *  washed together, but that is the direction I wanted to go." The default is Steve's seamSigma() (2026-10-28: capped
+   *  at 0.4 voxels); Albula's FreeSurfer path passes its own value. */
+  refine(colorSigma = this.seamSigma()) { this.sweep([2, 1], this.smoothSigma, colorSigma); }
 
   /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
    *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
@@ -393,7 +457,7 @@ export class JfaSdfBaker {
    *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
    *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
    *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
-  refineRegion(regionIjk: { lo: [number, number, number]; hi: [number, number, number] }) {
+  refineRegion(regionIjk: { lo: [number, number, number]; hi: [number, number, number] }, maxStep = Infinity) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
     const lo: [number, number, number] = [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])];
     const hi: [number, number, number] = [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])];
@@ -417,11 +481,23 @@ export class JfaSdfBaker {
       const p = enc.beginComputePass(); p.setPipeline(this.initPipe); p.setBindGroup(0, b); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
     }
     dev.queue.submit([enc.finish()]);
-    // region JFA, step schedule sized to the region, + the refine()-grade [2,1] extras
-    const maxDim = Math.max(rx, ry, rz);
-    const steps: number[] = [];
-    for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
-    steps.push(2, 1);
+    // Region JFA, step schedule capped at `maxStep` — the caller's HALO width, so the flood's taps
+    // never reach outside the ring this sweep just re-initialised.
+    //
+    // Both bounds matter, in opposite directions. Sizing the schedule to the REGION (which is what
+    // this did) makes the largest step ~the region extent, so a voxel inside the region whose nearest
+    // surface lies OUTSIDE it finds no seed at all, reports 1e3 mm, and the sphere-trace skip leaps
+    // straight through whatever is actually there — the shell comes back cut along a flat plane.
+    // Letting the schedule run to the FULL GRID fixes that but lets a tap land on a seed from an
+    // older bake, pointing at a surface that has since been removed, which walks back in as a phantom
+    // over a run of patches. Capping at the halo gives neither: every tap lands on a seed this sweep
+    // re-seeded, and a voxel whose nearest surface is beyond the halo honestly has none — the skip
+    // refuses to leap on that (see SegmentField.skipWGSL), so the ray marches and still finds it.
+    //
+    // Measured on spine myeloma/Myel_046, "1 vert": before, one arrow step rendered 3221 lit px
+    // against 4994 for the same level reached by a full rebake, and five steps left a whole extra
+    // vertebra on screen.
+    const steps: number[] = [...this.steps.filter((v) => v <= maxStep), 2, 1];
     for (const step of steps) {
       this.writeUni(step, lo);
       const dst = src ^ 1;
@@ -450,15 +526,16 @@ export class JfaSdfBaker {
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
     dev.queue.submit([enc.finish()]);
-    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.colBlurPipe, 1.0, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+    // The colour-seam blur is capped well below a voxel (seamSigma): it hides the per-voxel colour
+    // staircase at a label boundary without dissolving the boundary itself.
+    if (this.seamSigma() > 0) this.blurStage(this.colBlurPipe, this.seamSigma(), this.sdfTex, this.scratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
   }
 
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
    *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
    *  routed to the scratch texture (discarded — the blurred resident sdfTex stays pristine) and
-   *  re-blur the attribute seams. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
+   *  re-blur the attributes. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
    *  what makes per-vertebra focus switching real-time. */
   rebakeAttr(blurSeams = false, regionIjk?: { lo: [number, number, number]; hi: [number, number, number] }) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
@@ -475,7 +552,7 @@ export class JfaSdfBaker {
     const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: this.seed[this.lastSeed].createView() },
       { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfScratch.createView() },   // sdf writes discarded
+      { binding: 2, resource: this.scratch.createView() },   // sdf writes discarded
       { binding: 3, resource: { buffer: this.uni } },
       { binding: 4, resource: { buffer: this.palBuf } },
       { binding: 5, resource: this.attrTex.createView() },
@@ -483,14 +560,41 @@ export class JfaSdfBaker {
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
-    // blurSeams=false: instant (crisp attr) — right while rapidly stepping visibility.
-    // blurSeams=true: the settled quality — still only ~4 passes, no JFA re-sweep.
-    if (blurSeams) this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+    // The attr blur is NOT optional any more: .b is the band-limited field the outer-mode surface is
+    // the 0.5 level set OF, so skipping it would snap the geometry back to the raw voxel staircase for
+    // the duration of a visibility step and pop smooth again 600 ms later. `blurSeams` now only records
+    // the caller's intent (it is ~4 passes either way, and no JFA re-sweep).
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
+  }
+
+  /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
+   *  for a smoothing change is both wasteful and WRONG — the fast bake's approximate flood differs
+   *  from the refined one by a fraction of a voxel, so the surface visibly shifted back and forth
+   *  as the control moved. This re-derives the attributes and the colour from the EXISTING seeds
+   *  (so the distance is bit-identical) and re-blurs them at the new σ. */
+  resmooth() {
+    const dev = this.dev;
+    this.writeUni(0, [0, 0, 0]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[this.lastSeed].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },     // re-derive colour + the SHARP distance
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } },
+    ] });
+    const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]); p.end();
+    dev.queue.submit([enc.finish()]);
+    const seam = this.seamSigma();
+    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.scratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch);
   }
 
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
    *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
-  blurAttrOnly() { this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch); }
+  blurAttrOnly() { if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch); }
 
   /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
   private sweep(extraSteps: number[], distSigma: number, colorSigma: number) {
@@ -539,12 +643,22 @@ export class JfaSdfBaker {
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
 
-    // Distance blur (smooths the shading normal; keeps colour crisp), then optional colour-seam blur,
+    // Attribute blur (band-limits .b — the outer-mode GEOMETRY — and smooths .g), then the colour-seam blur,
     // then (refine only) the attribute-seam blur so opacity + shading-mode transition as smoothly as
     // the colour — removing the jaggies where an opaque surface segment meets a translucent volume one.
-    if (distSigma > 0) this.blurStage(this.blurPipe, distSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.fullBlurPipe, colorSigma, this.attrTex, this.attrScratch);
+    // The smoothing goes to the ATTR texture's .b, NEVER to sdfTex.a.
+    //
+    // sdfTex.a is an unbounded SIGNED DISTANCE, and blurring one moves its zero crossing outward
+    // wherever the field is thin. A 4-voxel disc space between two vertebrae is thin: blurred at
+    // σ=1 it goes negative from both sides and closes, so smoothing silently FUSED neighbouring
+    // bones. That is a property of smoothing an UNBOUNDED field, not of smoothing as such: attr.b
+    // is a BOUNDED 0/1 indicator, whose 0.5 level set cannot cross a gap much wider than 2σ.
+    // sdfTex.a stays sharp — it is still what the sphere-trace skip and the colour flood use.
+    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.scratch);
+    // attr's blur is the SHADING smoothness, so it takes the caller's σ exactly. Flooring it at
+    // the colour-seam σ (1.0) made every setting from 0 to 1 render identically — the control
+    // did nothing over half its range.
+    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.scratch);
   }
 
   /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
@@ -594,5 +708,5 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
   }
 
-  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.attrScratch.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); this.modeBuf.destroy(); }
+  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.scratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); this.modeBuf.destroy(); }
 }

@@ -1780,7 +1780,7 @@ Object.assign(globalThis, {
       if (w.problems.length) { shell?.notify({ title: "The scene did not pass its check", body: w.problems.slice(0, 6).map((p) => esc(`${p.where}: ${p.what}`)).join("<br>") }); return { error: "check failed" }; }
       const uid = o.asNew || !currentScene_ ? "new" : currentScene_.uid;
       const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${uid}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(w.doc) });
-      const r = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { uid?: string; v?: number; bytes?: number; error?: string; rowV?: number; code?: string };
+      const r = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { uid?: string; v?: number; bytes?: number; error?: string; rowV?: number; code?: string; dicom?: { error?: string } };
       if (res.status === 409) {
         // Overwrite saves as the row's v + 1 in ONE step; the 409 says what the row is at (critic, finding 6).
         const rowV = r.rowV ?? (currentScene_?.v ?? 0) + 1;
@@ -1809,6 +1809,9 @@ Object.assign(globalThis, {
       const said = `Scene saved: "${name}" — ${nodesN} things, ${((r.bytes ?? 0) / 1024).toFixed(1)} KB, save ${r.v}`;
       (globalThis as unknown as { __sceneSaidLast?: string }).__sceneSaidLast = said;
       status(said);
+      // THE SCENE'S DICOM OBJECT (desktop/scene-mrcom.ts) is written after the file; when it fails the scene is saved and
+      // opens, and the person is told what is missing rather than nothing.
+      if (r.dicom?.error) shell?.notify({ title: "The scene is saved; its copy in DICOM is not", body: `The scene opens from Albula's scene list as before. Its DICOM copy, for other programs and for the archive, could not be written: ${esc(r.dicom.error)}` });
       (globalThis as unknown as { __refreshDicomDb?: () => Promise<number | null> }).__refreshDicomDb?.();
       return { uid: r.uid, v: r.v };
     };

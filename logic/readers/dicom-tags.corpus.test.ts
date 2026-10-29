@@ -11,6 +11,7 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import dcmjs from "../dcmjs.ts";
 import { toDicomJson } from "./dicom-tags.ts";
+import { dicomIO, setDicomLibrary } from "../dicom-io.ts";
 import { ABSENT, testData } from "../../test/test-data.ts";
 
 const ROOT = testData("dicom") ?? ABSENT;
@@ -42,8 +43,11 @@ function pick(): string[] {
 Deno.test({
   name: "the header record equals DCMTK's dcm2json on the public DICOM files here (three per folder, and each in implicit VR too)",
   ignore: !HAS || !haveRoot,
-  fn: () => {
-    const D = dcmjs.data as unknown as { DicomMessage: { readFile(b: ArrayBuffer): { dict: never; meta: never } } };
+  fn: async () => {
+    // Read as the app reads (logic/dicom-io.ts, the one module): its fixes to what dcmjs returns are part of the record.
+    setDicomLibrary(dcmjs);
+    const io = await dicomIO();
+    const D = { DicomMessage: { readFile: (b: ArrayBuffer) => io.readFile(b) as unknown as { dict: never; meta: never } } };
     const diffs: string[] = [];
     let compared = 0, unreadable = 0, notDicom = 0, droppedEmptyItems = 0;
     const tmp = Deno.makeTempDirSync();

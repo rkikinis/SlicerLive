@@ -83,8 +83,9 @@ export function madeFor(t1UID: string, rows: IndexSeries[], edges: ProvenanceEdg
  *   - the 79-class field over the cube (2 bytes a value) on the graphics card, unless it passes one Metal buffer (8 GiB,
  *     MPS_MAX_BUFFER_BYTES) -- then haversack moves it to the Mac's memory: slower, the same result.
  *  So the size alone never refuses a scan (critic 2026-10-20, finding 4: the studyforrest T1, 274x384x384 voxels at
- *  0.700x0.667x0.667 mm, conforms to 366 voxels a side at 0.7 mm, not 384; why it failed twice is not known). */
-export const CONFORM_FOLLOWS = "v0.15.0";
+ *  0.700x0.667x0.667 mm, conforms to 366 voxels a side at 0.7 mm, not 384; why it failed twice is not known).
+ *  Re-read for v0.16.0 (2026-10-26): engines/fastsurfer.py and FastSurferCNN (2.5.4+lean4) identical to v0.15.0's. */
+export const CONFORM_FOLLOWS = "v0.16.0";
 /** The largest cube FastSurfer is known to have worked on through this Mac's graphics card (voxels a side; 2026-10-20). */
 export const LARGEST_CUBE_ON_CARD = 306;
 const VOX_FLOOR_MM = 0.7, THRESHOLD_1MM = 0.95, CLASSES = 79, MPS_MAX_BUFFER_BYTES = 8 * 2 ** 30;

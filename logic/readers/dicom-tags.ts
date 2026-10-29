@@ -194,6 +194,58 @@ export function toDucknTags(ds: Obj, meta?: Obj): Obj {
   return { ...(meta ? conv(meta) : {}), ...conv(ds) };
 }
 
+/** DICOM's file meta group (0002): it describes each FILE, never the data (duckn dicom-spec §9). */
+const FILE_META = new Set(["FileMetaInformationGroupLength", "FileMetaInformationVersion", "MediaStorageSOPClassUID", "MediaStorageSOPInstanceUID",
+  "TransferSyntaxUID", "ImplementationClassUID", "ImplementationVersionName", "SourceApplicationEntityTitle", "SendingApplicationEntityTitle",
+  "ReceivingApplicationEntityTitle", "SourcePresentationAddress", "SendingPresentationAddress", "ReceivingPresentationAddress",
+  "PrivateInformationCreatorUID", "PrivateInformation", "RTVMetaInformationVersion", "RTVCommunicationSOPClassUID",
+  "RTVCommunicationSOPInstanceUID", "RTVSourceIdentifier", "RTVFlowIdentifier", "RTVFlowRTPSamplingRate", "RTVFlowActualFrameDuration"]);
+/** What duckn itself states about the array, so never in its tags (dicom-spec §2, §9): shape, type, geometry, the value
+ *  mapping (it is `value_transforms` / `sample_units`), bulk data, and an enhanced object's per-frame groups whole. */
+const DUCKN_STATES = new Set(["Rows", "Columns", "NumberOfFrames", "ImagePositionPatient", "ImageOrientationPatient", "PixelSpacing",
+  "SpacingBetweenSlices", "SliceThickness", "BitsAllocated", "PixelRepresentation", "PlanarConfiguration", "RescaleSlope", "RescaleIntercept",
+  "RescaleType", "ModalityLUTSequence", "LUTDescriptor", "LUTData", "ModalityLUTType", "PixelData", "FloatPixelData", "DoubleFloatPixelData",
+  "ExtendedOffsetTable", "ExtendedOffsetTableLengths", "WaveformData", "PerFrameFunctionalGroupsSequence", "PixelValueTransformationSequence"]);
+/** Stated in STORED-value units (dicom-spec §5.10): left out when the array holds the values after the rescale, as ours do. */
+const STORED_UNITS = new Set(["BitsStored", "HighBit", "SmallestImagePixelValue", "LargestImagePixelValue", "SmallestPixelValueInSeries",
+  "LargestPixelValueInSeries", "SmallestImagePixelValueInPlane", "LargestImagePixelValueInPlane", "PixelPaddingValue", "PixelPaddingRangeLimit",
+  "RealWorldValueMappingSequence", "PaletteColorLookupTableUID", "LargePaletteColorLookupTableUID",
+  ...["Red", "Green", "Blue", "Alpha"].flatMap((c) => [`${c}PaletteColorLookupTableDescriptor`, `${c}PaletteColorLookupTableData`, `Segmented${c}PaletteColorLookupTableData`]),
+  ...["Red", "Green", "Blue"].flatMap((c) => [`Large${c}PaletteColorLookupTableDescriptor`, `Large${c}PaletteColorLookupTableData`])]);
+/** A private element (odd group), by its hex key; its creators are private too. */
+const isPrivateKey = (k: string) => /^[0-9A-Fa-f]{8}$/.test(k) && (parseInt(k.slice(0, 4), 16) & 1) === 1;
+/** An overlay or curve group (60xx, 50xx), whole (§9): by keyword or by hex key. */
+const isOverlayOrCurve = (k: string) => /^(Overlay|Curve)/.test(k) || /^(50|60)[0-9A-Fa-f]{6}$/.test(k);
+/** In an enhanced object's shared groups, the macros duckn states (§9): spacing, orientation, the rescale. */
+const SHARED_STATED = new Set(["PixelMeasuresSequence", "PlaneOrientationSequence", "PixelValueTransformationSequence"]);
+
+/**
+ * THE VIEW OF A HEADER AS DUCKN'S `dicom` EXTENSION 1.0 DEFINES IT, for an array that holds the values AFTER the rescale
+ * (`stored_values: false`) -- the way Michael Halle's haversack writes its input copies (2026-09-26; Ron, 2026-10-27:
+ * "We should follow Mike's lead and philosophy as set in Haversack and expand on it as needed"). From the reader's keyword
+ * form (toDucknTags): the file meta group out (§9), what duckn states out (§2, §9), what is in stored-value units out
+ * (§5.10), overlays and curves out, and NO private elements at any depth -- haversack's rule: the vendor's data cannot be
+ * vouched for against rescaled values, and the record beside the array keeps every attribute (`dicom-header.json.zst`,
+ * the DICOM JSON Model). An enhanced object's shared groups lose the macros duckn states, and an emptied macro goes.
+ * Before 2026-10-27 the copies' view kept all of these: 221 arrays stated `RescaleIntercept: -1024` beside Hounsfield
+ * units (duckn-dicom-review-2026-10-27.md, section 3).
+ */
+export function ducknView(tags: Obj): Obj {
+  const noPrivate = (v: unknown): unknown => Array.isArray(v) ? v.map((x) => x && typeof x === "object" && !Array.isArray(x) ? dropPrivate(x as Obj) : x) : v;
+  const dropPrivate = (o: Obj): Obj => Object.fromEntries(Object.entries(o).filter(([k]) => !isPrivateKey(k)).map(([k, v]) => [k, noPrivate(v)]));
+  const out: Obj = {};
+  for (const [k, v] of Object.entries(tags)) {
+    if (FILE_META.has(k) || DUCKN_STATES.has(k) || STORED_UNITS.has(k) || isPrivateKey(k) || isOverlayOrCurve(k)) continue;
+    if (k === "SharedFunctionalGroupsSequence" && Array.isArray(v)) {
+      const items = v.map((it) => Object.fromEntries(Object.entries(dropPrivate(it as Obj)).filter(([m]) => !SHARED_STATED.has(m)))).filter((it) => Object.keys(it).length);
+      if (items.length) out[k] = items;
+      continue;
+    }
+    out[k] = noPrivate(v);
+  }
+  return out;
+}
+
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 /**

@@ -6,8 +6,10 @@
 //   EditableSegmentation.masterTexture()  (r32uint, algorithms/, effects write)
 //        │
 //        ├─ renderMode "sdf"     : JfaSdfBaker → colorized signed-distance (rgba16float: rgb=label
-//        │                         colour, a=signed mm) → SegmentField mode "sdf" (crisp, terrace-
-//        │                         free, MULTI-LABEL surface).                              [render/]
+//        │                         colour, a=signed mm) + an attr texture whose .b is the BAND-
+//        │                         LIMITED label field (G_σ * indicator) → SegmentField mode "sdf":
+//        │                         the surface is that field's 0.5 level set, rendered as a solid
+//        │                         (clip planes cut a face, not a hole).                     [render/]
 //        └─ renderMode "surface" : ColorizeBaker (σ Gaussian) → rgb=label colour, a=presence →
 //                                   SegmentField "surface" (gradient-opacity, multi-label).  [render/]
 //
@@ -31,6 +33,13 @@ export interface SegmentationLogicOpts {
   refineDelayMs?: number;                     // debounce before the settle-refine (capability-tuned; default 180)
   boundaryMode?: "outer" | "all";             // sdf: "outer" = shell only at segment↔background (default; crisp separated segments). "all" = shell at ANY label change (multi-material interface field) so EMBEDDED/NESTED labels surface too — islands within islands — without one SDF per segment.
   clippable?: boolean;                        // let scene clip boxes crop the shell (default false — Slicer's ROI crops the volume, not the segmentation; spine-compare's extent control opts in)
+  /** Let rebakeShellRegion() re-flood only the changed box instead of the whole grid. Fast (~17 ms
+   *  against ~70 ms at a typical grid) but NOT exact: after a run of patches the result still drifts
+   *  a few per cent from a full re-flood, reproducibly but not explicably — see
+   *  examples/spine/test/level-step-equivalence.ts. Off by default: a view whose job is to show
+   *  whether two segmentations differ cannot afford to be approximately right about either. Opt in
+   *  for live editing, where the next stroke corrects it anyway. */
+  regionReflood?: boolean;
 }
 
 function invertAffine(m: number[]): number[] {
@@ -53,7 +62,6 @@ function invertAffine(m: number[]): number[] {
 export class SegmentationLogic {
   readonly renderMode: "sdf" | "surface";
   private clippable: boolean;
-  private attrSettleTimer?: number;
   private sdf?: JfaSdfBaker;                   // sdf path
   private baker?: ColorizeBaker;               // surface path
   private presenceTex?: GPUTexture;
@@ -68,6 +76,7 @@ export class SegmentationLogic {
   private refineTimer?: ReturnType<typeof setTimeout>;
   private refineDelayMs: number;             // quiescence before the settle-refine (sdf mode; capability-tuned)
   private boundaryMode: "outer" | "all";
+  private regionReflood: boolean;
 
   constructor(device: GPUDevice, private seg: EditableSegmentation, opts: SegmentationLogicOpts = {}) {
     this.renderMode = opts.renderMode ?? "sdf";
@@ -77,10 +86,11 @@ export class SegmentationLogic {
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
     this.clippable = opts.clippable ?? false;
+    this.regionReflood = opts.regionReflood ?? false;
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {
-      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, 1.0, 2, this.boundaryMode);
+      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, this.sigma, 2, this.boundaryMode);
     } else {
       this.baker = new ColorizeBaker(device, seg.masterTexture(), seg.dims);
       this.presenceTex = this.baker.output();
@@ -143,8 +153,21 @@ export class SegmentationLogic {
    *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
    *  seam blur run region-limited in one shot — full settled quality lands immediately, no
    *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
-  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
-  private regionToIjk(regionRAS: { lo: [number, number, number]; hi: [number, number, number] }, M = 8) {
+  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel HALO.
+   *
+   *  The halo is not just room for the shell band and the blur radii. A region re-flood reuses the
+   *  previous flood's seeds outside the box, and a seed OUTSIDE the box that pointed at a surface
+   *  just DELETED inside it is stale — a voxel in the box that taps it inherits a phantom surface
+   *  that is no longer there. Re-initialising over a wide halo rebuilds those seeds, so the halo has
+   *  to be at least as wide as the spacing to the next real structure (~15-20 mm between vertebrae);
+   *  at 8 voxels it was not, and one arrow step left a sliver of the hidden level on screen. The box
+   *  is still a few per cent of the grid, so this costs essentially nothing (measured: a level step
+   *  stays ~14 ms against ~390 ms for a full rebake). */
+  private static readonly HALO = 32;          // voxels of re-initialised ring around a region patch
+  /** Largest JFA step a region patch may use: capped so a tap (reach = 2·step - 1) stays inside the
+   *  halo this patch re-seeded, and can never read a seed left over from an older bake. */
+  private static haloMaxStep(): number { return 1 << Math.floor(Math.log2((SegmentationLogic.HALO + 1) / 2)); }
+  private regionToIjk(regionRAS: { lo: [number, number, number]; hi: [number, number, number] }, M = SegmentationLogic.HALO) {
     const inv = invertAffine(this.sdf!.sdfIjkToRAS());
     const lo: [number, number, number] = [Infinity, Infinity, Infinity];
     const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
@@ -167,10 +190,28 @@ export class SegmentationLogic {
    *  Small regions bake in ~ms, so stepping through per-label visibility stays real-time. */
   rebakeShellRegion(regionRAS: { lo: [number, number, number]; hi: [number, number, number] }) {
     if (!this.sdf) { this.rebake(); return; }
+    const region = this.regionToIjk(regionRAS);
+    // A PATCH HAS TO BE SMALL ENOUGH FOR THE FLOOD TO FILL IT. Capping the jump-flood at the halo
+    // (so it can never read a seed an older bake left behind) also caps how far a seed can travel:
+    // ~2·maxStep voxels. A voxel further than that from any seed ends up with none, its attributes
+    // finalize to zero, and the shell reads seg_op = 0 there — so a box with a dead middle renders
+    // as a BLACK BITE out of the surface, visible only from the directions whose rays cross it.
+    //
+    // Past the reach the only honest answer is to re-flood everything. In practice that is where
+    // this lands for a vertebra-sized change: the labelmap write stays region-limited (cheap) and
+    // the flood is full, ~148 ms against ~395 ms for reloading the whole labelmap and re-flooding.
+    // The genuinely small patches this path was built for — a paint stroke — still take it.
+    //
+    // This bound is EMPIRICAL. It was arrived at by reproducing the artifact (level T4, camera at
+    // azimuth 240°, elevation 0.35: 891 enclosed black px in 3761 lit, against 34 in 7252 for a full
+    // rebake) and checking it away again, not by deriving when a partial flood is safe.
+    const core = this.regionToIjk(regionRAS, 0);   // the CHANGED extent, without the halo
+    const reach = 2 * SegmentationLogic.haloMaxStep();
+    if (!this.regionReflood || [0, 1, 2].some((d) => core.hi[d] - core.lo[d] > reach)) { this.refineNow(); return; }
     if (this.refineTimer !== undefined) { clearTimeout(this.refineTimer); this.refineTimer = undefined; }
     this.sdf.setPalette(this.palette);
     this.sdf.setModePalette(this.modePalette);
-    this.sdf.refineRegion(this.regionToIjk(regionRAS));
+    this.sdf.refineRegion(region, SegmentationLogic.haloMaxStep());
     for (const cb of this.redrawCbs) cb();
   }
 
@@ -182,13 +223,11 @@ export class SegmentationLogic {
       for (const cb of this.redrawCbs) cb();
       return;
     }
-    this.sdf.rebakeAttr(false);               // instant, crisp (unblurred attr)
+    // Full-volume: finalize + blur in one shot. The blur is not a settle step any more — attr.b IS
+    // the geometry, so deferring it would snap every segment back to the voxel staircase for 600 ms
+    // on each visibility toggle, and re-blurring an already-blurred field would widen σ by √2.
+    this.sdf.rebakeAttr(true);
     for (const cb of this.redrawCbs) cb();
-    if (this.attrSettleTimer !== undefined) clearTimeout(this.attrSettleTimer);
-    this.attrSettleTimer = setTimeout(() => {
-      this.attrSettleTimer = undefined;
-      if (this.sdf) { this.sdf.blurAttrOnly(); for (const cb of this.redrawCbs) cb(); }
-    }, 600);
   }
 
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits
@@ -214,6 +253,8 @@ export class SegmentationLogic {
         attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
         interfaceMode,
       });
+      this.segField.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);   // smoothing may have been set first
+      this.segField.setSmoothingVox(this.sigma);
     }
     return this.segField;
   }
@@ -221,6 +262,36 @@ export class SegmentationLogic {
   /** Live GLOBAL segmentation opacity (0..1) — the field-level multiplier over every segment's own
    *  opacity. Caller does scene.syncUniforms() + redraw. */
   setGlobalOpacity(o: number) { this.opacity = o; this.segField?.setOpacity(o); }
+
+  /** Surface smoothing, σ in VOXELS (0 = none) — the RECONSTRUCTION WIDTH of the band-limited label
+   *  field. In sdf/outer mode the rendered surface is the 0.5 level set of p = G_σ * 1(label != 0):
+   *  σ ≈ 0.5 is the grid's Nyquist limit, the most faithful rendition of the labels that is not
+   *  aliased; below that it approaches the trilinear (voxel-faceted) reconstruction and at 0 it
+   *  switches to literal cubes; above it the surface is deliberately modelled, trading ≈ σ²/2R of
+   *  inward motion on convex features for smoothness. In interface ("all") mode σ still only blurs
+   *  the shading distance. In surface (Gaussian presence) mode it is the presence-field Gaussian.
+   *
+   *  Re-bakes immediately (fast path, so a slider stays responsive) and schedules the settle
+   *  refine, exactly as an edit does. */
+  setSmoothing(sigmaVoxels: number) {
+    this.sigma = Math.max(0, sigmaVoxels);
+    this.sdf?.setSmoothing(this.sigma);
+    this.segField?.setSmoothingVox(this.sigma);   // skip-horizon margin (caller syncs uniforms)
+    // σ=0 means "show me the labelmap", and for a labelmap that is CUBES. Band-limiting less does
+    // not get there — at σ→0 the reconstruction tends to trilinear, whose 0.5 level set is the
+    // marching-cubes blocky surface, not the voxel faces — so the bottom of the range switches the
+    // field to per-voxel rendering instead (SegmentField.setVoxelMode): same ray-march, same field,
+    // read without interpolation.
+    this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
+    // NOT rebake(): σ does not enter the JFA distance field (only the band-limited attr.b), and
+    // re-flooding would swap the refined distance for the fast bake's approximation — the colour
+    // seams and skip horizon would shift slightly every time the control moved. resmooth()
+    // re-derives the attributes from the same seeds and re-blurs them at the new σ.
+    if (this.sdf) this.sdf.resmooth();
+    else this.baker!.bakeInto(this.presenceTex!, this.palette, this.sigma);
+    for (const cb of this.redrawCbs) cb();
+  }
+  smoothing(): number { return this.sigma; }
 
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb: () => void) { this.redrawCbs.push(cb); }

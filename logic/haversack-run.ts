@@ -18,6 +18,11 @@ export type TaskRunResult =
       ended failed: a fault of this input, as far as anyone here can tell (not a lost answer or a refused upload). */ ranAndFailed?: true };
 
 const POLL_MS = 800, STALL_MS = 2 * 60 * 1000, GONE_MS = 10 * 1000, QUEUED_STUCK_MS = 3 * 60 * 1000;
+/** WHILE THE SERVER INSTALLS A NETWORK'S WEIGHTS (stage "weights"): a first run fetches them, and some installers report
+ *  one line per part with nothing in between -- LNQ's five folds, each read from an 815 MB release over HTTP, said
+ *  "reading fold N's weights" and then nothing for minutes. 2026-10-26: the two-minute rule called the first LNQ run on
+ *  the laptop stuck while it was downloading (it finished, 474 s). Fifteen minutes for one part of an install. */
+const INSTALL_STALL_MS = 15 * 60 * 1000;
 
 /** True only when the server's job list reads and shows no job running but `ownId` (haversack: GET jobs → { jobs: [{ id,
  *  state }] }). An unreadable list is not "nothing running": a restart is never made on a guess. */
@@ -36,7 +41,7 @@ export async function runHaversackTask(opts: {
   transport?: HaversackTransport;
   options?: Record<string, unknown>;
   onProgress?: (line: string) => void;
-  pollMs?: number; goneMs?: number; queuedStuckMs?: number; stallMs?: number;
+  pollMs?: number; goneMs?: number; queuedStuckMs?: number; stallMs?: number; installStallMs?: number;
 }): Promise<TaskRunResult> {
   const { task, what, onProgress } = opts;
   const pollMs = opts.pollMs ?? POLL_MS, goneMs = opts.goneMs ?? GONE_MS;
@@ -66,7 +71,9 @@ export async function runHaversackTask(opts: {
     const line = j.state === "queued" ? (lastBusy ? "waiting behind another job on the segmentation server" : "waiting for the segmentation server: it is busy with another job")
       : j.state === "running" ? `running${j.progress !== undefined ? ` ${Math.round(j.progress * 100)}%` : ""}` : j.state === "unknown" ? "waiting for the segmentation server to answer" : j.state;
     if (line !== last) { onProgress?.(line); last = line; }
-    const moved = `${j.state}:${j.progress ?? ""}:${j.stage ?? ""}`;
+    // MOVEMENT is any change the server reports: the fraction, the stage, the part, or the line under the stage (an
+    // installer's "reading fold 2's weights" moves nothing else).
+    const moved = `${j.state}:${j.progress ?? ""}:${j.stage ?? ""}:${j.part ?? ""}:${j.detail ?? ""}`;
     if (moved !== lastMoved) { lastMoved = moved; lastChange = Date.now(); }
     if (isFinished(j.state)) {
       if (j.state !== "succeeded") { console.warn(`${task} job`, sub.jobId, j.state, j.error); return { ok: false, reason: "failed", message: `${what} failed on the segmentation server`, ...(j.state === "failed" ? { ranAndFailed: true as const } : {}) }; }
@@ -75,8 +82,9 @@ export async function runHaversackTask(opts: {
     }
     // A running job that has not moved for two minutes is stalled, and a stalled server is a stuck one (Ron, 2026-10-15:
     // "If the biggest danger is that you have to repeat an import, then being aggressive is not a problem").
-    if (j.state === "running" && Date.now() - Math.max(lastChange, lastBusy) > (opts.stallMs ?? STALL_MS)) {
-      if (await nothingElseRunning(transport, sub.jobId)) return { ok: false, reason: "stuck", message: `${what} made no progress for two minutes: the segmentation server seems stuck` };
+    const stallMs = j.stage === "weights" ? (opts.installStallMs ?? INSTALL_STALL_MS) : (opts.stallMs ?? STALL_MS);
+    if (j.state === "running" && Date.now() - Math.max(lastChange, lastBusy) > stallMs) {
+      if (await nothingElseRunning(transport, sub.jobId)) return { ok: false, reason: "stuck", message: j.stage === "weights" ? `${what}: fetching the network's weights made no progress for fifteen minutes; the segmentation server seems stuck` : `${what} made no progress for two minutes: the segmentation server seems stuck` };
       lastBusy = Date.now();
     }
     // STUCK = our job queued for three minutes WHILE THE SERVER RUNS NOTHING ELSE (critic 2026-10-06, finding 12; Ron,

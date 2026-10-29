@@ -99,13 +99,36 @@ export async function writeSettings(path: string, text: string): Promise<void> {
 }
 
 /**
+ * ONE WRITER AT A TIME, ACROSS PROCESSES (critic 2026-10-26, database remove, finding 1): the app and a headless server
+ * write the same file, and two windows of one app send their changes at once; each read the file, changed it and wrote it
+ * back, so one change could undo the other (two removes at once brought a removed database back as the default). A
+ * read-change-write runs under a lock file beside the settings, created exclusively; a lock older than thirty seconds is
+ * a crashed writer's and is taken over.
+ */
+export async function withSettingsLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const lock = `${path}.lock`;
+  await Deno.mkdir(parentDir(path), { recursive: true });
+  for (let i = 0; ; i++) {
+    try { (await Deno.open(lock, { createNew: true, write: true })).close(); break; }
+    catch (e) {
+      if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+      const age = await Deno.stat(lock).then((st) => Date.now() - (st.mtime?.getTime() ?? Date.now()), () => 0);
+      if (age > 30_000) { await Deno.remove(lock).catch(() => {}); continue; }
+      if (i > 200) throw new Error("the settings file is being written by another window; try again");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+  try { return await fn(); } finally { await Deno.remove(lock).catch(() => {}); }
+}
+
+/**
  * THE SECTIONS THE SERVER OWNS are kept as they are on disk when the page writes the file. The page reads the settings
  * once, when it starts, and writes its whole copy back; the database list ([Database]) is written by the server alone
  * (a database made, added or chosen), and the page's older copy erased it: the test cases registered on 2026-10-01
  * vanished from the list, and only the working database was left (Ron, 2026-10-02: "where is the data base that I have
  * used for the past month? I am confused").
  */
-export const SERVER_SECTIONS = ["Database"];
+export const SERVER_SECTIONS = ["Database", "RemoteDatabase", "Sharing"];   // RemoteDatabase: databases on another Mac (db-remote.ts); Sharing: what this Mac shares and where (sharing.ts; the critic 2026-10-28, finding 1: a switch turned off came back on from the page's older copy)
 
 async function keepServerSections(path: string, text: string): Promise<string> {
   const incoming = parseIni(text);
@@ -144,7 +167,7 @@ export async function handleSettingsRequest(req: Request, galleryRoot?: string):
     // A settings file is small by nature; a large body means something is wrong upstream, and this
     // endpoint can write anywhere the app can, so it refuses rather than obliges.
     if (text.length > 1_000_000) return new Response("settings too large", { status: 413 });
-    await writeSettings(path, await keepServerSections(path, text));
+    await withSettingsLock(path, async () => writeSettings(path, await keepServerSections(path, text)));
     return new Response(null, { status: 204, headers: { "x-settings-path": path } });
   }
   return new Response("method not allowed", { status: 405, headers: { allow: "GET, PUT" } });

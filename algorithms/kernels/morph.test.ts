@@ -50,3 +50,25 @@ Deno.test("erode then the block shrinks by one shell", () => {
   assertEquals(e[idx(1, 3, 1)], 0, "edge eroded");
   assertEquals(e[idx(3, 3, 1)], 1, "core kept");
 });
+
+// THE DISTANCE MAP GIVES THE SAME VOXELS AS THE BALL'S OFFSETS (SPEED-2026-10-28.md in the workspace, A6): random masks of
+// several densities, odd grid sizes, radii 1 to 6 and 2.5, grow and shrink -- every voxel compared.
+Deno.test("grow and shrink by the exact distance map equal the ball-offset version, voxel for voxel", async () => {
+  const { morphByOffsets, binaryDilate, binaryErode } = await import("./morph.ts");
+  let seed = 7; const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (const [dims, density] of [[[23, 17, 11], 0.02], [[31, 9, 14], 0.3], [[12, 12, 12], 0.85], [[40, 1, 7], 0.1]] as [[number, number, number], number][]) {
+    const n = dims[0] * dims[1] * dims[2], m = new Uint8Array(n);
+    for (let v = 0; v < n; v++) m[v] = rand() < density ? 1 : 0;
+    for (const r of [1, 2, 2.5, 3, 4, 6]) {
+      const a = binaryDilate(m, dims, r), b = morphByOffsets(m, dims, r, "dilate");
+      const c = binaryErode(m, dims, r), e = morphByOffsets(m, dims, r, "erode");
+      let bad = 0; for (let v = 0; v < n; v++) { if (a[v] !== b[v]) bad++; if (c[v] !== e[v]) bad++; }
+      if (bad) throw new Error(`dims ${dims} density ${density} r ${r}: ${bad} voxels differ`);
+    }
+  }
+  // An empty mask grows to nothing; a full one shrinks only at the faces.
+  const z = new Uint8Array(1000), f = new Uint8Array(1000).fill(1), d: [number, number, number] = [10, 10, 10];
+  if (binaryDilate(z, d, 3).some((x) => x)) throw new Error("an empty mask grew");
+  const fe = binaryErode(f, d, 3), fo = morphByOffsets(f, d, 3, "erode");
+  if (fe.some((x, v) => x !== fo[v])) throw new Error("a full mask shrank differently at the faces");
+});

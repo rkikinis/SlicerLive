@@ -20,7 +20,28 @@ export interface VizControl {
   color?: [number, number, number];   // fill tint for the opacity chip (default cyan)
   /** Plain range slider (e.g. Slicer's VR "Shift") — rendered as a label + native <input range>
    *  + live value, on its own row. Distinct from the tri-state opacity chip. */
-  slider?: { min: number; max: number; step?: number; get: () => number; set: (v: number) => void; format?: (v: number) => string };
+  /** min/max/step may be functions: a range that is only known once the data has arrived (the
+   *  VR shift spans the volume's scalar range, and a streaming load does not have it at build
+   *  time) is re-read on every refresh instead of being frozen at zero slices. */
+  slider?: {
+    min: number | (() => number);
+    max: number | (() => number);
+    step?: number | (() => number);
+    get: () => number;
+    set: (v: number) => void;
+    format?: (v: number) => string;
+  };
+  /** A chip of DISCRETE steps, 0..max, with the same feel as the opacity chip: a click advances
+   *  one step and wraps to 0 past the top, a sideways drag sets it directly. 0 is a real state
+   *  (off), so the control can be clicked or dragged all the way out. For a setting with a few
+   *  meaningful values rather than a continuum — e.g. a contour width in pixels. */
+  steps?: {
+    max: number;
+    get: () => number;
+    set: (v: number) => void;
+    /** Chip label for a value; default is the number. Give 0 a word ("off"), not "0". */
+    format?: (v: number) => string;
+  };
   /** A value pill that opens a demo-supplied dialog (e.g. the VR-preset thumbnail menu). The row
    *  shows text() on the right; clicking runs run(). */
   button?: { text: () => string; run: () => void };
@@ -39,6 +60,9 @@ export interface SegmentControls {
   get: (num: number) => number;       // current opacity 0..1
   set: (num: number, o: number) => void;  // set opacity (continuous; hot-updates while dragging)
   enabled?: () => boolean;            // dim the whole section when there's nothing to toggle
+  /** One line under the list, for something true of the segmentation as a whole rather than of
+   *  one segment — e.g. that segments overlap and only the topmost is shown. null = nothing. */
+  note?: () => string | null;
 }
 export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
@@ -244,6 +268,59 @@ export function installChrome(opts: ChromeOpts): Chrome {
     box.addEventListener("pointercancel", end);
     return paint;
   };
+  // Discrete-step chip (VizControl.steps): the opacity chip's gesture vocabulary over whole
+  // numbers. The fill tracks v/max so the chip reads at a glance, the label spells the value
+  // out, and 0 is a state you can land on rather than a disabled control.
+  const attachSteps = (
+    box: HTMLElement,
+    max: number,
+    get: () => number,
+    set: (v: number) => void,
+    fmt: (v: number) => string,
+    color: [number, number, number],
+    disabled: () => boolean,
+    onChange: () => void,
+  ) => {
+    box.style.cursor = "ew-resize";
+    box.title = `Click to step up (wraps past ${max}) · Drag sideways to set`;
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    const paint = () => {
+      const v = Math.max(0, Math.min(max, Math.round(get())));
+      box.style.opacity = v === 0 ? "0.75" : "1";
+      box.innerHTML =
+        `<span style="position:absolute;left:0;top:0;bottom:0;width:${(v / max) * 100}%;background:${c};opacity:.9"></span>` +
+        `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;` +
+        `font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${fmt(v)}</span>`;
+    };
+    paint();
+    const clamp = (v: number) => Math.max(0, Math.min(max, Math.round(v)));
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (disabled()) return;
+      startX = e.clientX; startV = get(); dragged = false; id = e.pointerId;
+      try { box.setPointerCapture(id); } catch { /* ignore */ }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) {
+        const v = clamp(startV + dx / (130 / max));   // ~130px sweeps the whole range, as the opacity chip does
+        if (v !== get()) { set(v); onChange(); }
+        paint();
+      }
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) { set((clamp(get()) + 1) % (max + 1)); paint(); onChange(); }   // click → step, wrapping to 0
+      try { box.releasePointerCapture(id); } catch { /* ignore */ }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
     "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
 
@@ -303,7 +380,14 @@ export function installChrome(opts: ChromeOpts): Chrome {
         top.appendChild(lab); top.appendChild(val);
         const inp = document.createElement("input");
         inp.type = "range";
-        inp.min = String(c.slider.min); inp.max = String(c.slider.max); inp.step = String(c.slider.step ?? 1);
+        const num = (v: number | (() => number) | undefined, dflt: number) =>
+          v === undefined ? dflt : typeof v === "function" ? v() : v;
+        const setBounds = () => {
+          inp.min = String(num(c.slider!.min, 0));
+          inp.max = String(num(c.slider!.max, 1));
+          inp.step = String(num(c.slider!.step, 1));
+        };
+        setBounds();
         inp.value = String(c.slider.get());
         inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
         const fmt = c.slider.format ?? ((v: number) => String(Math.round(v)));
@@ -313,7 +397,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
         paint();
         row.appendChild(top); row.appendChild(inp);
         pop.appendChild(row);
-        rows.push({ c, row, repaint: () => { inp.value = String(c.slider!.get()); paint(); } });
+        rows.push({ c, row, repaint: () => { setBounds(); inp.value = String(c.slider!.get()); paint(); } });
         continue;
       }
       const lab = document.createElement("span"); lab.textContent = c.label;
@@ -329,6 +413,19 @@ export function installChrome(opts: ChromeOpts): Chrome {
         row.appendChild(pill);
         pop.appendChild(row);
         rows.push({ c, row, repaint: () => { pill.textContent = c.button!.text(); } });
+        continue;
+      }
+      if (c.steps) {   // discrete-step chip (click steps + wraps, drag sets)
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachSteps(
+          box, c.steps.max, c.steps.get, (v) => c.steps!.set(v),
+          c.steps.format ?? ((v) => String(v)), c.color ?? [0.62, 0.9, 1.0],
+          () => c.disabled?.() ?? false, () => opts.onChange?.(),
+        );
+        rows.push({ c, row, repaint: paint });
+        pop.appendChild(row);
         continue;
       }
       if (c.getOpacity && c.setOpacity) {   // unified opacity control (tri-state click + drag slider)
@@ -354,13 +451,17 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // ---- per-segment opacity (swatch + tri-state box), rebuilt from the current case on each open ----
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
-  const segRows: { num: number; box: HTMLElement; color: [number, number, number]; paint: () => void }[] = [];
+  const segRows: { num: number; name: string; box: HTMLElement; color: [number, number, number]; paint: () => void }[] = [];
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0; segHost.innerHTML = "";
     if (!S) return;
     const list = S.list();
-    if (!list.length) return;
+    const noteText = S.note?.();
+    // An empty list can still have something to say — a reader that is WITHHOLDING the
+    // segmentation (an irregular series it cannot be registered to) has no rows but owes the
+    // viewer the reason.
+    if (!list.length && !noteText) return;
     const wrap = document.createElement("div");
     wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" +
       (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
@@ -380,7 +481,14 @@ export function installChrome(opts: ChromeOpts): Chrome {
       row.appendChild(left); row.appendChild(box);
       const paint = attachOpacity(box, () => S.get(s.num), (o) => { if (!(S.enabled && !S.enabled())) S.set(s.num, o); }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
-      segRows.push({ num: s.num, box, color: s.color, paint });
+      segRows.push({ num: s.num, name: s.name, box, color: s.color, paint });
+    }
+    if (noteText) {
+      const n = document.createElement("div");
+      n.textContent = noteText;
+      n.style.cssText = "margin-top:6px;padding:5px 7px;border-radius:6px;background:rgba(255,196,84,.12);" +
+        "color:#ffc454;font:500 11.5px -apple-system,system-ui,sans-serif;line-height:1.35;";
+      wrap.appendChild(n);
     }
     segHost.appendChild(wrap);
     paintSegments();
@@ -388,6 +496,13 @@ export function installChrome(opts: ChromeOpts): Chrome {
   function paintSegments() {
     const S = opts.segments;
     if (!S) return;
+    // The segmentation can arrive AFTER the popup exists (a streaming load attaches it part-way
+    // through the download), so a repaint has to notice that the list itself changed — the rows
+    // and the overlap note are built, not just painted.
+    const list = S.list();
+    const changed = list.length !== segRows.length ||
+      list.some((s, i) => s.num !== segRows[i].num || s.name !== segRows[i].name);
+    if (changed) { buildSegments(); return; }
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
     for (const r of segRows) r.paint();

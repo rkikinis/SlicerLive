@@ -34,13 +34,16 @@ import { handleSceneRoutes } from "./scenes.ts";
 import { picturesFolder } from "./pictures.ts";
 import { isAbsolute, join, normalize } from "jsr:@std/path@1";
 import { parseIni } from "../logic/settings.ts";
-import { readSettings, resolveSettingsPath, writeSettings } from "./settings-file.ts";
+import { readSettings, resolveSettingsPath, withSettingsLock, writeSettings } from "./settings-file.ts";
 import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
 import { bringDatabase, carryRecords, inspectFolder, packageFacts } from "./package-open.ts";
 import { isInside, placeOf } from "./paths.ts";
-import { databaseChanged } from "./extension-jobs.ts";
+import { moveToTrash, otherItems, trashRefusal } from "./db-remove.ts";
+import { handleRemoteRequest, remoteDatabases, remoteEntries } from "./db-remote.ts";
+import { handleSharingRequest } from "./sharing.ts";
+import { databaseChanged, jobsStatus } from "./extension-jobs.ts";
 import { DTI_SAMPLE, getDtiSample, getTestCases, SampleError, TEST_CASES, testCasesComplete, type DtiSampleProgress, type DtiSampleResult, type TestCaseProgress } from "./test-cases.ts";
 import { readRecord, recordKept, removeTransferred, sameDatabase, transferSeries, type TransferProgress, type TransferResult, type TransferSide } from "./db-transfer.ts";
 
@@ -90,17 +93,31 @@ export async function registeredDatabases(galleryRoot?: string): Promise<Registe
 /** Register a path, or change which is current. Returns the list as it now stands. */
 export async function updateDatabases(
   galleryRoot: string | undefined,
-  change: { register?: { id: string; path: string }; current?: string },
+  change: { register?: { id: string; path: string }; current?: string; unregister?: string },
 ): Promise<RegisteredDb[]> {
-  const { path: file, ini: cfg } = await ini(galleryRoot);
-  const sec = cfg.get(SECTION) ?? new Map<string, string>();
-  cfg.set(SECTION, sec);
-  if (change.register) sec.set(change.register.id, change.register.path);
-  if (change.current) sec.set("current", change.current);
-  // Written through the same store as everything else, so one file holds the whole application's
-  // state and a person can read it.
-  const { formatIni } = await import("../logic/settings.ts");
-  await writeSettings(file, formatIni(cfg));
+  const file = resolveSettingsPath(galleryRoot);
+  // READ, CHANGED AND WRITTEN UNDER ONE LOCK (settings-file.ts withSettingsLock; critic 2026-10-26, database remove,
+  // finding 1): two changes at once each see the other's.
+  await withSettingsLock(file, async () => {
+    const cfg = parseIni(await readSettings(file));
+    const sec = cfg.get(SECTION) ?? new Map<string, string>();
+    cfg.set(SECTION, sec);
+    if (change.register) sec.set(change.register.id, change.register.path);
+    // OFF THE LIST (desktop/db-remove.ts): the entry only; what the folder holds is not touched here. When it was the
+    // default, the default moves to the first other one whose folder is there -- chosen on THIS reading of the file.
+    if (change.unregister && change.unregister !== "current") {
+      sec.delete(change.unregister);
+      if (sec.get("current") === change.unregister) {
+        const next = [...sec].find(([id, path]) => id !== "current" && path && (() => { try { return Deno.statSync(join(path, "ctkDICOM.sql")).isFile; } catch { return false; } })());
+        if (next) sec.set("current", next[0]); else sec.delete("current");
+      }
+    }
+    if (change.current) sec.set("current", change.current);
+    // Written through the same store as everything else, so one file holds the whole application's
+    // state and a person can read it.
+    const { formatIni } = await import("../logic/settings.ts");
+    await writeSettings(file, formatIni(cfg));
+  });
   return await registeredDatabases(galleryRoot);
 }
 
@@ -143,6 +160,9 @@ const FEATURES = [
   "listing",       // GET /_db/<id>/_series, GET /_db/<id>/_files?series=<uid> -- what the page asks instead of downloading the index
   "checkpoints",
   "create",        // POST /_db/_create {name, token?, ...description}; POST /_db/_register {token, name?}
+  "remote",        // POST /_db/_pair-remote {host, port} -> {pairing, digits}; GET /_db/_pair-remote/<id>; a database on another Mac (db-remote.ts)
+  "sharing",       // GET/POST /_db/_sharing, POST /_db/_sharing/forget, GET /_db/_nearby (sharing.ts)
+  "remove",        // POST /_db/_remove {id, trash?, dry?} -- off the list; with trash, its folder to the macOS Trash too (db-remove.ts)
   "describe",      // GET/PUT /_db/<id>/_description
   "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
@@ -203,6 +223,19 @@ function startImport(dbId: string, dbPath: string, files: () => Promise<{ files:
 interface TransferJob { job: string; from: TransferSide; to: TransferSide; move: boolean; progress: TransferProgress; result?: TransferResult; error?: string; started: number; ended?: number; removing?: boolean; kept?: boolean; by: string }
 const transfers = new Map<string, TransferJob>();
 
+/** WHAT IS RUNNING ON A DATABASE, in words, or undefined (critic 2026-10-26, database remove, finding 3): an import into
+ *  it, a transfer from or to it, the test-case download or the diffusion sample filling it, an import-time job working
+ *  on it. Remove waits for these: a writer that went on would make the folder again at its old place. */
+function busyWith(d: { id: string; path: string }): string | undefined {
+  if (importQueue.has(d.path)) return "scans are being added to it";
+  for (const t of transfers.values()) if (!t.ended && (t.from.id === d.id || t.to.id === d.id)) return "scans are being copied or moved between it and another database";
+  if (testCasesJob && !testCasesJob.ended && testCasesJob.db === d.id) return "the test cases are being downloaded into it";
+  if (sampleJob && !sampleJob.ended && sampleJob.db === d.id) return "the diffusion sample is being made in it";
+  const jobs = jobsStatus();
+  if (jobs.running?.db === d.id || jobs.queued.includes(d.id)) return "Albula is working on its scans in the background (structures, tracts)";
+  return undefined;
+}
+
 function queued(paths: string[], work: () => Promise<void>): void {
   const prev = Promise.all(paths.map((p) => (importQueue.get(p) ?? Promise.resolve()).catch(() => {})));
   const run = prev.then(work);
@@ -252,6 +285,14 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
 
   const jsonBody = async () => await req.json().catch(() => ({})) as Record<string, unknown>;
   const noStore = { headers: { "cache-control": "no-store" } };
+
+  // A DATABASE ON ANOTHER MAC (desktop/db-remote.ts): pairing, its requests, its import progress and Remove of its entry
+  // go there before anything here looks at a folder.
+  // SHARING THIS MAC'S DATABASES (desktop/sharing.ts): the switches, the Macs allowed, the Macs nearby.
+  const sharing = await handleSharingRequest(req, galleryRoot);
+  if (sharing) return sharing;
+  const remote = await handleRemoteRequest(req, galleryRoot);
+  if (remote) return remote;
 
   // POST /_db/_choose-folder {prompt} -- macOS's folder dialog (desktop/choose-folder.ts); a token, never a path in.
   if (url.pathname === "/_db/_choose-folder" && req.method === "POST") {
@@ -330,6 +371,51 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 400 });
     }
+  }
+
+  // POST /_db/_remove {id, trash?: boolean, dry?: boolean} -- a database off the list (Ron, 2026-10-26: "remove from the
+  // app or remove and delete"). `dry`: what removing it would mean, nothing changed -- whether the Trash is possible and
+  // why not, how many other things its folder holds, what is running on it. Otherwise: the entry goes first (the default
+  // moving to another database, chosen on the same reading of the list), THEN the folder goes to the Trash; a Trash that
+  // fails puts the entry back (critic 2026-10-26, finding 2). Refused while work runs on it (finding 3). Answers in plain
+  // words, the system's own in the session log (finding 5).
+  if (url.pathname === "/_db/_remove" && req.method === "POST") {
+    const b = await jsonBody().catch(() => ({} as Record<string, unknown>));
+    const registered = await registeredDatabases(galleryRoot);
+    const d = registered.find((x) => x.id === String(b.id ?? ""));
+    if (!d) return Response.json({ error: "That database is not in the list any more." }, { status: 404 });
+    const name = d.description?.name ?? d.id;
+    const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
+    let databasesFolder = "";
+    try { databasesFolder = defaultDatabasesFolder(); } catch { /* no home folder: nothing to guard there */ }
+    const refusal = await trashRefusal(d, registered, [home, databasesFolder].filter(Boolean));
+    const busy = busyWith(d);
+    if (b.dry === true) {
+      return Response.json({ id: d.id, name, exists: d.exists, current: d.current, trash: refusal ? { ok: false, why: refusal } : { ok: true },
+        otherItems: d.exists ? await otherItems(d.path) : 0, busy: busy ?? null }, noStore);
+    }
+    if (busy) return Response.json({ error: `“${name}” was not removed: ${busy}. Remove it when that has finished.` }, { status: 409 });
+    const trash = b.trash === true;
+    if (trash && refusal) return Response.json({ error: `“${name}” was not removed: ${refusal}.` }, { status: 400 });
+    let list: RegisteredDb[];
+    try { list = await updateDatabases(galleryRoot, { unregister: d.id }); }
+    catch (e) {
+      console.warn("remove database: the list could not be written:", (e as Error).message);
+      return Response.json({ error: `“${name}” was not removed: Albula could not update its list of databases. Nothing was changed.` }, { status: 500 });
+    }
+    if (trash) {
+      try { await moveToTrash(d.path); }
+      catch (e) {
+        console.warn("remove database: the Trash refused", d.path, (e as Error).message);
+        // PUT BACK: the entry, and the default if it was this one.
+        try { list = await updateDatabases(galleryRoot, { register: { id: d.id, path: d.path }, ...(d.current ? { current: d.id } : {}) }); } catch { /* said below */ }
+        return Response.json({ error: `“${name}” was not removed: its folder could not be moved to the Trash. It is still in the list, unchanged.`,
+          databases: list }, { status: 500 });
+      }
+    }
+    const now = list.find((x) => x.current);
+    return Response.json({ removed: d.id, name, trashed: trash, wasCurrent: d.current,
+      current: now ? { id: now.id, name: now.description?.name ?? now.id, exists: now.exists } : null, databases: list, features: FEATURES }, noStore);
   }
 
   // POST /_db/_create {name, token?, holds, patientData, approval, contact, source} -- a new, empty database, registered.
@@ -555,7 +641,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       // AN UNKNOWN DATABASE IS REFUSED, not accepted: the page then opened the first registered database instead --
       // whichever that was, holding data the person never chose to open (critic 2026-10-14, page asks the server,
       // "Outside the target").
-      if (body.current && !(body.id && body.path && body.current === body.id) && !(await registeredDatabases(galleryRoot)).some((d) => d.id === body.current)) {
+      if (body.current && !(body.id && body.path && body.current === body.id) && !(await registeredDatabases(galleryRoot)).some((d) => d.id === body.current) && !(await remoteDatabases(galleryRoot)).some((d) => d.id === body.current)) {
         return Response.json({ error: `no database “${body.current}” is registered` }, { status: 404 });
       }
       const list = await updateDatabases(galleryRoot, {
@@ -564,7 +650,10 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       });
       return Response.json({ databases: list, features: FEATURES }, { headers: { "cache-control": "no-store" } });
     }
-    return Response.json({ databases: await registeredDatabases(galleryRoot), features: FEATURES }, {
+    // The local ones, then those on another Mac (desktop/db-remote.ts); a remote one may be the default.
+    const local = await registeredDatabases(galleryRoot), remotes = await remoteEntries(galleryRoot);
+    if (remotes.some((r) => r.current)) for (const d of local) d.current = false;
+    return Response.json({ databases: [...local, ...remotes], features: FEATURES }, {
       headers: { "cache-control": "no-store" },
     });
   }
@@ -965,7 +1054,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     try {
       // `source` says who is speaking: a person (the default, and the only one the lookup never
       // overwrites) or the application recording what a server reported ("haversack").
-      await setSeriesAttribute(path, body.uid, body.key, body.value ?? "", body.source === "haversack" ? "haversack" : "user");
+      await setSeriesAttribute(path, body.uid, body.key, body.value ?? "", body.source === "haversack" || body.source === "albula-diffusion" ? body.source : "user");
       return Response.json({ ok: true });
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 500 });

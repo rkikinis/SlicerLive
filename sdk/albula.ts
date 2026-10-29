@@ -31,7 +31,9 @@
 // Version 11 (2026-10-06): setSlicePlane -- a slice view on any plane (its sliceToRAS), for a module that shows the head
 // in its own frame rather than the scanner's (the Tract review).
 
-export const SDK_VERSION = 20;   // 20 (2026-10-21, the critic's round): onAskedDerived (a set asked for a scan already on
+export const SDK_VERSION = 21;   // 21 (2026-10-26, Ron: "fix"): the BIDS import's frameOf / frameRule -- each series of a
+// BIDS session its own frame of reference (logic/import/bids.ts FRAME_RULE), so a kind no longer stamps the session's one.
+// 20 (2026-10-21, the critic's round): onAskedDerived (a set asked for a scan already on
 // screen reaches the module) and forgetAskedDerivedFor (an ask lasts while its scan is in the scene).
 // 19 (2026-10-21): askDerived / askedDerived (logic/asked-derived.ts) -- the tract set ticked in the
 // DICOM browser (or recorded in a scene) for a scan, so the module shows that one and not the newest (Ron: "when I loaded the tracts it did not

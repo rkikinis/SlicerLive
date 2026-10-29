@@ -32,13 +32,13 @@ Deno.test("the checker names what is wrong, one line each", () => {
   const p = checkScene(d).map((x) => `${x.where}: ${x.what}`);
   for (const want of [
     "file: source.producer (the build that wrote it) is missing",
-    "file: extensionsUsed does not name albula-scene/1",
+    "file: extensionsUsed does not name albula-scene/2",
     'node seg: referenceImage points at "nowhere", which is not in the file',
     'node v3: refs.camera points at "gone", which is not in the file',
     'node odd: type "stream" is not in the profile',
     "node cam: position is not a vec3",
     "node seg: segments[0] has no id (the core requires one)",
-    "node ct: dicom.sopInstanceUIDs is empty: a frame of a sequence cannot be told from the others",
+    "node ct: dicom.instances is empty: a frame of a sequence cannot be told from the others",
   ]) assert(p.includes(want), `expected: ${want}\ngot:\n${p.join("\n")}`);
 });
 

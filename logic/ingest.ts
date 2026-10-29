@@ -9,6 +9,7 @@ import type { ZarrDesc } from "../render/zarr.ts";
 import { cacheDecodedVolume, cacheDecodedVolumeNative, rememberRange, type ZarrVolumeNative } from "../render/zarr.ts";
 import { getBlobFetch, setBlobFetch, setLocalChunk } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
+import { deflateBytes, sha256Name } from "./bytes.ts";
 import type { LiveScene } from "../render/livescene.ts";
 import type { MrsonNode } from "../render/mrson.ts";
 import { histogramPercentiles } from "./window-level.ts";
@@ -29,14 +30,10 @@ export interface ZarrBlobs {
   seen?: Uint8Array;
 }
 
-async function deflate(raw: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream("deflate");                                   // zlib-wrapped, like Python zlib.compress
-  return new Uint8Array(await new Response(new Blob([raw as BlobPart]).stream().pipeThrough(cs)).arrayBuffer());
-}
-export async function sha256(bytes: Uint8Array): Promise<string> {
-  const h = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
-  return "sha256-" + [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+// Moved to logic/bytes.ts, so the MRCOM writer and this path cannot drift on what a chunk IS
+// ("zlib-wrapped deflate, named by the sha256 of the compressed bytes" is a format commitment).
+// `sha256` keeps its old name and its "sha256-"-prefixed return value for back-compat.
+export { deflateBytes as deflate, sha256Name as sha256 } from "./bytes.ts";
 
 /**
  * A worker per core (capped), or none when workers are unavailable.
@@ -177,8 +174,8 @@ export async function volumeToZarr(
       const p = payload(kk, jj, ii);
       msMaterialize += performance.now() - t;
       t = performance.now();
-      const comp = compressor === "raw" ? p : await deflate(p);
-      const hash = await sha256(comp);
+      const comp = compressor === "raw" ? p : await deflateBytes(p);
+      const hash = await sha256Name(comp);
       msCodec += performance.now() - t;
       record(kk, jj, ii, comp, hash);
     }

@@ -9,6 +9,7 @@
 //   ?case=<pid>&coll=<mets|myeloma>     (defaults to the first zarr-ready case)
 // Bundled to live/webgpu/spine-compare.js
 import { initDevice } from "../../render/device.ts";
+import { budgetWasReduced, reduceBudget } from "../../render/gpu-budget.ts";
 import { slicerDefaultOffset01, type Orientation } from "../../render/slice-renderer.ts";
 import { SliceInteractor } from "../../render/slice-interactor.ts";
 import { attachSliceControls } from "../../render/demos/slice-control.ts";
@@ -17,7 +18,7 @@ import { attachDoubleClick } from "../../render/demos/view-grid.ts";
 import { createCrosshair, drawCross, rasToScreen3D } from "../../render/demos/crosshair.ts";
 import { installChrome, type VizControl } from "../../render/demos/sl-chrome.ts";
 import {
-  BUCKET, buildSpineCompareScene, loadCaseMeta, LEVEL_NAME, METHOD_COLORS,
+  BUCKET, buildSpineCompareScene, DISC_COLOR, isDisc, loadCaseMeta, LEVEL_NAME, METHOD_COLORS,
   type SpineCompareScene,
 } from "./spine-compare-scene.ts";
 import type { Vec3 } from "../../render/mat4.ts";
@@ -42,6 +43,31 @@ interface CaseEntry {
 async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   const gpu = await initDevice();
+  // The budget this load is running on. Captured in a mutable so the device-lost handler below can
+  // halve it even if the loss happens DURING scene construction, when `sc` is still in its TDZ.
+  let budgetInUse = 0.75e9;
+  // A LOST DEVICE IS WHAT "the viewers went black, then white" ACTUALLY IS. The browser drops the
+  // GPU out from under the page — usually out of memory with several large volumes resident — and
+  // every canvas stops updating with nothing in the console a user can act on. Say so, and say what
+  // to do about it, instead of leaving blank boxes on screen.
+  gpu.device.lost.then((info) => {
+    if (info.reason === "destroyed") return;        // our own teardown, not a failure
+    status(`GPU device lost (${info.reason}) — the views stopped updating.`, true);
+    const warn = document.createElement("div");
+    warn.style.cssText = "position:fixed;inset:auto 0 0 0;padding:10px 14px;background:#3a1216;color:#ffd7da;" +
+      "font:13px/1.4 system-ui;z-index:9999;border-top:1px solid #6b2630;display:flex;gap:12px;align-items:center";
+    const txt = document.createElement("span");
+    txt.textContent = "The GPU dropped this page" + (info.message ? ` (${info.message})` : "") +
+      ". Running out of GPU memory is the usual cause.";
+    const btn = document.createElement("button");
+    btn.textContent = "Reload at lower resolution";
+    btn.style.cssText = "padding:5px 10px;border-radius:6px;border:1px solid #8a3340;background:#5a1d24;color:#ffd7da;cursor:pointer";
+    // A lost device cannot be revived, so the only way to act on this is to come back smaller. The
+    // reduced budget is remembered for the session, so the reload does not walk into it again.
+    btn.addEventListener("click", () => { reduceBudget(budgetInUse); location.reload(); });
+    warn.append(txt, btn);
+    document.body.appendChild(warn);
+  });
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
 
@@ -71,6 +97,13 @@ async function main() {
     shell: PARAMS.get("shell") === "all" ? "all" : "outer",
     bandVox: PARAMS.get("band") ? Number(PARAMS.get("band")) : undefined,
   });
+  // Say what this view sized itself to. When the grid was coarsened to fit the device, the surfaces
+  // being compared are lower-resolution than the data — a reviewer has to know that, not discover it.
+  {
+    const m = sc.memory();
+    budgetInUse = m.budgetBytes;
+    console.info(`spine-compare GPU budget: ${(m.budgetBytes / 1e9).toFixed(2)} GB (${m.why})\n  ` + m.rows.join("\n  "));
+  }
   sc.upgraded.then(() => { drawAll(); status(`${coll}/${pid} — full-res CT loaded`); })
     .catch(() => status(`${coll}/${pid} — full-res CT failed to load (showing preview res)`, true));
 
@@ -264,46 +297,107 @@ async function main() {
   let extent = 99;
   const extents = [["ext-one", 0], ["ext-pm1", 1], ["ext-pm3", 3], ["ext-full", 99]] as const;
   const SLICE_MARGIN = 1.5;                     // in-plane context around the level bbox
-  const frameCamera = (center: Vec3, radius: number) => {
-    // keep the current viewing DIRECTION; move focal point + dolly so the target fits
+  /** Point the camera at `center`, keeping the current viewing DIRECTION. `keepDistance` keeps the
+   *  current dolly too, so the move is a pure pan: stepping from one vertebra to the next holds the
+   *  zoom you set instead of refitting to each bone's bounding sphere. Refitting is right when the
+   *  extent MODE changes (you asked for a different amount of spine), not when the target moves. */
+  const frameCamera = (center: Vec3, radius: number, keepDistance = false) => {
     const d: Vec3 = [
       camera.focalPoint[0] - camera.position[0],
       camera.focalPoint[1] - camera.position[1],
       camera.focalPoint[2] - camera.position[2],
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
-    const dist = radius / Math.tan(((camera.viewAngle / 2) * Math.PI) / 180);
+    const dist = keepDistance ? len : radius / Math.tan(((camera.viewAngle / 2) * Math.PI) / 180);
     camera.focalPoint = [...center] as Vec3;
     camera.position = [center[0] - d[0] / len * dist, center[1] - d[1] / len * dist, center[2] - d[2] / len * dist];
   };
-  const applyFocus = () => {
+  // An EMPTY 3D cell is almost always real: this method has no label at the focused level (SPINEPS
+  // and the reference disagree about which bone is which — that is the whole point of the view), or
+  // its labels stop short of the reference's range. An unexplained black box reads as a broken
+  // renderer, so each 3D cell carries a note that says which.
+  const emptyNote: Record<MethodKey, HTMLElement> = {} as Record<MethodKey, HTMLElement>;
+  for (const k of keys) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    cv[`c-${k}-threeD`].parentElement!.appendChild(d);
+    emptyNote[k] = d;
+  }
+  const updateEmptyNotes = () => {
+    for (const k of keys) {
+      const none = sc.visibleLevels(k).length === 0;
+      emptyNote[k].classList.toggle("on", none);
+      if (none) {
+        const lvl = currentLevel == null ? "" : ` at ${LEVEL_NAME[currentLevel] ?? currentLevel}`;
+        const span = extent === 0 ? "" : ` ±${extent}`;
+        emptyNote[k].textContent = `${k === "spineps" ? "SPINEPS" : "Reference"} has no label${lvl}${span}`;
+      }
+    }
+  };
+
+  /** `refit` reframes the views to the focus box; without it they keep the zoom they have and only
+   *  move to the new target. Mode changes refit, level changes do not. */
+  const applyFocus = (refit = false) => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
+    updateEmptyNotes();
     if (box) {
       const c: Vec3 = [(box.lo[0] + box.hi[0]) / 2, (box.lo[1] + box.hi[1]) / 2, (box.lo[2] + box.hi[2]) / 2];
       const ext: Vec3 = [box.hi[0] - box.lo[0], box.hi[1] - box.lo[1], box.hi[2] - box.lo[2]];
       // slices: zoom each orientation to the bbox's in-plane extents (u/v axes per orientation)
-      const fov = (a: number, b: number) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)] as const;
-      const [axU, axV] = fov(0, 1); sc.slice.setMirrorFrame("axial", c, axU, axV);
-      const [coU, coV] = fov(0, 2); sc.slice.setMirrorFrame("coronal", c, coU, coV);
-      const [saU, saV] = fov(1, 2); sc.slice.setMirrorFrame("sagittal", c, saU, saV);
-      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15);
-    } else {
+      if (refit) {
+        const fov = (a: number, b: number) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)] as const;
+        const [axU, axV] = fov(0, 1); sc.slice.setMirrorFrame("axial", c, axU, axV);
+        const [coU, coV] = fov(0, 2); sc.slice.setMirrorFrame("coronal", c, coU, coV);
+        const [saU, saV] = fov(1, 2); sc.slice.setMirrorFrame("sagittal", c, saU, saV);
+      } else {
+        for (const o of ORIENTS) sc.slice.recenter(o, c);
+      }
+      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15, !refit);
+    } else if (refit) {
       for (const o of ORIENTS) sc.slice.resetView(o);
       frameCamera(sc.center, sc.radius);
     }
     requestDraw();
   };
-  for (const [id, n] of extents) el(id)?.addEventListener("click", () => { extent = n; applyFocus(); });
+  /** The vertebra whose centroid is nearest `p`, across both methods. */
+  const nearestLevel = (p: Vec3): number | null => {
+    let best: number | null = null, bd = Infinity;
+    for (const row of sc.rows) {
+      for (const [l, g] of row.levels) {
+        if (isDisc(l)) continue;
+        const d = Math.hypot(g.centroid[0] - p[0], g.centroid[1] - p[1], g.centroid[2] - p[2]);
+        if (d < bd) { bd = d; best = l; }
+      }
+    }
+    return best;
+  };
+  for (const [id, n] of extents) {
+    el(id)?.addEventListener("click", () => {
+      extent = n;
+      // A scoped extent needs a level to scope AROUND. With none chosen the chip used to light up
+      // and nothing else happened — the view only switched once an arrow key happened to select
+      // one. Fall back to the level nearest the crosshair (the volume centre on a fresh load).
+      if (n < 99 && currentLevel == null) {
+        const l = nearestLevel(xhair.ras ?? sc.center);
+        if (l != null) { selectLevel(l, true); return; }
+      }
+      applyFocus(true);          // the MODE changed — reframe to the new amount of spine
+    });
+  }
 
   const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [s, Number(n)]));
   const strip = el("levels");
-  const selectLevel = (label: number) => {
+  /** Move the focus to `label`. The views FOLLOW it at the zoom they already have — stepping down
+   *  the spine should not keep refitting under you. They reframe only when the extent mode changes,
+   *  including the implicit full-spine -> one-vertebra that a level click means. */
+  const selectLevel = (label: number, refit = false) => {
     currentLevel = label;
-    if (extent >= 99) extent = 0;               // a level click means "show me this bone"
+    const modeChanged = extent >= 99;
+    if (modeChanged) extent = 0;                // a level click means "show me this bone"
     const g = sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label);
     if (g) { xhair.set(g.centroid); jumpAll(g.centroid); }
-    applyFocus();
+    applyFocus(refit || modeChanged);
     for (const bb of strip.querySelectorAll("button")) {
       bb.classList.toggle("sel", (bb as HTMLElement).dataset.label === String(label));
     }
@@ -371,17 +465,42 @@ async function main() {
 
   // ── chrome: layer toggles (tri-state opacity, SEGRoulette-style) on the rows ─
   const controls: VizControl[] = [
-    { label: "SPINEPS shell", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => { sc.setMethodOpacity("spineps", o); drawAll3d(); }, color: METHOD_COLORS.spineps },
-    { label: "Reference shell", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => { sc.setMethodOpacity("ref", o); drawAll3d(); }, color: METHOD_COLORS.ref },
+    { label: "SPINEPS segmentation", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => { sc.setMethodOpacity("spineps", o); requestDraw(); }, color: METHOD_COLORS.spineps },
+    { label: "Reference segmentation", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => { sc.setMethodOpacity("ref", o); requestDraw(); }, color: METHOD_COLORS.ref },
     { label: "CT volume (3D)", getOpacity: () => sc.volumeOpacity(), setOpacity: (o) => { sc.setVolumeOpacity(o); drawAll3d(); }, color: [0.75, 0.78, 0.85] },
-    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => { sc.setDiscOpacity(o); requestDraw(); }, color: [0.72, 0.72, 0.66] },
+    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => { sc.setDiscOpacity(o); requestDraw(); }, color: DISC_COLOR },
+    // Surface smoothing — the reconstruction width of the band-limited label field the surface is
+    // the 0.5 level set of. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the surface follows the labelmap voxel for voxel, which is what you need to see
+    // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
+    // up turns the same labels into a modelled surface, which is what you need when several
+    // vertebrae are on screen and the question is which bone is which.
+    {
+      label: "Surface smoothing",
+      slider: {
+        min: 0,
+        max: 2,
+        step: 0.25,
+        get: () => sc.segSmoothing(),
+        set: (v) => { sc.setSegSmoothing(v); drawAll3d(); },
+        format: (v) => (v > 0 ? `σ ${v.toFixed(2)} vox` : "voxels"),
+      },
+    },
   ];
   installChrome({ controls, anchor: cv["c-ref-threeD"].parentElement ?? undefined });
 
   // ── header info + case selector ────────────────────────────────────────────
   const cmp = entry?.compare;
+  const mem = sc.memory();
+  // When the 3D grid was coarsened to fit the GPU, the surfaces being compared are lower-resolution
+  // than the data. A reviewer has to be told that in the view, not left to infer it.
+  const memNote = budgetWasReduced()
+    ? ` · reduced GPU budget after a device loss — 3D surfaces at ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "lower res"}`
+    : mem.coarsened
+    ? ` · 3D surfaces coarsened to ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "fit"} to fit GPU memory`
+    : "";
   el("info").textContent =
-    `${coll}/${pid} · ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree · ${cmp.n_shifted} shifted · mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}`;
+    `${coll}/${pid} · ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree · ${cmp.n_shifted} shifted · mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}${memNote}`;
 
   // Case button (upper right) → dropdown selector over all 121 cases, worst
   // agreement first. Picking one navigates (?case=…) — a case load rebuilds
@@ -450,7 +569,18 @@ async function main() {
     center: () => sc.center,
     offsets: () => ({ ...off }),
     crosshair: () => xhair.ras,
-    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint] }),
+    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp], viewAngle: camera.viewAngle }),
+    setCamera: (p: number[], f: number[], up?: number[], va?: number[] | number) => {
+      camera.position = [p[0], p[1], p[2]];
+      camera.focalPoint = [f[0], f[1], f[2]];
+      if (up) camera.viewUp = [up[0], up[1], up[2]];
+      if (typeof va === "number") camera.viewAngle = va;
+      drawAll3d();
+    },
+    // Raw scene handles, for bisecting a render artifact from the console/CDP without going
+    // through the UI (which refits the camera every time the extent changes).
+    scenes: () => sc.rows.map((r) => r.scene),
+    redraw: () => drawAll3d(),
     levels: (k: MethodKey) => [...rowOf(k).levels.values()].filter((g) => g.label < 100).map((g) => ({ label: g.label, name: g.name, voxels: g.voxels, centroid: g.centroid })),
     jumpLevel: (name: string) => {
       const label = nameToLabel[name];
@@ -460,13 +590,23 @@ async function main() {
       return g?.centroid ?? null;
     },
     zoom: (o: Orientation) => sc.slice.zoom(o),
+    zoomAbout: (o: Orientation, f: number) => {
+      const c = cv[`c-ref-${o}`];
+      sc.slice.zoomAbout(o, f, 0.5, 0.5, c.width || 1, c.height || 1);
+      requestDraw();
+    },
     visibleLevels: (k: MethodKey) => sc.visibleLevels(k),
     currentLevel: () => currentLevel,
     stepLevel: (d: number) => stepLevel(d),
     extent: () => extent,
-    setExtent: (n: number) => { extent = n; applyFocus(); },
+    setExtent: (n: number) => { extent = n; applyFocus(true); },   // matches the chip: a mode change reframes
     methodOpacity: (k: MethodKey) => sc.methodOpacity(k),
-    setMethodOpacity: (k: MethodKey, o: number) => { sc.setMethodOpacity(k, o); drawAll3d(); },
+    setMethodOpacity: (k: MethodKey, o: number) => { sc.setMethodOpacity(k, o); requestDraw(); },
+    smoothing: () => sc.segSmoothing(),
+    setSmoothing: (v: number) => { sc.setSegSmoothing(v); drawAll3d(); },
+    discOpacity: () => sc.discOpacity(),
+    mem: () => sc.memory(),
+    setDiscOpacity: (v: number) => { sc.setDiscOpacity(v); requestDraw(); },
   };
 }
 
