@@ -30,8 +30,10 @@ The list of databases Albula opens is in `settings.ini`, section `[Database]`: `
 for the one open by default (`desktop/settings-file.ts`). The file is `~/.config/slicerlive/settings.ini` on macOS and
 Linux (where Albula keeps it on Windows is not decided yet: the workspace's cross-platform plan, step 2), unless a
 `settings.ini` already exists in the application's gallery folder or one or two folders above it, which then wins
-(`resolveSettingsPath`). A database anywhere else on disk can be registered; Load / Save › Load from the DICOM database ›
-Databases… offers to move or copy it into the parent.
+(`resolveSettingsPath`). A database anywhere else on disk can be registered; Load / Save › Databases › Add from
+elsewhere… offers to move or copy it into the parent. The Databases section lists every database in the parent folder,
+in use or not (since 2026-10-29); one switched off outside it is kept, with its path, in the settings file's
+`[Databases not in use]`, so its row stays.
 
 Paths inside a database are relative to its folder, so a database folder can be moved, renamed or copied to another
 machine whole.
@@ -102,13 +104,17 @@ writes:
 
 Where dicom3tools' `dciodvfy` is installed, the tests check the label-map, surface, image and tractography writers, the
 BIDS converter's output, the diffusion writer and the scene object with it (skipped without it), each allowing a named
-list of errors it does not fix. A DICOM object Albula makes from another keeps the source's attributes, private ones
-included, except private pixel data (groups 7F01–7FFF); a conversion from NIfTI or NRRD has no DICOM source to keep.
+list of errors it does not fix. **Since 2026-10-29 a DICOM object Albula makes from another carries none of the source's
+private attributes** (rule 2, `logic/private-attributes.ts`; Ron, on Michael Halle's reply): the source keeps them as
+received, and the object names its source slices (SourceImageSequence, each from the volume's own slices) and states
+the rule in DerivationDescription. Objects made before then carry them (rule 1). A conversion from NIfTI or NRRD has no
+DICOM source.
 
 ### The working copy: `SlicerAlbula-Zarr/` (not DICOM; derived)
 
 One `<series instance UID>.zarr/` folder per grayscale series ("duckn": Zarr v3, zstd-compressed chunks, a JSON header
-holding the series' DICOM header in the standard's JSON form). Loads read the copy because it is faster than parsing
+holding Michael Halle's view of the series' DICOM header: no private or binary elements; since 2026-10-29 no full copy
+of the header beside it either -- the original files keep every attribute). Loads read the copy because it is faster than parsing
 DICOM; the DICOM files stay the record. Each copy carries the fingerprint of the code that made it; a copy made by other
 code is not used, and the series loads from DICOM. Each copy lists any image of the series it does not hold.
 **Today copies are made only by the hand-run sweep** (`deno run -A desktop/duckn-sweep.ts <database>`; its report is
@@ -172,11 +178,32 @@ Original acquisitions never. Scenes and the record store only on purpose (they a
 derived may be deleted when there is a reason: segmentations, tracts, surfaces and crops (through the app, which also
 removes their index rows, cache files and record-store rows), and the working copy, caches and checkpoints (made again).
 
-A whole database is removed only by the person, in the Databases window (2026-10-26, `desktop/db-remove.ts`): from the
-list only (the folder untouched), or with its folder moved to the macOS Trash -- original acquisitions included, which is
+A whole database is removed only by the person, in Load / Save's Databases section (the Databases window until
+2026-10-29; `desktop/db-remove.ts`): from the list only (its In use switch; the folder untouched), or with its folder moved to the macOS Trash -- original acquisitions included, which is
 the point of that choice; Finder's Put Back brings it back until the Trash is emptied. Its rows in the record store
 beside the folder (`provenance.sqlite`: made-from edges, attributes, scenes, cohorts) are left as they are, as a moved
 database leaves them; scenes are listed only while their file exists, the other rows stay as a record.
+
+## The archive's list and the Trash (2026-10-29)
+
+**`SlicerAlbula-Archive/manifest.jsonl`** in the database folder: the archive's list, one JSON entry per line, only ever
+added to (`{"op":"add","path":...}` lists a file by its path as the index writes it; a later `{"op":"remove",...}` takes
+it off). The app never deletes a listed file: Delete, the editor's removal of an earlier copy, a move between databases,
+the BIDS tool's replace and the server's write route all refuse it and change nothing (`desktop/archive.ts`). A scene's
+own save replaces its listed DICOM object and lists the new one in its place. A line the app cannot read stops every
+removal in that database until it is fixed (a new file is still written). **What is listed today:** the records,
+kept where their writers put them -- the tract review's verdicts (`SlicerAlbula-SEG/tract-review.json`), the
+description (`albula-database.json`), the transfer record (`albula-record.jsonl`), the run log
+(`SlicerAlbula-Logs/diffusion-runs.jsonl`) -- listed at the server's start and at a record's save; a record's own
+writer replaces it, one save at a time, after putting the version it replaces in the Trash under a dated name. The rest
+(received scans, edited segmentations) is listed by a later step (the plan,
+`Contents/docs/ARCHIVE-AND-REBUILD-PLAN-2026-10-29.md` in the workspace).
+
+**What the app removes goes to the Trash** (macOS's `/usr/bin/trash`; Put Back works): a deleted series' files, a
+deleted scene's file. Putting files back does not put a series back in the index: add them again like any files. The
+working copy and cache files of a deleted series are still removed outright (made again from the series). Where there is
+no system Trash (another system), and for databases in the system's temporary folder (the tests'), the files go to
+**`.SlicerAlbula-Trash/<date> <database>/`** beside the database folder instead; nothing empties it, as with a Trash.
 
 ## Notes added 2026-10-26
 

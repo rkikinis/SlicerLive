@@ -272,7 +272,7 @@ Deno.test({
 // PRIVATE ATTRIBUTES ARE CARRIED, SLICE BY SLICE (Ron, 2026-09-26, "agree", on qa/2026-09-26-dcmjs-pr-tests.md finding 3;
 // logic/private-attributes.ts): each output slice gets the private elements of ITS source slice, as they were, and a
 // vendor's private image data (group 7F01-7FFF, e.g. GE's "GEIIS" thumbnail in 7FD1) is left out.
-Deno.test("the source's private attributes are carried slice by slice; private image data is left out", async () => {
+Deno.test("rule 2: a derived image carries no private attribute of its source and names every one left out; rule 1 still reads as it did", async () => {
   const dcm = await (await import("./dicom-io.ts")).dicomIO();
   const series = await makeCtSeries(16, 14, 10);
   // Add a vendor block to every source slice: a creator, a text value naming the slice, a binary value, and a
@@ -297,8 +297,10 @@ Deno.test("the source's private attributes are carried slice by slice; private i
   );
   assert(cropped, "the box missed the volume");
   const out = await volumeToDicomSeries(cropped.data as unknown as ArrayLike<number>, cropped.dims as [number, number, number], cropped.ijkToRAS, sources, { seriesDescription: "CT (cropped)" });
-  assertEquals(out.privateLeftOut, ["7FD10010", "7FD11010"], "the private image data is named as left out");
-  assertEquals(out.privateCarried, out.slices * 3, "three private elements per slice");
+  // RULE 2 (since 2026-10-29): no private attribute is carried; every one is named as left out.
+  assertEquals(out.privateRule, 2);
+  assertEquals(out.privateLeftOut, ["00290010", "00291010", "00291020", "7FD10010", "7FD11010"], "every private element is named as left out");
+  assertEquals(out.privateCarried, 0, "none carried");
   // Each output slice carries the value of the source slice on its own plane.
   const sopToK = new Map(sources.map((b, k) => [String(dcm.naturalize(dcm.readFile(b).dict).SOPInstanceUID), k]));
   for (const inst of out.instances) {
@@ -307,12 +309,13 @@ Deno.test("the source's private attributes are carried slice by slice; private i
     const fromSop = String(((ds.SourceImageSequence as Record<string, unknown>[] | Record<string, unknown>) as Record<string, unknown>[])?.[0]?.ReferencedSOPInstanceUID ?? (ds.SourceImageSequence as Record<string, unknown>)?.ReferencedSOPInstanceUID);
     const k = sopToK.get(fromSop);
     assert(k !== undefined, "each slice names its source");
-    assertEquals(raw["00290010"]?.Value, ["TEST VENDOR"]);
-    assertEquals(raw["00291010"]?.Value, [`slice ${k}`], "the source slice's own value");
-    assertEquals([...new Uint8Array(raw["00291020"]!.Value![0] as ArrayBuffer)], [k!, 1, 2, 3], "binary values byte for byte");
-    assertEquals(raw["7FD10010"], undefined, "the private thumbnail block is not carried");
-    assertEquals(raw["7FD11010"], undefined);
+    for (const t of ["00290010", "00291010", "00291020", "7FD10010", "7FD11010"]) assertEquals(raw[t], undefined, `${t} is not carried`);
   }
+  // Rule 1, kept for reading what earlier objects carry: the vendor's three, not the private image data.
+  const { privateToCarry } = await import("./private-attributes.ts");
+  const v1 = privateToCarry(dcm.readFile(sources[0]).dict as Parameters<typeof privateToCarry>[0], 1);
+  assertEquals(Object.keys(v1.carry).sort(), ["00290010", "00291010", "00291020"]);
+  assertEquals(v1.leftOut.map((x) => x.tag).sort(), ["7FD10010", "7FD11010"]);
 });
 
 // Two conformance faults a public TCGA-UCEC CT showed and the synthetic series did not (dciodvfy, 2026-09-28): the CT
@@ -393,4 +396,32 @@ Deno.test({
     assertEquals(["BodyPartExamined" in d, "Laterality" in d], [true, false]);
     assertEquals(dciodvfy(out.instances[0].bytes)!.errors.filter((e) => /Laterality/.test(e)), []);
   },
+});
+
+// One volume of a series that holds several (a 4D diffusion scan in single-slice files, GE or Philips): its slices are
+// its source, not another volume's at the same place, and its header comes from its own first slice (the critic,
+// 2026-10-29, private rule 2 findings 1 and 2: 44 of 44 slices named another volume's).
+Deno.test("one volume of a series of several names its own slices as its source and keeps its own timing", async () => {
+  const dcm = await (await import("./dicom-io.ts")).dicomIO();
+  const shared = { SeriesInstanceUID: "1.2.826.0.1.3680043.10.999.1", StudyInstanceUID: "1.2.826.0.1.3680043.10.999.2", FrameOfReferenceUID: "1.2.826.0.1.3680043.10.999.3", SeriesDescription: "DWI" };
+  const v1 = await makeCtSeries(6, 5, 4, { extra: { ...shared, TemporalPositionIdentifier: 1, AcquisitionTime: "100000" } });
+  const v2 = await makeCtSeries(6, 5, 4, { extra: { ...shared, TemporalPositionIdentifier: 2, AcquisitionTime: "100500" } });
+  const sops = (s: typeof v1) => s.instances.map((b) => String(dcm.naturalize(dcm.readFile(b).dict).SOPInstanceUID));
+  const own = sops(v2);
+  const vol = reconstructSeries(await parseInstances(v2.instances));
+  const all = [...v1.instances, ...v2.instances];
+  const out = await volumeToDicomSeries(vol.data as unknown as ArrayLike<number>, vol.dims as [number, number, number], vol.ijkToRAS, all, { seriesDescription: "volume 2", sourceInstanceUIDs: own });
+  for (const inst of out.instances) {
+    const ds = dcm.naturalize(dcm.readFile(ab(inst.bytes)).dict) as Record<string, unknown>;
+    const ref = ds.SourceImageSequence as Record<string, unknown>[] | Record<string, unknown>;
+    const from = String((Array.isArray(ref) ? ref[0] : ref)?.ReferencedSOPInstanceUID);
+    assert(own.includes(from), "each slice names one of volume 2's own slices");
+    assertEquals(Number(ds.TemporalPositionIdentifier), 2, "volume 2's own timing");
+    assert(/Private attributes: rule 2/.test(String(ds.DerivationDescription)), "the rule is in the object");
+  }
+  // Without the list, the old way: the first file's header (volume 1's), kept for callers that pass none.
+  const loose = await volumeToDicomSeries(vol.data as unknown as ArrayLike<number>, vol.dims as [number, number, number], vol.ijkToRAS, all, { seriesDescription: "no list" });
+  assertEquals(Number((dcm.naturalize(dcm.readFile(ab(loose.instances[0].bytes)).dict) as Record<string, unknown>).TemporalPositionIdentifier), 1);
+  // A list that names none of the files is refused, not saved with another volume's header.
+  await assertRejects(() => volumeToDicomSeries(vol.data as unknown as ArrayLike<number>, vol.dims as [number, number, number], vol.ijkToRAS, v1.instances, { sourceInstanceUIDs: own }), Error, "own slices");
 });

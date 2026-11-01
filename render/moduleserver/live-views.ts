@@ -17,7 +17,7 @@ import { type Orientation, SliceRenderer } from "../slice-renderer.ts";
 import { fitFovToVolume } from "../../logic/slice-logic.ts";
 import { applyMat4, type Mat4 } from "../mat4.ts";
 import { broadcastSlice, type LinkSliceState, type SliceLinkFlag } from "../../logic/link.ts";
-import { reformatSliceToRAS } from "../../logic/slice-logic.ts";
+import { reformatSliceToRAS, snapOffsetToVoxel } from "../../logic/slice-logic.ts";
 import { type DrawPlane, drawPlaneOf, planeChange } from "../../logic/fill-polygon.ts";
 import { placeClick, removeControlPointOp } from "../../logic/markups/placer.ts";
 import { measurementsFor, polygonArea, polylineLength, type MarkupType } from "../../logic/markups/measurements.ts";
@@ -82,7 +82,7 @@ export let last3DFields: { volume: string | null; keys: string[]; suppressed: st
   { volume: null, keys: [], suppressed: [] };
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
-export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[]; fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]): void }
+export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; /** A short note beside the brush that fades after three seconds (what a stroke left out). */ brushNote(text: string): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[]; fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]): void }
 
 // THE VIEW COLORS ARE THE THEME'S -- the same token the view bar and the Red / Yellow / Green
 // buttons use, read once for the canvases, which cannot use var(). These were literals here
@@ -137,7 +137,7 @@ export interface ProbeReading {
   rows: ProbeRow[];
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void; onNativeDraw?: (segId: string, segment: number, points: Vec3[], normal: Vec3) => void; connect?: boolean; /** Click to outline (render/click-outline-tool.ts): a click at a point (+1 adds, -1 takes away), or null to end the tool. */ onClickOutline?: (ras: Vec3 | null, sign: 1 | -1) => void }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onNotify?: (n: { title: string; body?: string; actions?: { label: string; primary?: boolean; onClick: () => void }[] }) => void; startup?: () => { drawing?: boolean; lighting?: string }; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3, first: boolean, viewImage?: string) => void; /** The scan shown in the slice view the pointer is over, when that changes (the brush's limit reads it). */ onViewScan?: (imageId: string) => void; /** Shift+wheel over a slice while the brush is on: one step bigger (+1) or smaller (-1). */ onBrushStep?: (dir: 1 | -1) => void; onNativePaintCommit?: (segId: string) => void; /** What a stroke at `ras` would paint (logic/segment-tools.ts previewBrush): the voxel centers and the grid's three steps; null while not known. */ onBrushPreview?: (segId: string, segment: number, ras: Vec3, radiusMm: number, sphere: boolean, normal: Vec3, viewImage?: string) => { will: Vec3[]; axes: [Vec3, Vec3, Vec3] } | null; onNativeDraw?: (segId: string, segment: number, points: Vec3[], normal: Vec3) => void; connect?: boolean; /** Click to outline (render/click-outline-tool.ts): a click at a point (+1 adds, -1 takes away), or null to end the tool. */ onClickOutline?: (ras: Vec3 | null, sign: 1 | -1) => void; onToolPick?: (tool: string, ras: Vec3, sign: 1 | -1, remove?: boolean) => void; onToolStroke?: (tool: string, stroke: { kind: "slice"; points: Vec3[]; normal: Vec3 } | { kind: "3d"; points: [number, number][]; vp: Float32Array }, sign: 1 | -1) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -1126,14 +1126,50 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     if (brushEffect() && (brushCursor?.cell === c || brushStroke?.cell === c)) {
       const f = c.slice.mirrorFrame(c.orientKey, aspect); const pxPerMm = ov.width / f.fovX;
       const rPx = (brushDiameterMm() / 2) * pxPerMm;
-      const col = withAlpha(brushEffect() === "remove" ? cssToken("--sl-brush-remove", "rgb(255,80,80)") : cssToken("--sl-brush-add", "rgb(255,255,80)"), 0.9);
+      const col = withAlpha(brushMode() === "remove" ? cssToken("--sl-brush-remove", "rgb(255,80,80)") : cssToken("--sl-brush-add", "rgb(255,255,80)"), 0.9);
       if (brushStroke?.cell === c && brushStroke.points.length) {
-        g.strokeStyle = withAlpha(brushEffect() === "remove" ? cssToken("--sl-brush-remove", "rgb(255,80,80)") : cssToken("--sl-brush-add", "rgb(255,255,80)"), 0.35); g.lineWidth = rPx * 2; g.lineCap = "round"; g.lineJoin = "round"; g.beginPath();
+        g.strokeStyle = withAlpha(brushMode() === "remove" ? cssToken("--sl-brush-remove", "rgb(255,80,80)") : cssToken("--sl-brush-add", "rgb(255,255,80)"), 0.35); g.lineWidth = rPx * 2; g.lineCap = "round"; g.lineJoin = "round"; g.beginPath();
         brushStroke.points.forEach((p, i) => { const q = proj(p); if (i === 0) g.moveTo(q.x, q.y); else g.lineTo(q.x, q.y); });
         if (brushStroke.points.length === 1) { const q = proj(brushStroke.points[0]); g.lineTo(q.x + 0.01, q.y); }
         g.stroke(); g.lineCap = "butt"; g.lineJoin = "miter";
       }
-      if (brushCursor?.cell === c) { const q = proj(brushCursor.ras); g.strokeStyle = col; g.lineWidth = 1.5 * dpr; g.beginPath(); g.arc(q.x, q.y, rPx, 0, Math.PI * 2); g.stroke(); }
+      // THE BRUSH SHOWS WHAT IT WILL PAINT (Ron, 2026-10-31: "we need an intuitive way to inform our distracted user";
+      // mockups/segment-editor-tumor-brush-2026-10-31.html): Paint's circle is filled in the structure's color on the
+      // voxels a stroke here would paint, so what the brightness limit or "over" holds back shows as holes before the
+      // button is pressed; Erase, which always takes the structure away, is a dashed white circle.
+      if (brushCursor?.cell === c) {
+        const q = proj(brushCursor.ras), mode = brushMode(), local = localSegForEditor();
+        const segs = local ? (live.nodes.get(local.segId)?.segments as { labelValue: number; color?: number[] }[] | undefined) ?? [] : [];
+        const rgb = local ? segs.find((x) => x.labelValue === local.segment)?.color : undefined;
+        const segCol = rgb ? `rgb(${rgb.map((v) => Math.round(v * 255)).join(",")})` : null;
+        if (mode === "add" && local && cfg.onBrushPreview) {
+          const pl = c.plane!, P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
+          const normal: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
+          const pv = cfg.onBrushPreview(local.segId, local.segment, brushCursor.ras, brushDiameterMm() / 2, P.BrushSphere === "1", normal, c.bgId);
+          if (pv?.will.length) {
+            // Each voxel as it lies on the slice: the two grid steps that project longest span it.
+            const r0 = brushCursor.ras, o = proj(r0);
+            const steps = pv.axes.map((a) => { const e = proj([r0[0] + a[0], r0[1] + a[1], r0[2] + a[2]]); return { x: e.x - o.x, y: e.y - o.y }; })
+              .sort((a, b) => Math.hypot(b.x, b.y) - Math.hypot(a.x, a.y));
+            const [A, B] = steps;
+            g.fillStyle = withAlpha(segCol ?? cssToken("--sl-brush-add", "rgb(255,255,80)"), 0.55); g.beginPath();
+            for (const p of pv.will) {
+              const v = proj(p), x = v.x - (A.x + B.x) / 2, y = v.y - (A.y + B.y) / 2;
+              g.moveTo(x, y); g.lineTo(x + A.x, y + A.y); g.lineTo(x + A.x + B.x, y + A.y + B.y); g.lineTo(x + B.x, y + B.y); g.closePath();
+            }
+            g.fill();
+          }
+        }
+        g.strokeStyle = mode === "remove" ? "rgba(255,255,255,0.95)" : segCol ? withAlpha(segCol, 0.95) : col;
+        g.lineWidth = 1.5 * dpr; if (mode === "remove") g.setLineDash([5 * dpr, 4 * dpr]);
+        g.beginPath(); g.arc(q.x, q.y, rPx, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
+      }
+    }
+    // ── Scissors: the outline being drawn, closed, red to cut away, green to keep only ──
+    if (scissors?.cell === c && scissors.points.length > 1) {
+      const pts = scissors.points.map(proj);
+      g.beginPath(); pts.forEach((q, i) => { if (i === 0) g.moveTo(q.x, q.y); else g.lineTo(q.x, q.y); }); g.closePath();
+      g.fillStyle = withAlpha(scissorsColor(), 0.25); g.fill(); g.strokeStyle = withAlpha(scissorsColor(), 0.95); g.lineWidth = 1.5 * dpr; g.stroke();
     }
     // ── Draw: the outline being drawn, its corners, and a dashed line from the last corner to the cursor and back ──
     if (drawPoly?.cell === c && drawOn() && drawPoly.points.length) {
@@ -3262,11 +3298,47 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // (a drag still rotates) puts the point on what the 3D view shows there, as Slicer does.
   let down3d: { x: number; y: number } | null = null;
   three.canvas.addEventListener("pointerdown", (e) => { down3d = e.button === 0 ? { x: e.clientX, y: e.clientY } : null; });
+  // SCISSORS ON THE 3D VIEW: a left drag draws the outline instead of turning the view (turn it with the R A S L P I
+  // buttons, or an Option-drag); on release, the outline and the camera it was drawn with go to the tool.
+  three.el.addEventListener("pointerdown", (e) => {
+    if (!scissorsOn() || e.button !== 0 || e.altKey || e.ctrlKey || e.metaKey || e.target !== three.canvas) return;
+    e.stopPropagation(); e.preventDefault();
+    try { three.el.setPointerCapture(e.pointerId); } catch { /* a pointer the browser does not track */ }
+    const at = (ev: PointerEvent): [number, number] => { const r = three.canvas.getBoundingClientRect(); return [(ev.clientX - r.left) / Math.max(1, r.width), (ev.clientY - r.top) / Math.max(1, r.height)]; };
+    scissors3d = { points: [at(e)] }; drawScissors3d();
+    const move = (ev: PointerEvent) => {
+      if (!scissors3d) return;
+      const q = at(ev), l = scissors3d.points[scissors3d.points.length - 1], r = three.canvas.getBoundingClientRect();
+      if (Math.hypot((q[0] - l[0]) * r.width, (q[1] - l[1]) * r.height) > 2) { scissors3d.points.push(q); drawScissors3d(); }
+    };
+    const up = () => {
+      three.el.removeEventListener("pointermove", move, true); three.el.removeEventListener("pointerup", up, true); three.el.removeEventListener("pointercancel", up, true);
+      const sc = scissors3d; scissors3d = null; drawScissors3d();
+      // A press that did not travel is a click: the point on what the 3D view shows there goes to the tool (keep this piece).
+      if (sc) {
+        const w = three.canvas.clientWidth, h = three.canvas.clientHeight, [u0, v0] = sc.points[0];
+        const far = Math.max(...sc.points.map(([u, v]) => Math.hypot((u - u0) * w, (v - v0) * h)));
+        if (far < 4) {
+          const sign = scissorsKeep ? -1 : 1;
+          void pickRas3d(u0 * w, v0 * h).then((ras) => { if (ras) cfg.onToolPick?.("scissors", ras, sign); else cfg.onStatus?.("Nothing is shown at that point in 3D — click on the anatomy, or in a slice view"); });
+          return;
+        }
+      }
+      const vp = scene?.viewMatrix();
+      if (sc && sc.points.length >= 3 && vp) cfg.onToolStroke?.("scissors", { kind: "3d", points: sc.points, vp }, scissorsKeep ? -1 : 1);
+    };
+    three.el.addEventListener("pointermove", move, true); three.el.addEventListener("pointerup", up, true); three.el.addEventListener("pointercancel", up, true);
+  }, true);
   three.canvas.addEventListener("pointerup", (e) => {
     const d = down3d; down3d = null;
     if (!d || e.button !== 0 || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) return;
     // CLICK TO OUTLINE on what the 3D view shows there (the same point the probe names); shift takes away.
     if (clickOutlineOn() && !e.ctrlKey) { const sign = e.shiftKey ? -1 : 1; const { x, y } = xy3d(e); void pickRas3d(x, y).then((ras) => { if (ras) cfg.onClickOutline?.(ras, sign); else cfg.onStatus?.("Nothing is shown at that point in 3D — click on the anatomy, or in a slice view"); }); return; }
+    // ANOTHER EDITOR TOOL THAT TAKES CLICKS (the Threshold tool's "Keep only the piece I click", 2026-10-30): the point
+    // under the click goes to the tool by its name; the tool decides what it means.
+    // OPTION-CLICK REMOVES the piece under it (Ron, 2026-10-30: "yes, option-click removes"); a click keeps, Shift-click
+    // keeps one more. On the 3D view an Option-drag turns it, so Scissors' Option-click arrives here too.
+    if ((toolPickOn() || (scissorsOn() && e.altKey)) && !e.ctrlKey) { const sign = e.shiftKey ? -1 : 1, remove = e.altKey; const tool = activeTool(); const { x, y } = xy3d(e); void pickRas3d(x, y).then((ras) => { if (ras) cfg.onToolPick?.(tool, ras, sign, remove); else cfg.onStatus?.("Nothing is shown at that point in 3D — click on the anatomy, or in a slice view"); }); return; }
     const inter = live.nodes.get(INTERACTION_ID); if (!inter || inter.mode !== "place" || !inter.markupType) return;
     const { x, y } = xy3d(e);
     void pickRas3d(x, y).then((ras) => {
@@ -3449,10 +3521,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // ── segment editor: brush cursor + strokes sent to the app (Paint / Erase active in the streamed editor) ──
   /** The Segment Editor's tool that takes clicks (Click to outline), or false. */
   const clickOutlineOn = () => ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase() === "clickoutline";
+  /** The editor's active tool, as named; a tool not handled here by name (paint, erase, draw, Click to outline) and set
+   *  as active wants the views' clicks (cfg.onToolPick). */
+  const activeTool = () => ((stateNode("segmentEditor")?.activeEffect as string) ?? "");
+  const toolPickOn = () => { const t = activeTool().toLowerCase(); return !!t && !["paint", "erase", "draw", "clickoutline", "scissors"].includes(t); };
   const brushEffect = (): "add" | "remove" | null => {
     const e = ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase();
     return e === "paint" ? "add" : e === "erase" ? "remove" : null;
   };
+  /** What the brush does now: Paint with Option held erases (Ron, 2026-10-31: "Option-drag + Erase"), as Option-click
+   *  removes in the other tools; a stroke keeps what it began with. */
+  const brushMode = (): "add" | "remove" | null => brushStroke?.mode ?? (brushEffect() === "add" && altHeld ? "remove" : brushEffect());
   /** The voxel of the segmentation the Segment Editor is editing (its own grid), else the scene's. */
   const editedSegVox = (): number => {
     const se = stateNode("segmentEditor");
@@ -3476,6 +3555,41 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // the segmentation and the scan it was started on; when any of them changes, or the tool does, or the scene is
   // replaced, the outline is cleared and the status line says why. The fill uses the plane it was drawn on.
   let drawPoly: { cell: SliceCell; points: Vec3[]; hover?: Vec3; plane: DrawPlane; segId?: string; bgId?: string } | null = null;
+  // SCISSORS (2026-10-30; Ron: "slicer has the scisor effect … a prism boolean on the label selected"): an outline dragged
+  // on a slice view or the 3D view; on release it goes to the editor's Scissors tool (cfg.onToolStroke), which cuts along
+  // the view's direction through the whole scan. Red: cut away; green while Shift is held: keep only what is inside.
+  let scissors: { cell: SliceCell; points: Vec3[] } | null = null;
+  let scissors3d: { points: [number, number][] } | null = null, scissorsCanvas: HTMLCanvasElement | null = null, scissorsKeep = false;
+  const scissorsOn = () => activeTool().toLowerCase() === "scissors";
+  // SHIFT AS THE EVENTS SAY IT IS, not as the key presses left it (Ron, 2026-10-30: "cut away is not cutting, but keeping.
+  // The skull is gone"): a Shift whose release the window never saw -- a screenshot with Cmd-Shift-4 takes the keyboard
+  // before the key comes up -- stayed "held", and every outline kept only what it went around. Every pointer and key
+  // event carries the true state, and the release of an outline reads it from its own event.
+  const shiftFrom = (e: { shiftKey: boolean }) => {
+    if (e.shiftKey === scissorsKeep) return;
+    scissorsKeep = e.shiftKey; if (scissors) drawOverlay(scissors.cell); drawScissors3d();
+  };
+  for (const t of ["pointerdown", "pointermove", "pointerup", "keydown", "keyup"]) addEventListener(t, (e) => shiftFrom(e as PointerEvent), true);
+  addEventListener("blur", () => shiftFrom({ shiftKey: false }));
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && (scissors || scissors3d)) { const c = scissors?.cell; scissors = null; scissors3d = null; if (c) drawOverlay(c); drawScissors3d(); }
+  }, true);
+  const scissorsColor = () => scissorsKeep ? "rgb(143,199,154)" : "rgb(255,90,79)";
+  /** The 3D view's outline, on a canvas of its own laid over the view while one is drawn. */
+  function drawScissors3d() {
+    if (!scissors3d) { if (scissorsCanvas) scissorsCanvas.style.display = "none"; return; }
+    if (!scissorsCanvas) {
+      scissorsCanvas = document.createElement("canvas");
+      scissorsCanvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5";
+      three.el.appendChild(scissorsCanvas);
+    }
+    const cv = scissorsCanvas, dpr = devicePixelRatio || 1, w = three.canvas.clientWidth, h = three.canvas.clientHeight;
+    cv.style.display = "block"; cv.width = w * dpr; cv.height = h * dpr;
+    const g = cv.getContext("2d")!; g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    const p = scissors3d.points; if (p.length < 2) return;
+    g.beginPath(); p.forEach(([u, v], i) => { if (i === 0) g.moveTo(u * w, v * h); else g.lineTo(u * w, v * h); }); g.closePath();
+    g.fillStyle = withAlpha(scissorsColor(), 0.25); g.fill(); g.strokeStyle = scissorsColor(); g.lineWidth = 2; g.stroke();
+  }
   const editedSegId = (): string | undefined => ((stateNode("segmentEditor")?.refs as Record<string, string[]> | undefined)?.segmentation ?? [])[0];
   const dropDraw = (why: string) => {
     const d = drawPoly; if (!d) return;
@@ -3529,9 +3643,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     else if (e.key === "Escape") { e.preventDefault(); cancelDraw(); }
     else if (e.key === "Backspace" || e.key === "Delete") { e.preventDefault(); drawPoly.points.pop(); drawOverlay(drawPoly.cell); }
   });
-  let brushStroke: { cell: SliceCell; points: Vec3[]; seq: number; lastSent: number; lastPt: Vec3 } | null = null;
+  let brushStroke: { cell: SliceCell; points: Vec3[]; seq: number; lastSent: number; lastPt: Vec3; mode: "add" | "remove" } | null = null;
   let strokeSeq = 0;
-  let brushCursor: { cell: SliceCell; ras: Vec3 } | null = null;
+  let brushCursor: { cell: SliceCell; ras: Vec3; u?: number; v?: number } | null = null;
+  let brushNoteTimer: number | undefined;
+  /** The scan of the slice view the brush was last over (cfg.onViewScan says when it changes). */
+  let lastViewScan: string | undefined;
   let paintCommitTimer: number | undefined;
   const localSegForEditor = (): { segId: string; segment: number } | null => {
     const se = stateNode("segmentEditor"); if (!se) return null;
@@ -3551,12 +3668,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
     const local = localSegForEditor();
     if (local && cfg.onNativePaint) {                                 // standalone: paint the resident labelmap
-      cfg.onNativePaint(local.segId, local.segment, send, brushEffect() ?? "add", brushDiameterMm() / 2, P.BrushSphere === "1", normal);
+      cfg.onNativePaint(local.segId, local.segment, send, brushStroke.mode, brushDiameterMm() / 2, P.BrushSphere === "1", normal, brushStroke.lastSent === 0, brushStroke.cell.bgId);
       clearTimeout(paintCommitTimer);
       if (final) cfg.onNativePaintCommit?.(local.segId);
       else paintCommitTimer = setTimeout(() => cfg.onNativePaintCommit?.(local.segId), 120) as unknown as number;
     } else {
-      live.write({ op: "cmd", id, cmd: "segPaint", args: { points: send, mode: brushEffect() ?? "add", diameterMm: brushDiameterMm(), sphere: P.BrushSphere === "1", normal, seq: ++strokeSeq, index: strokeSeq } });
+      live.write({ op: "cmd", id, cmd: "segPaint", args: { points: send, mode: brushStroke.mode, diameterMm: brushDiameterMm(), sphere: P.BrushSphere === "1", normal, seq: ++strokeSeq, index: strokeSeq } });
       if (final) sync.flush();
     }
     brushStroke.lastSent = brushStroke.points.length; brushStroke.lastPt = pts[pts.length - 1];
@@ -3675,11 +3792,20 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       },
       hooks: {
         onZoom: () => branch(c),
+        // SHIFT+WHEEL CHANGES THE BRUSH (Slicer's binding) while Paint or Erase is on; the wheel alone still turns the slice.
+        // macOS turns Shift+wheel into a sideways scroll, so either direction counts.
+        onWheel: (e) => {
+          if (!brushEffect() || !e.shiftKey || !cfg.onBrushStep) return false;
+          const d = e.deltaY || e.deltaX; if (!d) return true;
+          cfg.onBrushStep(d < 0 ? 1 : -1); drawOverlay(c); return true;
+        },
         onLeftGrab: (u, v, w, h) => {
           if (clickOutlineOn() && !pressIsControlClick()) { cfg.onClickOutline?.(cellRas(c, u, v), shiftHeld ? -1 : 1); return true; }   // Click to outline
+          if (scissorsOn() && !pressIsControlClick() && c.plane) { scissors = { cell: c, points: [cellRas(c, u, v)] }; drawOverlay(c); return true; }   // Scissors: an outline
+          if (toolPickOn() && !pressIsControlClick()) { cfg.onToolPick?.(activeTool(), cellRas(c, u, v), shiftHeld ? -1 : 1, altHeld); return true; }   // another editor tool's click (Option: remove)
           if (drawOn() && !pressIsControlClick()) { addDrawPoint(c, cellRas(c, u, v)); return true; }   // Draw: a corner
           if (brushEffect()) {                                          // Segment Editor Paint/Erase: stroke in this cell
-            brushStroke = { cell: c, points: [cellRas(c, u, v)], seq: 0, lastSent: 0, lastPt: cellRas(c, u, v) };
+            brushStroke = { cell: c, points: [cellRas(c, u, v)], seq: 0, lastSent: 0, lastPt: cellRas(c, u, v), mode: brushMode() ?? "add" };
             sendStroke();                                               // the initial dab paints immediately
             return true;
           }
@@ -3705,8 +3831,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         },
         onLeftDrag: (u, v) => {
           if (drawPoly && drawPoly.cell === c && drawOn()) { addDrawPoint(c, cellRas(c, u, v)); return; }   // Draw: a drag traces
+          if (scissors && scissors.cell === c) {   // Scissors: the outline follows the pointer, a point every half voxel
+            const ras = cellRas(c, u, v), last = scissors.points[scissors.points.length - 1];
+            if (Math.hypot(ras[0] - last[0], ras[1] - last[1], ras[2] - last[2]) > 0.5 * cellVox(c)) { scissors.points.push(ras); drawOverlay(c); }
+            return;
+          }
           if (brushStroke) {
-            const ras = cellRas(c, u, v); brushStroke.points.push(ras); brushCursor = { cell: c, ras };
+            const ras = cellRas(c, u, v); brushStroke.points.push(ras); brushCursor = { cell: c, ras, u, v };
             const now = performance.now();
             if (now - (brushStroke as { t?: number }).t! > 60 || !(brushStroke as { t?: number }).t) { (brushStroke as { t?: number }).t = now; sendStroke(); }
             drawOverlay(c); return;
@@ -3724,7 +3855,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           live.write({ op: "cmd", id: sliceDrag.id, cmd: "setControlPoint", args: { index: sliceDrag.index, position: ras } });
           storeMeasurements(sliceDrag.id);
         },
-        onLeftDrop: () => { if (brushStroke) { sendStroke(true); brushStroke = null; drawOverlay(c); } if (roiSliceDrag) { sync.flush(); roiSliceDrag = null; } if (sliceDrag) { sync.flush(); sliceDrag = null; } if (intersectDrag) { sync.flush(); const was = intersectDrag.in; intersectDrag = null; intersectHover = null; drawOverlay(was); } },
+        onLeftDrop: () => {
+          if (scissors && scissors.cell === c) {
+            const sc = scissors; scissors = null; drawOverlay(c);
+            // A PRESS THAT DID NOT TRAVEL is a click (Ron, 2026-10-30: "build the click to keep"): the tool keeps the piece
+            // under it (Shift: removes it).
+            const p0 = sc.points[0], far = Math.max(...sc.points.map((q) => Math.hypot(q[0] - p0[0], q[1] - p0[1], q[2] - p0[2])));
+            if (far < 1.5 * cellVox(c)) { cfg.onToolPick?.("scissors", p0, scissorsKeep ? -1 : 1, altHeld); return; }
+            if (sc.points.length >= 3 && c.plane) cfg.onToolStroke?.("scissors", { kind: "slice", points: sc.points, normal: drawPlaneOf(c.plane).normal }, scissorsKeep ? -1 : 1);
+            return;
+          }
+          if (brushStroke) { sendStroke(true); brushStroke = null; drawOverlay(c); } if (roiSliceDrag) { sync.flush(); roiSliceDrag = null; } if (sliceDrag) { sync.flush(); sliceDrag = null; } if (intersectDrag) { sync.flush(); const was = intersectDrag.in; intersectDrag = null; intersectHover = null; drawOverlay(was); } },
         onHover: (u, v, w, h) => {
           // THE PROBE FIRST, because it needs nothing from the app. This sat after the crosshair
           // guard below, and a standalone scene has no crosshair node -- that node is streamed by a
@@ -3733,11 +3874,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           const rasHere = cellRas(c, u, v);
           void probeAtRas(c.name, rasHere);
           // cursor -> the app's crosshair cursor (DataProbe follows); shift-move -> crosshair position too
-          const id = crosshairId(); if (!id) return;
+          // ONLY THESE NEED THE CROSSHAIR NODE (2026-10-31: a scene loaded fresh has none, and the early return here kept
+          // the brush circle, Draw's hover line and the markup highlight from ever being drawn in it).
+          const id = crosshairId();
           const ras = rasHere;
-          live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
-          if (shiftHeld) { live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras }); jumpLocal(ras); }
-          if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; drawOverlay(c); }
+          if (id) {
+            live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
+            if (shiftHeld) { live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras }); jumpLocal(ras); }
+          }
+          if (brushEffect()) {
+            brushCursor = { cell: c, ras, u, v }; c.canvas.style.cursor = "none";
+            if (c.bgId && c.bgId !== lastViewScan) { lastViewScan = c.bgId; cfg.onViewScan?.(c.bgId); }
+            drawOverlay(c);
+          }
           else if (drawOn()) { c.canvas.style.cursor = "crosshair"; if (drawPoly?.cell === c) { drawPoly.hover = ras; drawOverlay(c); } }
           else {
             const overMarkup = pickMarkup(c, u, v, w, h);
@@ -3796,6 +3945,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     c.canvas.addEventListener("pointerup", () => { if (c.branched && !sliceDrag) pushSliceFrame(c); });
     c.canvas.addEventListener("pointerleave", () => {
       lastProbed = null;   // the readout stays, as Slicer's does; only the repeat-on-change stops
+      // The brush leaves with the pointer: its filled circle stayed in a view the mouse had left (2026-10-31, side by side).
+      if (brushCursor?.cell === c && !brushStroke) { brushCursor = null; drawOverlay(c); }
       const id = crosshairId(); if (id) live.write({ op: "cmd", id, cmd: "setCursor", args: { ras: null, view: c.name } });
       if (intersectHover?.in === c) { intersectHover = null; drawOverlay(c); }
     });
@@ -3818,8 +3969,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   }
   let sliceIntersections = true;
   let shiftHeld = false;
-  addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; }, true);
-  addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; }, true);
+  // As for Scissors above: each pointer event says whether Shift (and Option) is down, so a lost key release cannot leave
+  // it "held". Option on a click: remove the piece under it.
+  let altHeld = false;
+  for (const t of ["pointerdown", "pointermove", "pointerup"]) addEventListener(t, (e) => { shiftHeld = (e as PointerEvent).shiftKey; altHeld = (e as PointerEvent).altKey; }, true);
+  addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; if (e.key === "Alt") { altHeld = true; if (brushCursor) drawOverlay(brushCursor.cell); } }, true);
+  addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; if (e.key === "Alt") { altHeld = false; if (brushCursor) drawOverlay(brushCursor.cell); } }, true);
 
   let lastRects: ViewCellRect[] = [];
   let maximizedCell: string | null = null;
@@ -3872,7 +4027,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const w = shown ? c.canvas.width : 512, h = shown ? c.canvas.height : 512;
       const [fovX, fovY, slab] = fitFovToVolume(c.orientKey, rasLo, rasHi, ijkToRAS, w, h);
       const id = nativeSliceId(cell);
-      live.write({ op: "put", id, node: { type: "view", kind: "slice", id, name: cell, layoutName: cell, orientation: def.orientation, sliceToRAS: def.mat(center), fieldOfView: [fovX, fovY, slab], offset: center[def.axis], source: { local: true } } });
+      // ON A VOXEL'S MIDDLE, as Slicer's fit (logic/slice-logic.ts snapOffsetToVoxel): the volume's middle is the border
+      // between two slices when the count is even, and a flat brush stroke went into the one not drawn.
+      const at: Vec3 = [...center] as Vec3, nrm: Vec3 = [0, 0, 0]; nrm[def.axis] = 1;
+      at[def.axis] = snapOffsetToVoxel(center[def.axis], nrm, ijkToRAS);
+      live.write({ op: "put", id, node: { type: "view", kind: "slice", id, name: cell, layoutName: cell, orientation: def.orientation, sliceToRAS: def.mat(at), fieldOfView: [fovX, fovY, slab], offset: at[def.axis], source: { local: true } } });
     }
     renderSlices();
   };
@@ -3904,6 +4063,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     renderSlices();
   };
 
+  /** The grid of the scan a slice view shows (its background), for snapping the slice onto a voxel's middle. */
+  const bgGridOf = (cell: string): number[] | undefined => {
+    const comp = [...live.nodes.values()].find((nd) => nd.type === "sliceComposite" && nd.layoutName === cell);
+    const imgId = ((comp?.refs as Record<string, string[]> | undefined)?.background ?? [])[0];
+    return imgId ? (live.nodes.get(imgId)?.ijkToRAS as number[] | undefined) : undefined;
+  };
   /** Move a native slice node's plane to offset `mm` along its CURRENT normal (works for reformatted cells
    *  whose orientation differs from the cell's original axis). Node-owned, persists, links to same-orientation
    *  views. Offset = signed distance of the plane origin along the normal (Slicer's convention). */
@@ -3916,6 +4081,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const id = nativeSliceId(cell); const node = live.nodes.get(id); if (!node) return false;
     const m = (node.sliceToRAS as number[]).slice();
     const n = normalOfMatrix(m);
+    mm = snapOffsetToVoxel(mm, n, bgGridOf(cell));   // on a voxel's middle of the scan shown (snapOffsetToVoxel says why)
     const t: Vec3 = [m[3], m[7], m[11]];
     const cur = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
     const d = mm - cur;
@@ -4119,6 +4285,62 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     propagateLink(cell, ["Orientation"]);
     renderSlices();
     refreshSlicesIn3D();
+    return true;
+  };
+
+  // THREE SCANS SIDE BY SIDE (Ron, 2026-10-31: "remember that we have 3 2d viewers by default. Is there a good way to take
+  // advantage of this?", then "go ahead with the three scans side by side"): the three slice views show the same slice in
+  // one direction, each a different scan, linked so a scroll in one moves all three. The layout stays; what each view
+  // showed (its plane, its scan, the link) is kept and put back by sideBySide(null).
+  let sideBySideWas: { cell: string; sliceToRAS: unknown; orientation: unknown; offset: unknown; fov: unknown; orientKey: Orientation; bg: unknown; fg: unknown; linked: unknown }[] | null = null;
+  // A NEW SCENE ENDS IT (critic 2026-10-31 evening, finding 5): "One scan again" put the previous patient's scans and
+  // planes back into the views, as nothing forgot them.
+  live.subscribe((ch) => { if (ch.kind === "reset") sideBySideWas = null; });
+  const sideBySide = (images: string[] | null, orientation: Orientation = "axial"): boolean => {
+    const compOf = (cell: string) => [...live.nodes.values()].find((n) => n.type === "sliceComposite" && n.layoutName === cell);
+    const fitTo = (c: SliceCell, o: Orientation, center: Vec3, from: SliceCell) => {
+      const bg = bgField(from); if (!bg) return;
+      const [lo, hi] = bg.aabb(); const w = c.canvas.width || 1, h = c.canvas.height || 1;
+      const [fx, fy] = fitFovToVolume(o, lo, hi, [], w, h); c.slice.setMirrorFrame(o, center, fx, fy); c.branched = false;
+    };
+    if (!images) {
+      if (!sideBySideWas) return false;
+      for (const w of sideBySideWas) {
+        const id = nativeSliceId(w.cell), comp = compOf(w.cell), c = cells.get(w.cell);
+        if (live.nodes.has(id)) { live.write({ op: "patch", id, path: "#/sliceToRAS", value: w.sliceToRAS }); live.write({ op: "patch", id, path: "#/orientation", value: w.orientation }); live.write({ op: "patch", id, path: "#/offset", value: w.offset }); if (w.fov) live.write({ op: "patch", id, path: "#/fieldOfView", value: w.fov }); }
+        // Only scans still in the scene go back; a view whose scan has gone keeps the one it shows.
+        const still = (ids: unknown) => ((ids as string[] | undefined) ?? []).filter((x) => live.nodes.has(x));
+        if (comp) { if (still(w.bg).length) live.write({ op: "patch", id: comp.id, path: "#/refs/background", value: still(w.bg) }); live.write({ op: "patch", id: comp.id, path: "#/refs/foreground", value: still(w.fg) }); live.write({ op: "patch", id: comp.id, path: "#/linkedControl", value: w.linked }); }
+        if (c) { c.orientKey = w.orientKey; const m = w.sliceToRAS as number[]; if (m) fitTo(c, w.orientKey, [m[3], m[7], m[11]], c); }
+      }
+      sideBySideWas = null; renderSlices(); refreshSlicesIn3D(); return true;
+    }
+    const views = ["Red", "Yellow", "Green"].filter((n) => cells.has(n) && live.nodes.has(nativeSliceId(n)));
+    if (!views.length || !images.length) return false;
+    sideBySideWas ??= views.map((cell) => {
+      const n = live.nodes.get(nativeSliceId(cell))!, comp = compOf(cell), refs = (comp?.refs as Record<string, string[]> | undefined) ?? {};
+      return { cell, sliceToRAS: n.sliceToRAS, orientation: n.orientation, offset: n.offset, fov: n.fieldOfView, orientKey: cells.get(cell)!.orientKey, bg: refs.background ?? [], fg: refs.foreground ?? [], linked: comp?.linkedControl ?? false };
+    });
+    // The slice through the first view's center, the same in all three; framed on the first view's scan.
+    const n0 = live.nodes.get(nativeSliceId(views[0]))!, m0 = n0.sliceToRAS as number[], center: Vec3 = [m0[3], m0[7], m0[11]];
+    // One zoom for all three: the first view's field of view (the others' were framed for their own direction).
+    const fov0 = n0.fieldOfView;
+    const nm = reformatSliceToRAS(orientation, center), nrm = normalOfMatrix(nm), first = cells.get(views[0])!;
+    views.forEach((cell, i) => {
+      const id = nativeSliceId(cell), comp = compOf(cell), c = cells.get(cell)!;
+      c.orientKey = orientation;
+      live.write({ op: "patch", id, path: "#/sliceToRAS", value: nm });
+      live.write({ op: "patch", id, path: "#/orientation", value: orientation[0].toUpperCase() + orientation.slice(1) });
+      live.write({ op: "patch", id, path: "#/offset", value: center[0] * nrm[0] + center[1] * nrm[1] + center[2] * nrm[2] });
+      if (fov0) live.write({ op: "patch", id, path: "#/fieldOfView", value: fov0 });
+      if (comp) {
+        live.write({ op: "patch", id: comp.id, path: "#/refs/background", value: [images[i % images.length]] });
+        live.write({ op: "patch", id: comp.id, path: "#/refs/foreground", value: [] });
+        live.write({ op: "patch", id: comp.id, path: "#/linkedControl", value: true });
+      }
+      fitTo(c, orientation, center, first);
+    });
+    renderSlices(); refreshSlicesIn3D();
     return true;
   };
 
@@ -4388,6 +4610,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   const setSliceOffset = (cell: string, mm: number): void => {
     const c = cells.get(cell); if (!c) return;
+    // Snapped here too, so the slider's drag report compares the slice drawn with the slice asked for, not with a point
+    // up to half a voxel away (patchNativeOffset snaps again; a second snap moves nothing).
+    const sm = live.nodes.get(nativeSliceId(cell))?.sliceToRAS as number[] | undefined;
+    if (sm) mm = snapOffsetToVoxel(mm, normalOfMatrix(sm), bgGridOf(cell));
     noteSliderStep(cell, mm);
     if (patchNativeOffset(cell, mm)) return;                       // node-owned: sticks + re-renders via the DM
     if (!c.plane) return;
@@ -4887,6 +5113,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // native slice node's plane/offset for tests.
     __setLinked: (on: boolean) => { for (const n of live.nodes.values()) if (n.type === "sliceComposite") live.write({ op: "patch", id: n.id, path: "#/linkedControl", value: on }); },
     __isLinked: () => [...live.nodes.values()].some((n) => n.type === "sliceComposite" && n.linkedControl),
+    /** Three scans side by side in the three slice views (sideBySide); null puts back what they showed. */
+    __sideBySide: (images: string[] | null, orientation?: Orientation) => sideBySide(images, orientation),
+    __isSideBySide: () => sideBySideWas !== null,
     __sliceNode: (cell: string) => { const n = live.nodes.get(nativeSliceId(cell)); return n ? { orientation: n.orientation, offset: n.offset, sliceToRAS: n.sliceToRAS } : null; },
     __setSliceOffset: (cell: string, mm: number) => setSliceOffset(cell, mm),
     /** Frame every visible slice cell and the 3D view on a RAS box, the slices positioned through `through` (merge review). */
@@ -5111,6 +5340,27 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.refresh(); }, setCells,
+    // WHAT A STROKE LEFT OUT, SAID WHERE THE PERSON LOOKS (Ron, 2026-10-31: "we need an intuitive way to inform our
+    // distracted user"): beside the brush, fading after three seconds; the line under the views keeps the full account.
+    brushNote(text: string) {
+      const at = brushCursor; if (!at || at.u === undefined || at.v === undefined) return;
+      const el = at.cell.el, w = el.clientWidth, h = el.clientHeight;
+      let n = el.querySelector<HTMLElement>(".lv-brush-note");
+      if (!n) {
+        n = document.createElement("div"); n.className = "lv-brush-note";
+        n.style.cssText = "position:absolute;pointer-events:none;z-index:5;white-space:nowrap;font:12px system-ui;padding:3px 7px;border-radius:5px;" +
+          "background:var(--sl-bg,#211b16);color:var(--sl-fg,#fbf9f5);border:1px solid var(--sl-accent,#f8d764);opacity:0;transition:opacity .5s";
+        el.appendChild(n);
+      }
+      const f = at.cell.slice.mirrorFrame(at.cell.orientKey, at.cell.canvas.width / at.cell.canvas.height);
+      const rCss = (brushDiameterMm() / 2) * (w / f.fovX);
+      n.textContent = text;
+      n.style.left = `${Math.max(4, Math.min(w - n.offsetWidth - 4, at.u * w + rCss + 8))}px`;
+      n.style.top = `${Math.max(4, Math.min(h - 28, at.v * h - 10))}px`;
+      n.style.transition = "opacity .1s"; n.style.opacity = "1";
+      clearTimeout(brushNoteTimer);
+      brushNoteTimer = setTimeout(() => { n!.style.transition = "opacity .5s"; n!.style.opacity = "0"; }, 3000) as unknown as number;
+    },
     // W2: frame a volume in every slice cell (vtkMRMLSliceLogic::FitSliceToVolumes) — used on a native load
     // and by the controller "fit" button; the mirrored plane path (setMirrorFrame) still wins when a Slicer
     // peer streams a slice frame, so this only takes effect for standalone/native scenes.

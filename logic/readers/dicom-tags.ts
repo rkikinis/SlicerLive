@@ -225,8 +225,8 @@ const SHARED_STATED = new Set(["PixelMeasuresSequence", "PlaneOrientationSequenc
  * "We should follow Mike's lead and philosophy as set in Haversack and expand on it as needed"). From the reader's keyword
  * form (toDucknTags): the file meta group out (§9), what duckn states out (§2, §9), what is in stored-value units out
  * (§5.10), overlays and curves out, and NO private elements at any depth -- haversack's rule: the vendor's data cannot be
- * vouched for against rescaled values, and the record beside the array keeps every attribute (`dicom-header.json.zst`,
- * the DICOM JSON Model). An enhanced object's shared groups lose the macros duckn states, and an emptied macro goes.
+ * vouched for against rescaled values. Every attribute is kept as received in the archive's original DICOM files (since
+ * 2026-10-29 no full copy beside the array: Ron, on Mike's reply). An enhanced object's shared groups lose the macros duckn states, and an emptied macro goes.
  * Before 2026-10-27 the copies' view kept all of these: 221 arrays stated `RescaleIntercept: -1024` beside Hounsfield
  * units (duckn-dicom-review-2026-10-27.md, section 3).
  */

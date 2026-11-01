@@ -10,14 +10,13 @@ import type { MrsonNode } from "../render/mrson.ts";
 import type { ZarrDesc } from "../render/zarr.ts";
 import { fetchZarrVolumeNative } from "../render/zarr.ts";
 import { LocalBlobStore, volumeToZarr } from "./ingest.ts";
-import { applyAutoThreshold, applyIslands, applyLogical, applyMargin, applySmoothing, applyThreshold, segmentStatistics, type LogicalOp, type OverwriteMode, type SegmentStats } from "./segment-effects.ts";
-import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
-import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
-import { invertRowMajor } from "./transforms.ts";
 import { frameIsCurrent, joinSequence } from "./sequences.ts";
-import { growDevice, growFromSeeds, growInPlace } from "./grow-from-seeds.ts";
-import { fillPolygon } from "./fill-polygon.ts";
-import { finest, tuned, voxelOrUnit } from "../render/scene-scale.ts";
+import { growDevice, growFromSeeds } from "./grow-from-seeds.ts";
+import { invalidatePaintCache } from "./paint-cache.ts";
+
+// The tools (effects, statistics, the brush, Draw) are in logic/segment-tools.ts since 2026-10-30, so that what the SDK
+// takes from here does not load them; invalidatePaintCache is re-exported for the callers that took it from here.
+export { invalidatePaintCache };
 
 let segSeq = 0;
 // Slicer default new-segment colours (GenericAnatomyColors sequence, from vtkSegment defaults).
@@ -67,181 +66,6 @@ export function addSegment(live: LiveScene, segId: string, opts: { name?: string
   return labelValue;
 }
 
-export interface EffectParams {
-  segment: number; overwrite?: OverwriteMode;
-  // threshold
-  lower?: number; upper?: number; autoMethod?: ThresholdMethod;
-  // islands
-  islands?: "keepLargest" | "removeSmall"; minSize?: number;
-  // smoothing
-  smooth?: "median" | "open" | "close"; radiusVoxels?: number;
-  // margin
-  marginMm?: number;
-  // logical
-  logical?: LogicalOp; other?: number;
-}
-
-/** Apply an effect, materialize the new labelmap, patch the segmentation node. Returns the segment's voxel count. */
-export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId: string, effect: "threshold" | "autoThreshold" | "islands" | "smoothing" | "margin" | "logical" | "growFromSeeds", params: EffectParams): Promise<{ voxels: number; threshold?: number; ms?: number }> {
-  const seg = live.nodes.get(segId); if (!seg?.zarr) throw new Error("no segmentation " + segId);
-  const dims = seg.dims as [number, number, number];
-  const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
-  const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
-
-  let out: Uint8Array, threshold: number | undefined, ms: number | undefined;
-  if (effect === "growFromSeeds") {
-    // EVERY SEGMENT'S STROKES COMPETE (logic/grow-from-seeds.ts), inside a box around them; outside it nothing changes.
-    // Undo puts the strokes back (Ron, 2026-10-01: "Do we have grow from seed in the editor? That would do the job.").
-    const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
-    const srcNode = srcId ? live.nodes.get(srcId) : undefined;
-    if (!srcNode?.zarr) throw new Error("grow from seeds needs the scan the segmentation was drawn on");
-    const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
-    // ONLY THE SEGMENTS SHOWN TAKE PART, as in Slicer (critic, 2026-10-01, finding 7): logic/grow-from-seeds.ts growInPlace.
-    const hidden = new Set(((seg.segments as { labelValue: number; visible?: boolean }[] | undefined) ?? []).filter((x) => x.visible === false).map((x) => x.labelValue));
-    const r = await growInPlace(await growDevice(), labelmap, src.data as ArrayLike<number>, dims, hidden);
-    out = r.out;
-    ms = r.ms;
-  } else if (effect === "threshold" || effect === "autoThreshold") {
-    const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
-    const srcNode = srcId ? live.nodes.get(srcId) : undefined;
-    if (!srcNode?.zarr) throw new Error("threshold needs a source volume");
-    const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
-    if (effect === "autoThreshold") { const r = applyAutoThreshold(labelmap, src.data, dims, { segment: params.segment, overwrite: params.overwrite, method: params.autoMethod ?? "otsu" }); out = r.labelmap; threshold = r.threshold; }
-    else out = applyThreshold(labelmap, src.data, dims, { segment: params.segment, overwrite: params.overwrite, lower: params.lower ?? 0, upper: params.upper ?? 0 });
-  } else if (effect === "islands") {
-    out = applyIslands(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, operation: params.islands ?? "keepLargest", minSize: params.minSize });
-  } else if (effect === "smoothing") {
-    out = applySmoothing(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, method: params.smooth ?? "median", radiusVoxels: params.radiusVoxels });
-  } else if (effect === "logical") {
-    out = applyLogical(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, operation: params.logical ?? "union", other: params.other });
-  } else {
-    const sp = spacingFromIjkToRAS(seg.ijkToRAS as number[]);
-    out = applyMargin(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, marginMm: params.marginMm ?? 0, spacingMm: sp });
-  }
-
-  const { desc, blobs } = await volumeToZarr(out, dims, "|u1");
-  store.add(blobs);
-  live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
-  markEdited(live, segId);
-  invalidatePaintCache(segId);
-  let voxels = 0; for (let i = 0; i < out.length; i++) if (out[i] === params.segment) voxels++;
-  return { voxels, threshold, ms };
-}
-
-function spacingFromIjkToRAS(m: number[]): [number, number, number] {
-  const col = (c: number): number => Math.hypot(m[c], m[4 + c], m[8 + c]);
-  return [col(0), col(1), col(2)];
-}
-
-
-/** Per-segment statistics (voxel count, volume mm^3, bounds) for a segmentation. */
-export async function computeStats(live: LiveScene, segId: string): Promise<SegmentStats[]> {
-  const seg = live.nodes.get(segId); if (!seg?.zarr) return [];
-  const dims = seg.dims as [number, number, number];
-  const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
-  const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
-  const labels = ((seg.segments as { labelValue: number }[] | undefined) ?? []).map((x) => x.labelValue);
-  return segmentStatistics(labelmap, dims, labels, spacingFromIjkToRAS(seg.ijkToRAS as number[]));
-}
-// ── native paint/erase (W5): a resident CPU labelmap painted in-place during a stroke, re-uploaded on a
-//    throttle. Fast sphere/disk rasterization in voxel space; the display re-bakes when #/zarr is patched.
-interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; ijkToRAS: number[]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean; }
-const paintCaches = new Map<string, PaintCache>();
-
-async function paintCache(live: LiveScene, segId: string): Promise<PaintCache | null> {
-  const seg = live.nodes.get(segId); if (!seg?.zarr) return null;
-  const existing = paintCaches.get(segId); if (existing) return existing;
-  const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
-  const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
-  const ijk = seg.ijkToRAS as number[];
-  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], ijkToRAS: ijk, invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false };
-  paintCaches.set(segId, c);
-  return c;
-}
-/** Drop the resident labelmap (call when the segmentation changes underneath, e.g. after a discrete effect). */
-export function invalidatePaintCache(segId?: string) { if (segId) paintCaches.delete(segId); else paintCaches.clear(); }
-
-export interface PaintParams { segment: number; radiusMm: number; mode: "add" | "remove"; sphere?: boolean; normal?: Vec3; }
-
-/**
- * THE STAMP SPACING ALONG A STROKE, from the grid (Ron, 2026-10-20: "did you forget about scales? from astrophysics to
- * electron microscope"). It was max(0.5 mm, half the smaller of the radius and the voxel): 0.5 mm on every clinical
- * grid, and at a microscope's 1 nm voxels a stamp every half a million voxels -- isolated dabs. Now the 0.5 mm as it was
- * tuned (0.71 voxels on a 0.7 mm grid, half a voxel on grids coarser than 1 mm), held to between half a voxel and one
- * voxel at any other scale: each stamp lands on its nearest voxel center, so a step of at most a voxel leaves no gap,
- * and at least half a voxel keeps the number of stamps bounded.
- */
-export function paintStepMm(voxel: number): number { return tuned(0.5, voxel, 0.5, 1); }
-
-/** Rasterize a brush swept along the stroke into the resident labelmap (in-place). Consecutive points are
- *  connected by interpolation (a step of at most a voxel, paintStepMm) so a fast drag leaves a CONTINUOUS stroke, not gaps.
- *  Marks the cache dirty. */
-export async function paintStroke(live: LiveScene, segId: string, points: Vec3[], params: PaintParams): Promise<void> {
-  const c = await paintCache(live, segId); if (!c) return;
-  const [nx, ny, nz] = c.dims;
-  const [sx, sy, sz] = c.spacing;
-  const r = params.radiusMm, r2 = r * r;
-  const val = params.mode === "add" ? params.segment : 0;
-  const ri = Math.ceil(r / (sx || 1)), rj = Math.ceil(r / (sy || 1)), rk = Math.ceil(r / (sz || 1));
-  const n = params.normal;
-  const m = c.ijkToRAS;   // direction cosines: a voxel step (di,dj,dk) maps to a RAS offset via the 3x3 linear part
-  // disk half-thickness along the normal = the RAS extent of the volume axis MOST aligned with the slice normal
-  // (so a 2D brush is exactly one voxel thick in the volume plane parallel to the slice, whatever the axes are).
-  let halfThick = 0;
-  if (n) for (let a = 0; a < 3; a++) halfThick = Math.max(halfThick, Math.abs(m[a] * n[0] + m[4 + a] * n[1] + m[8 + a] * n[2]));
-  halfThick *= 0.5;
-
-  const stamp = (p: Vec3) => {
-    const ijk = applyRowMajor(c.invIjk, p);
-    const ci = Math.round(ijk[0]), cj = Math.round(ijk[1]), ck = Math.round(ijk[2]);
-    for (let dk = -rk; dk <= rk; dk++) for (let dj = -rj; dj <= rj; dj++) for (let di = -ri; di <= ri; di++) {
-      const i = ci + di, j = cj + dj, k = ck + dk;
-      if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-      const rx = m[0] * di + m[1] * dj + m[2] * dk;   // RAS offset of this voxel from the stamp centre
-      const ry = m[4] * di + m[5] * dj + m[6] * dk;
-      const rz = m[8] * di + m[9] * dj + m[10] * dk;
-      if (rx * rx + ry * ry + rz * rz > r2) continue;                                        // sphere/disk radius (RAS mm)
-      if (!params.sphere && n && Math.abs(rx * n[0] + ry * n[1] + rz * n[2]) > halfThick) continue;   // one-voxel-thick, in the slice plane
-      c.labelmap[k * nx * ny + j * nx + i] = val;
-    }
-  };
-
-  const stepMm = paintStepMm(voxelOrUnit(finest(sx, sy, sz)));   // dense enough to reach every voxel along the stroke
-  let prev: Vec3 | null = null;
-  for (const p of points) {
-    if (prev) {
-      const seg: Vec3 = [p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]];
-      const len = Math.hypot(seg[0], seg[1], seg[2]);
-      const steps = Math.max(1, Math.ceil(len / stepMm));
-      for (let sIdx = 1; sIdx <= steps; sIdx++) { const t = sIdx / steps; stamp([prev[0] + seg[0] * t, prev[1] + seg[1] * t, prev[2] + seg[2] * t]); }
-    } else stamp(p);
-    prev = p;
-  }
-  c.dirty = true;
-}
-
-/** DRAW (Slicer's Draw effect): fill the polygon drawn on a slice into `segment`, one voxel thick, in the resident
- *  labelmap the brush paints (logic/fill-polygon.ts). The caller commits with commitPaint. Returns the voxels written. */
-export async function drawFill(live: LiveScene, segId: string, points: Vec3[], params: { segment: number; normal: Vec3 }): Promise<number> {
-  const c = await paintCache(live, segId); if (!c) return 0;
-  const n = fillPolygon(c.labelmap, c.dims, c.ijkToRAS, c.invIjk, points, params.normal, params.segment);
-  if (n) c.dirty = true;
-  return n;
-}
-
-/** Upload the resident labelmap and patch the segmentation (call on a throttle + at stroke end). */
-export async function commitPaint(live: LiveScene, store: LocalBlobStore, segId: string): Promise<number> {
-  const c = paintCaches.get(segId); if (!c || !c.dirty || c.uploading) return 0;
-  c.uploading = true; c.dirty = false;
-  try {
-    const { desc, blobs } = await volumeToZarr(c.labelmap, c.dims, "|u1");
-    store.add(blobs);
-    live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
-    markEdited(live, segId);
-    let v = 0; for (let i = 0; i < c.labelmap.length; i++) if (c.labelmap[i]) v++;
-    return v;
-  } finally { c.uploading = false; }
-}
 
 /**
  * Create a segmentation node from an ALREADY-DECODED labelmap (see readers/dicom-seg.ts), on the

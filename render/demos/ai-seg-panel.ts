@@ -26,6 +26,7 @@
 // is the only moment the provenance is free -- see docs/WORKING-STATE.md, "Provenance, decided
 // 2026-09-04". The labels currently land in the scene, which is what makes the round trip visible.
 import { startWork } from "../working.ts";
+import { eyeSvg } from "./eye-icon.ts";
 import { holdsInstance } from "../../logic/instance-key.ts";
 import { paletteVersion } from "../../logic/anatomy/palettes.ts";
 import { escapeHtml } from "./html.ts";
@@ -122,6 +123,9 @@ export function registerAiSegPanel(
     inputName: string;
     state: "queued" | "running" | "done" | "failed" | "cancelled";
     progress: string;
+    /** How far the server says it is, 0-1, and the step it is in ("predict"), while it runs: the button's bar. */
+    fraction?: number;
+    stage?: string;
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -136,6 +140,20 @@ export function registerAiSegPanel(
   const isBusy = () => jobs.some((j) => j.state === "running");
   /** The panel's own line under the buttons: the newest job's progress, so a watcher still sees it. */
   let progress = "";
+  /**
+   * THE RUN BUTTON AS A BAR WHILE THE JOB RUNS (Ron, 2026-10-31: "If I am waiting, this is the most relevant information.
+   * We have the progress bar, but that one just shuttles back and forth ... Adding the time passed and the percentage
+   * progress to the progress bar would result in additional information"): filled as far as the server says, with the
+   * step, the percentage and the time since it started on it. The words twice, one dark copy clipped to the filled part
+   * and one light copy on the rest, so no part of them is light on yellow ("white on yellow is not a good contrast").
+   */
+  function runBar(jb: Job): string {
+    const pct = Math.max(0, Math.min(100, Math.round((jb.fraction ?? 0) * 100)));
+    const words = escapeHtml(`${jb.stage ? `${jb.stage} · ` : ""}${pct}% · ${hms(Date.now() - (jb.startedAt ?? Date.now()))}`);
+    return `<div class="sl-ai-runbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}" title="${escapeHtml(jb.progress)}">` +
+      `<div class="sl-ai-runbar-fill" style="width:${pct}%"></div><span class="sl-ai-runbar-text">${words}</span>` +
+      `<span class="sl-ai-runbar-text sl-ai-runbar-on" style="clip-path:inset(0 ${100 - pct}% 0 0)">${words}</span></div>`;
+  }
   /** ms -> "42s" / "3m07s" / "1h02m". */
   const hms = (ms: number) => {
     const s = Math.round(ms / 1000);
@@ -587,11 +605,12 @@ export function registerAiSegPanel(
       acts.innerHTML = `<button class="sl-primary sl-ai-start"${starting ? " disabled" : ""} title="Starts the segmentation server, which runs the networks on this Mac. It stops when Albula quits.">${starting ? "Starting…" : "Start the segmentation server"}</button>`;
       acts.querySelector<HTMLButtonElement>(".sl-ai-start")?.addEventListener("click", () => void startServer());
     } else acts.innerHTML = (needsFiles ? `<button class="sl-ai-fetch"${fetching ? " disabled" : ""} title="Get this network's model files from the project's release. If it fails, the server says why in the status line.">${fetching ? "Downloading…" : "Download the model files"}</button>` : "") +
+      (mine?.state === "running" && mine.fraction !== undefined ? runBar(mine) :
       `<button class="sl-primary sl-ai-run"${!vols.length || !chosenTask || mine || needsFiles ? " disabled" : ""} title="${needsFiles ? "Download the model files first" : mine ? "This network is running on this volume" : "Run the chosen network on the chosen volume. The result lands in the scene and is offered for saving."}">${
-      mine ? (mine.state === "running" ? "Running…" : "Queued…") : isBusy() ? "Add to the queue" : "Segment"}</button>`;
+      mine ? (mine.state === "running" ? "Running…" : "Queued…") : isBusy() ? "Add to the queue" : "Segment"}</button>`);
     if (progress) {
       const pr = document.createElement("p");
-      pr.className = "sl-hint sl-ai-progress";
+      pr.className = "sl-ai-progress";   // not a hint: while waiting it is what matters (Ron, 2026-10-31: "Why is it grayed out?")
       pr.textContent = progress;
       seg.appendChild(pr);
     }
@@ -618,7 +637,7 @@ export function registerAiSegPanel(
       const on = nowCtx > 0;
       const row = shell.row(adv, "Unlabeled body", { wide: true });
       row.innerHTML = `<button class="sl-anat-eye sl-ai-ctx${on ? "" : " sl-anat-off"}" type="button"
-        title="${on ? "Hide the tissue no network claimed" : "Show the tissue no network claimed"}">${on ? "👁" : "🚫"}</button>
+        title="${on ? "Hide the tissue no network claimed" : "Show the tissue no network claimed"}">${eyeSvg(on ? "shown" : "hidden")}</button>
         <span class="sl-hint" title="The tissue around the result. For more, see Volume Rendering.">${on ? "shown" : "hidden"}</span>`;
       row.querySelector(".sl-ai-ctx")?.addEventListener("click", () => {
         setColorizeParams(live, presentedVolume, { contextOpacity: on ? 0 : pres.context });
@@ -656,7 +675,7 @@ export function registerAiSegPanel(
           row.dataset.job = String(jb.id);
           const t = jb.finishedAt && jb.startedAt ? hms(jb.finishedAt - jb.startedAt) : jb.startedAt ? hms(Date.now() - jb.startedAt) : "";
           const glyph = jb.state === "running" ? "⟳" : jb.state === "queued" ? "…" : jb.state === "done" ? "✓" : jb.state === "cancelled" ? "–" : "✘";
-          row.innerHTML = `<span class="sl-ai-job-name" title="${jb.progress}"><b>${glyph} ${jb.task}</b> <span class="sl-hint">on ${jb.inputName}${t ? ` · ${t}` : ""}</span><br><span class="sl-hint sl-ai-job-line">${jb.progress}</span></span>` +
+          row.innerHTML = `<span class="sl-ai-job-name" title="${jb.progress}"><b>${glyph} ${jb.task}</b> <span class="sl-hint">on ${jb.inputName}${t ? ` · ${t}` : ""}</span><br><span class="${jb.state === "running" ? "" : "sl-hint "}sl-ai-job-line">${jb.progress}</span></span>` +
             (jb.state === "queued" || jb.state === "running"
               ? `<button class="sl-ai-job-cancel" title="Stop this job. The volume stays; nothing is written.">Cancel</button>`
               : `<button class="sl-ai-job-dismiss" title="Remove this line from the list. The result stays where it is.">×</button>`);
@@ -1210,6 +1229,7 @@ function lastComputedMs(task: string): number | undefined {
         // Re-rendered every tick even when nothing changed, so the clock moves: an unchanging
         // number is what made a working wait indistinguishable from a dead one.
         jobRec.progress = progress = `${line} · ${elapsed()}`;
+        jobRec.fraction = j.progress; jobRec.stage = j.stage;   // the bar's clock is the job line's (startedAt; critic, 2026-10-31)
         render();
         if (isFinished(j.state)) {
           if (j.state !== "succeeded") { progress = `job ${j.state}${j.error ? ": " + j.error : ""}`; return; }
@@ -1486,6 +1506,7 @@ function lastComputedMs(task: string): number | undefined {
             }
             const j = await job(transport, r.serverJobId);
             jobRec.progress = `${j.state}${j.progress !== undefined ? ` ${Math.round(j.progress * 100)}%` : ""} · ${hms(Date.now() - r.startedAt)} (re-attached)`;
+            jobRec.fraction = j.progress; jobRec.stage = j.stage;   // a re-attached job has the bar too
             render();
             if (isFinished(j.state)) {
               if (j.state !== "succeeded") { jobRec.state = "failed"; jobRec.progress = `job ${j.state}${j.error ? ": " + j.error : ""}`; break; }

@@ -69,3 +69,27 @@ for (const [what, v] of SCALES) {
     assertAlmostEquals(offsetRangeResolution("axial", [], lo, hi).step, 150 * v / 256, v * 1e-12);
   });
 }
+
+Deno.test("snapOffsetToVoxel: a view on the border between two slices moves to the middle of the nearest", async () => {
+  const { snapOffsetToVoxel } = await import("./slice-logic.ts");
+  // UPENN-GBM-00020's T1 post-contrast as Albula reads it: S of voxel 0 at -72.133, 1 mm, 192 slices. Its middle,
+  // where the axial view starts, is 23.367: slice 95.5, the border the flat brush and the view rounded apart.
+  const gbm = [-0.9766, -0.0017, 0, 94.1081, 0.0017, -0.9766, 0, 161.2115, 0, 0, 1, -72.133, 0, 0, 0, 1];
+  const s = snapOffsetToVoxel(23.367, [0, 0, 1], gbm);
+  const k = s + 72.133;
+  assertAlmostEquals(k, Math.round(k), 1e-9);
+  assert(Math.abs(s - 23.367) <= 0.5 + 1e-9);
+  // already on a middle: stays
+  assertAlmostEquals(snapOffsetToVoxel(-2.133, [0, 0, 1], gbm), -2.133, 1e-9);
+  // a reversed axis (k running toward inferior) and a 2.5 mm step
+  const rev = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -2.5, 10, 0, 0, 0, 1];
+  assertAlmostEquals(snapOffsetToVoxel(8.6, [0, 0, 1], rev), 7.5, 1e-9);
+  // sagittal on the GBM grid: the i axis runs right to left
+  const r = snapOffsetToVoxel(0.6, [1, 0, 0], gbm), i = (94.1081 - r) / 0.9766;
+  assertAlmostEquals(i, Math.round(i), 1e-3);
+  // an oblique view: left alone
+  const n = Math.SQRT1_2;
+  assertEquals(snapOffsetToVoxel(3.3, [n, 0, n], gbm), 3.3);
+  // no grid: left alone
+  assertEquals(snapOffsetToVoxel(3.3, [0, 0, 1], undefined), 3.3);
+});

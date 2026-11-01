@@ -22,7 +22,9 @@ import { checkScene, seriesNamed } from "../logic/scene/check.ts";
 import { provenancePathFor, provenanceEdges, seriesAttributes, type ProvenanceEdge, type SeriesAttribute } from "./db-index.ts";
 
 import { sqliteScript } from "./sqlite.ts";
-import { type SyncResult, syncSceneMrcom } from "./scene-mrcom.ts";
+import { sceneObjects, type SyncResult, syncSceneMrcom } from "./scene-mrcom.ts";
+import { ArchiveRefusal, refuseArchived, toTrash } from "./archive.ts";
+import { seriesFilePaths } from "./series-files.ts";
 export const SCENES_FOLDER = "SlicerAlbula-Scenes";
 const UID = /^2\.25\.\d{1,40}$/;
 
@@ -137,7 +139,14 @@ export async function renameScene(dbDir: string, uid: string, name: string): Pro
 export async function deleteScene(dbDir: string, uid: string): Promise<boolean> {
   if (!UID.test(uid)) return false;
   // Only a scene this database holds: the row of one beside it is not this database's to remove (finding 2).
-  if (!(await Deno.remove(`${dbDir}/${SCENES_FOLDER}/${uid}.mrson.json`).then(() => true, () => false))) return false;
+  // Never a scene the archive lists (ArchiveRefusal, shown by the route), and to the Trash (desktop/archive.ts).
+  const rel = `${SCENES_FOLDER}/${uid}.mrson.json`;
+  if (!(await Deno.stat(`${dbDir}/${rel}`).then(() => true, () => false))) return false;
+  // ITS DICOM OBJECT TOO: a listed object refuses the scene's delete before anything goes (the critic, finding 2).
+  const objectFiles: string[] = [];
+  for (const u of await sceneObjects(dbDir, uid)) objectFiles.push(...await seriesFilePaths(dbDir, u));
+  await refuseArchived(dbDir, [rel, ...objectFiles], "the scene");
+  if ((await toTrash(dbDir, [`${dbDir}/${rel}`])).trashed.length !== 1) return false;
   const prov = provenancePathFor(dbDir);
   try { await sqlite(prov, SCENES_SCHEMA + `DELETE FROM Scenes WHERE uid=${q(uid)};`, false); } catch { return false; }
   await syncSceneMrcom(dbDir, uid, null, "");   // its DICOM object goes with it
@@ -324,6 +333,9 @@ export async function handleSceneRoutes(req: Request, url: URL, dbId: string, db
     const r = await putScene(dbDir, uid, doc);
     return "error" in r ? Response.json(r, { status: r.status }) : Response.json(r, { headers: noStore });
   }
-  if (req.method === "DELETE") return Response.json({ removed: await deleteScene(dbDir, uid) });
+  if (req.method === "DELETE") {
+    try { return Response.json({ removed: await deleteScene(dbDir, uid) }); }
+    catch (e) { if (e instanceof ArchiveRefusal) return Response.json({ removed: false, error: e.message }, { status: 409 }); throw e; }
+  }
   return null;
 }

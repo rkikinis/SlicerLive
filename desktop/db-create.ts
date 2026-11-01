@@ -14,6 +14,7 @@
 // what it is called, what it holds, whether it holds patient data and under which approval, whom to ask -- so the
 // databases overview can say which one is which, and the file travels with the folder.
 import { runScript } from "./sqlite.ts";
+import { listRecordFiles, trashPreviousVersion, withRecordLock } from "./archive.ts";
 
 
 export const CTK_SCHEMA_VERSION = "0.8.1";
@@ -87,11 +88,16 @@ export async function readDescription(dir: string): Promise<DbDescription | unde
   catch { return undefined; }
 }
 
-/** Written beside, then renamed over, so a reader never sees half a file. */
+/** Written beside, then renamed over, so a reader never sees half a file. A record of the archive (desktop/archive.ts):
+ *  the version it replaces goes to the Trash first, and it is listed (the critic, 2026-10-29, records finding 4). */
 export async function writeDescription(dir: string, d: DbDescription): Promise<void> {
-  const tmp = `${dir}/${DESCRIPTION_FILE}.${crypto.randomUUID()}.tmp`;   // two saves at once must not share one (finding 20)
-  await Deno.writeTextFile(tmp, JSON.stringify(cleanDescription(d), null, 2) + "\n");
-  await Deno.rename(tmp, `${dir}/${DESCRIPTION_FILE}`);
+  await withRecordLock(`${dir}/${DESCRIPTION_FILE}`, async () => {
+    await trashPreviousVersion(dir, DESCRIPTION_FILE);
+    const tmp = `${dir}/${DESCRIPTION_FILE}.${crypto.randomUUID()}.tmp`;   // two saves at once must not share one (finding 20)
+    await Deno.writeTextFile(tmp, JSON.stringify(cleanDescription(d), null, 2) + "\n");
+    await Deno.rename(tmp, `${dir}/${DESCRIPTION_FILE}`);
+    await listRecordFiles(dir).catch((e) => console.warn(`archive: ${(e as Error).message}`));
+  });
 }
 
 /**

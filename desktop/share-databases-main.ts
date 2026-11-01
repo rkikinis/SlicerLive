@@ -32,7 +32,7 @@ if (a.list || a.unpair) {
 const ids = (a.db as string[] | undefined) ?? [];
 const port = Number(a.port ?? 8443);
 const say = (m: string) => console.log(`${new Date().toLocaleTimeString()}  ${m}`);
-if (!ids.length) { console.error("name the databases to share: --db <id> (as Albula's Databases window lists them)"); Deno.exit(2); }
+if (!ids.length) { console.error("name the databases to share: --db <id> (as Albula's settings file names them, [Database])"); Deno.exit(2); }
 const list = await registeredDatabases();
 for (const id of ids) if (!list.some((d) => d.id === id && d.exists)) { console.error(`no database “${id}” on this Mac (ids: ${list.map((d) => d.id).join(", ")})`); Deno.exit(2); }
 

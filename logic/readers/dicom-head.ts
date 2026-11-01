@@ -99,7 +99,7 @@ export const HEAD_TAGS = {
   Manufacturer: "00080070", SeriesDescription: "0008103E", ManufacturerModelName: "00081090",
   DerivationDescription: "00082111", ContrastBolusAgent: "00180010", BodyPartExamined: "00180015",
   ScanningSequence: "00180020", SequenceName: "00180024", SliceThickness: "00180050", KVP: "00180060",
-  RepetitionTime: "00180080", EchoTime: "00180081", MagneticFieldStrength: "00180087",
+  RepetitionTime: "00180080", EchoTime: "00180081", InversionTime: "00180082", MagneticFieldStrength: "00180087",
   SpacingBetweenSlices: "00180088", ProtocolName: "00181030", ConvolutionKernel: "00181210",
   PatientPosition: "00185100", CTDIvol: "00189345", ImageOrientationPatient: "00200037",
   NumberOfFrames: "00280008", Rows: "00280010", Columns: "00280011", PixelSpacing: "00280030",

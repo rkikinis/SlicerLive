@@ -41,7 +41,8 @@ import { registerQueuedModules } from "./extension-modules.ts";
 import { registerSegmentationsPanel } from "./segmentations-panel.ts";
 import { exportVolume, exportSegmentation, type ExportFormat } from "../../logic/export.ts";
 import { worldMatrix, hardenImageIjkToRAS, hardenPoints, withTranslation, IDENTITY4 } from "../../logic/transforms.ts";
-import { createSegmentation, addSegment, applyEffect, computeStats, paintStroke, commitPaint, drawFill, markEdited } from "../../logic/segmentation-editor.ts";
+import { createSegmentation, addSegment, markEdited } from "../../logic/segmentation-editor.ts";
+import { applyEffect, computeStats, paintStroke, commitPaint, drawFill, previewBrush } from "../../logic/segment-tools.ts";
 import { LocalBlobStore, loadVolumeIntoScene, setIngestTimers } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
 import { type RunProvenance, segmentationToDicomSeg } from "../../logic/export-dicom-seg.ts";
@@ -194,6 +195,8 @@ async function exportVolumeAsDicom(live: LiveSceneT, imageId: string, onStatus: 
       // date column, and a DICOM string written by us stays ASCII.
       ...(subject ? { subject } : {}),
       seriesDescription: (img.name as string) ?? "Derived volume",
+      // The source volume's own slices: in a series of several volumes only these are its source (export-dicom-image.ts).
+      ...(((src?.origin as { sopInstanceUIDs?: string[] } | undefined)?.sopInstanceUIDs?.length) ? { sourceInstanceUIDs: (src!.origin as { sopInstanceUIDs: string[] }).sopInstanceUIDs } : {}),
       derivation: subject ? `${subject.comments ?? "Loaded from a file"} into SlicerAlbula and written as DICOM unchanged: the same voxel grid, the same values.` : `Derived in SlicerAlbula from "${parentName}": a sub-box of the original voxel grid, taken on the grid itself with no resampling, so the voxel values are unchanged and the geometry stays aligned with the original.`,
       window,
       onProgress: (p) => onStatus(p.total ? `DICOM — ${p.phase} (${p.done}/${p.total})` : `DICOM — ${p.phase}…`),
@@ -873,12 +876,21 @@ async function main() {
     __blobChunk: (hash: string) => store.get(hash) ?? null,
   });
   const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, connect: wantPeer, onStatus: status, onNotify: (n) => { shell?.notify({ title: n.title, body: n.body, actions: n.actions }); }, startup: () => ({ drawing: appSettingsNow?.getBool("View3D", "drawing", SETTING_DEFAULTS.View3D.drawing), lighting: appSettingsNow?.get("View3D", "lighting") ?? SETTING_DEFAULTS.View3D.lighting }), onFrame: () => hook?.frameRendered(),
-    onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }); },
-    onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); },
+    onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal, first, viewImage) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }, first, viewImage); },
+    // The stroke's tally goes to the editor, which says it in its words (the structure's name, the range left out).
+    onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); (globalThis as { __segPainted?: (id: string) => void }).__segPainted?.(segId); }); },
+    // Shift+wheel over a slice: the editor's brush one step bigger or smaller (the editor holds its size).
+    onBrushPreview: (segId, segment, ras, radiusMm, sphere, normal, viewImage) => previewBrush(views.live, segId, ras, { segment, radiusMm, mode: "add", sphere, normal }, viewImage),
+    onViewScan: (imageId) => (globalThis as { __segViewScan?: (id: string) => void }).__segViewScan?.(imageId),
+    onBrushStep: (dir) => (globalThis as { __segBrushStep?: (d: 1 | -1) => void }).__segBrushStep?.(dir),
     // DRAW: the outline drawn on a slice, filled into the structure being edited, then saved into the scene as a stroke is.
     onNativeDraw: (segId, segment, points, normal) => { void drawFill(views.live, segId, points, { segment, normal }).then(async (n) => { await commitPaint(views.live, store, segId); const m = n ? `Draw: ${n.toLocaleString()} voxels filled` : "Draw: the outline holds no voxel centers on this slice"; status(m); shell?.setStatus(m); }); },
     // CLICK TO OUTLINE (render/click-outline-tool.ts): a click outlines; null (a right-click, Esc) ends the tool.
-    onClickOutline: (ras, sign) => { if (ras) void clickOutline.click(ras, sign); else endClickOutline(); } });
+    onClickOutline: (ras, sign) => { if (ras) void clickOutline.click(ras, sign); else endClickOutline(); },
+    // A click for another Segment Editor tool (the Threshold tool's piece): to the editor, which hands it to the tool.
+    onToolPick: (tool, ras, sign, remove) => (globalThis as { __segToolPick?: (t: string, r: [number, number, number], s: 1 | -1, rm?: boolean) => void }).__segToolPick?.(tool, ras, sign, remove),
+    // An outline drawn for a Segment Editor tool (Scissors): to the editor, which hands it to the tool.
+    onToolStroke: (tool, stroke, sign) => (globalThis as { __segToolStroke?: (t: string, st: unknown, s: 1 | -1) => void }).__segToolStroke?.(tool, stroke, sign) });
   const clickOutline = createClickOutline({
     // The status bar where the person looks (shell.setStatus), and the session log (status).
     live: views.live, store, status: (m) => { status(m); shell?.setStatus(m); },
@@ -927,6 +939,7 @@ async function main() {
     __clickOutlineLicense: () => clickOutline.license(),
     __clickOutlineStart: (segId: string, target: number, made?: boolean) => clickOutline.start(segId, target, made),
     __clickOutlineEnd: endClickOutline,
+    __brushNote: (text: string) => views.brushNote(text),
     __clickOutlineAt: (ras: [number, number, number], sign: 1 | -1) => clickOutline.click(ras, sign),
     __clickOutlineLast: () => clickOutline.last,
   });
@@ -1486,7 +1499,9 @@ Object.assign(globalThis, {
         const org = ((n.origin as Record<string, unknown> | undefined) ?? {});
         const priorCopy = typeof org.editedCopy === "string" ? org.editedCopy : "";
         const original = (org.editedFrom as string | undefined) ?? (org.savedSeriesInstanceUID as string | undefined) ?? (org.seriesInstanceUID as string | undefined) ?? "";
-        const fresh = !original && !priorCopy;            // made in the editor: saved under its own name, updated later
+        // MADE IN THE EDITOR: saved under its own name and updated under it on every later save (critic 2026-10-31, finding
+        // 7: the second save renamed it "…, edited <date>" as if it were a copy of an original).
+        const fresh = org.madeHere === true || (!original && !priorCopy);
         const p2 = (x: number) => String(x).padStart(2, "0");
         const d = new Date();
         const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
@@ -1497,11 +1512,11 @@ Object.assign(globalThis, {
         const after = live.nodes.get(id);
         const newUid = ((after?.origin as Record<string, unknown> | undefined)?.savedSeriesInstanceUID as string | undefined) ?? "";
         if (saved.indexed === false || !newUid) return { ok: false, error: saved.note ?? "the segmentation was not saved" };
-        live.write({ op: "patch", id, path: "#/origin", value: { ...((after?.origin as Record<string, unknown>) ?? {}), editedCopy: newUid, ...(original ? { editedFrom: original } : {}) } });
+        live.write({ op: "patch", id, path: "#/origin", value: { ...((after?.origin as Record<string, unknown>) ?? {}), editedCopy: newUid, ...(fresh ? { madeHere: true } : original ? { editedFrom: original } : {}) } });
         const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.json()).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean }[] } | null;
         const dbId = saved.dbId ?? (dbs?.databases ?? []).find((x) => x.current && x.exists)?.id ?? "";
         // WHERE IT CAME FROM, in the provenance store beside the file (source "albula").
-        if (original && dbId) void fetch(`/_db/${encodeURIComponent(dbId)}/_attribute`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: newUid, key: "editedFrom", value: original, source: "albula" }) }).catch(() => {});
+        if (!fresh && original && dbId) void fetch(`/_db/${encodeURIComponent(dbId)}/_attribute`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: newUid, key: "editedFrom", value: original, source: "albula" }) }).catch(() => {});
         let kept: string | undefined;
         if (priorCopy && !o.asNew && priorCopy !== newUid && dbId) {
           // A saved scene that lists the older copy would lose it: keep it then, and say which scene.

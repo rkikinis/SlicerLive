@@ -56,6 +56,9 @@ export const SYSTEM_RULES: [RegExp, System][] = [
   // "Sternothyroid muscle" and was filed under the ENDOCRINE glands on "thyroid".
   [/gluteus|iliopsoas|autochthon|quadriceps|sartorius|pterygoid|masseter|temporalis|muscle|compartment|deltoid|pectoralis|trapezius|latissimus|digastric|sternocleidomastoid|constrictor|platysma|scalene|thyrohyoid|prevertebral|supraspinatus|infraspinatus|coracobrachial|serratus|teres_|triceps|oblique|erector_spinae|transversospinalis|psoas|quadratus_lumborum|levator_|rectus|subscapularis|sterno_thyroid/, "Muscular system"],
   [/vertebra|rib_|ribs|costal|sternum|clavic|scapula|humerus|ulna|radius|carpal|phalanges|femur|patella|tibia|fibula|tarsal|metatarsal|hip|sacrum|skull|intervertebral_disc|sacroiliac|hyoid|cricoid|zygomatic|styloid|mandible|jawbone|maxilla/, "Skeletal system"],
+  // CADS (the workbook's omas sheet, imported 2026-10-31) names tissues and spaces in plain words with spaces: `compact
+  // bone`, `spongy bone`, `bones`, and the vertebral column's canal. \b keeps `frontal_bone`-style keys to the rules above.
+  [/\bbones?\b|spinal_canal/, "Skeletal system"],
   // `vessel` belongs here and the segmenter says so: it codes both lung_vessels and liver_vessels
   // as SCT:59820001 "Blood vessel". Without it, `lung_vessels` fell through to the respiratory rule
   // on the word "lung" and `liver_vessels` to the alimentary one on "liver" -- each filed under the
@@ -69,11 +72,11 @@ export const SYSTEM_RULES: [RegExp, System][] = [
   // in the lungs' branch, on a brain segmentation. Caught by rendering the tree for a task before
   // running it, which is the same way the lung_vessels/liver_vessels bug below was caught: not by
   // any check here. The generator proves COVERAGE, and coverage says nothing about correctness.
-  [/heart|atrial|ventricular_outflow|myocardium|aorta|artery|arteries|vein|venous|vena|vessel|brachiocephalic|coronary/, "Cardiovascular system"],
-  [/lung|trachea|bronch|pleura|larynx|nasal|paranasal|sinus/, "Respiratory system"],
+  [/heart|atrial|ventricular_outflow|myocardium|aorta|artery|arteries|vein|venous|vena|vessel|brachiocephalic|coronary|carotid|^blood$/, "Cardiovascular system"],
+  [/lung|trachea|bronch|pleura|larynx|nasal|paranasal|sinus|arytenoid|glottis/, "Respiratory system"],
   // The pharynx and the salivary glands are alimentary, and the naso-/oro-/hypopharynx names
   // would otherwise fall to the respiratory rule above by way of "nasal".
-  [/liver|stomach|duodenum|small_bowel|colon|rectum|esophagus|gallbladder|pancreas|bowel|intestine|appendix|cecum|sigmoid|pharyn|palate|tongue|parotid|submandibular|salivary/, "Alimentary system"],
+  [/liver|stomach|duodenum|small_bowel|colon|rectum|esophagus|gallbladder|pancreas|bowel|intestine|appendix|cecum|sigmoid|pharyn|palate|tongue|parotid|submandibular|salivary|buccal|lips/, "Alimentary system"],
   [/kidney|urinary|bladder|ureter|urethra/, "Urinary system"],
   [/prostate|uterus|ovary|testi|seminal|vagina/, "Genital system"],
   [/thyroid|adrenal|parathyroid|pituitary|thymus/, "Endocrine glands"],
@@ -81,10 +84,10 @@ export const SYSTEM_RULES: [RegExp, System][] = [
   // and _right, which the cardiovascular rule above claims by "heart", so every remaining ventricle
   // is a brain ventricle. This also rescues ventricle_body_left/right, which were falling all the
   // way through to "Body regions" on the body_ pattern.
-  [/brain|spinal_cord|spinal_chord|nerve|cerebell|white_matter|gr(e|a)y_matter|thalamus|caudate|lentiform|internal_capsule|insular|sulcus|_lobe|septum_pellucidum|subarachnoid|ventricle/, "Nervous system"],
-  [/eye|lens|auditory|cochlea|vestibul|olfactory|retina/, "Sense organs"],
+  [/brain|spinal_cord|spinal_chord|nerve|cerebell|white[_ ]matter|gr(e|a)y[_ ]matter|^csf$|cerebrospinal|chiasm|thalamus|caudate|lentiform|internal_capsule|insular|sulcus|_lobe|septum_pellucidum|subarachnoid|ventricle/, "Nervous system"],
+  [/eye|lens|auditory|cochlea|vestibul|olfactory|retina|lacrimal/, "Sense organs"],
   [/spleen|lymph|tonsil/, "Lymphoid system"],
-  [/breast|mamma|skin/, "Integument"],
+  [/breast|mamma|skin|scalp/, "Integument"],
   // Spaces and composites: several systems at once, or none. Last, so nothing specific reaches it.
   // MOOSE's `fingers_left` and `toes_left` are the digits whole -- bone, skin and all -- which is a
   // part of the body, not a bone; SNOMED agrees ("Fingers", "Toes of left foot" are body parts).

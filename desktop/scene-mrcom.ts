@@ -6,6 +6,8 @@
 // the scene's DICOM record, the form a hospital system keeps and sends.
 //
 // Writes go through the index's own writer (indexFilesIntoDatabase: one transaction, the audit, no orphans).
+import { appendManifest, archivedAmong } from "./archive.ts";
+import { seriesFilePaths } from "./series-files.ts";
 import { deleteSeriesFromDatabase, indexFilesIntoDatabase, type IndexMeta, provenancePathFor, seriesAttributes, setSeriesAttribute } from "./db-index.ts";
 import { sqliteScript } from "./sqlite.ts";
 import { sceneToMrcom, uidsInExtensions } from "../logic/scene/mrcom-scene.ts";
@@ -126,6 +128,7 @@ export async function storeSceneAsMrcom(dbDir: string, doc: Obj, producerVersion
 export const SCENE_UID_KEY = "sceneUID";
 
 /** The scene objects this database holds for one scene (normally one; more only after an interrupted save). */
+export async function sceneObjects(dbDir: string, sceneUid: string): Promise<string[]> { return await objectsOf(dbDir, sceneUid); }
 async function objectsOf(dbDir: string, sceneUid: string): Promise<string[]> {
   let attrs: { uid: string; key: string; value: string }[] = [];
   try { attrs = await seriesAttributes(provenancePathFor(dbDir)); } catch { return []; }
@@ -147,9 +150,14 @@ export interface SyncResult { stored?: StoredScene; removed: string[]; error?: s
  */
 export async function syncSceneMrcom(dbDir: string, sceneUid: string, doc: Obj | null, producerVersion: string): Promise<SyncResult> {
   const removed: string[] = [];
+  // THE ARCHIVE (desktop/archive.ts): a save or a rename replaces the scene's listed object, and the new object is listed
+  // in its place (Ron: "only the final version"); a delete (doc null) never gets here for a listed scene, deleteScene
+  // refuses first. `wasListed`: whether the old object was in the archive.
+  let wasListed = false;
   try {
     for (const uid of await objectsOf(dbDir, sceneUid)) {
-      await deleteSeriesFromDatabase(dbDir, uid);
+      if ((await archivedAmong(dbDir, await seriesFilePaths(dbDir, uid))).length) wasListed = true;
+      await deleteSeriesFromDatabase(dbDir, uid, { replacingInArchive: !!doc, what: "the scene's DICOM object" });
       await setSeriesAttribute(provenancePathFor(dbDir), uid, SCENE_UID_KEY, "", "albula-scene");
       removed.push(uid);
     }
@@ -165,6 +173,7 @@ export async function syncSceneMrcom(dbDir: string, sceneUid: string, doc: Obj |
     }
     const stored = await storeSceneAsMrcom(dbDir, { ...doc, uid: sceneUid }, producerVersion);
     if (stored.indexed) await setSeriesAttribute(provenancePathFor(dbDir), stored.seriesInstanceUID, SCENE_UID_KEY, sceneUid, "albula-scene");
+    if (stored.indexed && wasListed) await appendManifest(dbDir, [{ op: "add", path: stored.rel, kind: "scene", added: new Date().toISOString(), note: "the scene's DICOM object, after its save" }]);
     return { stored, removed, ...(stored.indexed ? {} : { error: stored.error ?? "the scene's DICOM object was not indexed" }) };
   } catch (e) {
     console.error(`scene ${sceneUid}: its DICOM copy: ${(e as Error).message}`);

@@ -31,7 +31,9 @@
 // Version 11 (2026-10-06): setSlicePlane -- a slice view on any plane (its sliceToRAS), for a module that shows the head
 // in its own frame rather than the scanner's (the Tract review).
 
-export const SDK_VERSION = 21;   // 21 (2026-10-26, Ron: "fix"): the BIDS import's frameOf / frameRule -- each series of a
+export const SDK_VERSION = 22;   // 22 (2026-10-31, Ron: "the consensus is open eye and closed eye"): eyeSvg, the one
+// drawing of shown / hidden for every list (render/demos/eye-icon.ts).
+// 21 (2026-10-26, Ron: "fix"): the BIDS import's frameOf / frameRule -- each series of a
 // BIDS session its own frame of reference (logic/import/bids.ts FRAME_RULE), so a kind no longer stamps the session's one.
 // 20 (2026-10-21, the critic's round): onAskedDerived (a set asked for a scan already on
 // screen reaches the module) and forgetAskedDerivedFor (an ask lasts while its scan is in the scene).
@@ -194,6 +196,7 @@ export function showInDownloads(name: string): void { void fetch(`/_picture/${en
 export { addRowMenu, makeNameEditable, startEditing, type RowAction } from "../render/demos/row-actions.ts";
 /** SDK 13: a list in a module as tall as its rows and the column allow, with a grip to drag (MODULE-DESIGN-RULES.md). */
 export { fitList } from "../render/demos/fit-list.ts";
+export { eyeSvg, type EyeState } from "../render/demos/eye-icon.ts";
 
 /** SDK 14: a banner across the top of the 3D view -- a title, a progress bar (0..1; null: under way, no fraction),
  *  a hint and buttons -- for work the person is waiting on, or a mode they are in. Update it as the work goes; close it
@@ -268,7 +271,7 @@ export { drawingHeld, holdDrawing } from "../render/demos/accum-loop.ts";
 /** SDK 6: the brain on an MRI of the anatomy (SynthStrip, through the haversack server), on that volume's own grid. */
 export { restartSegmentationServer, startSegmentationServer, synthstripBrainMask, type BrainMask, type BrainMaskResult } from "../logic/brain-mask.ts";
 /** The Show / Hide all button's decision, as the Segmentations module makes it (one rule, one wording, tested in core). */
-export { showHideAllState } from "../render/demos/segmentations-panel.ts";
+export { showHideAllState } from "../render/demos/show-hide-all.ts";
 /** Rows for the data probe about a point (patient RAS): an extension's objects under the pointer. */
 export { registerProbeRows, registerRayHits, type ProbeExtraRow, type RayHitProvider } from "../render/demos/probe-extras.ts";
 /** Paint with the brush in the slice views, into one segment of a segmentation (null: brush off). */

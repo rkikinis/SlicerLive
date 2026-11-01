@@ -10,14 +10,17 @@ import { binaryClose, binaryDilate, binaryErode, binaryOpen, median3d } from "..
 
 export type Scalars = { length: number; [i: number]: number };
 export type Dims = [number, number, number];
-export type OverwriteMode = "all" | "visible" | "none";   // Slicer OverwriteMode: All / Visible / None(background only)
+// Slicer OverwriteMode: All / Visible / None(background only); "segment" is ITK-SNAP's "Paint over" one named label (Ron,
+// 2026-10-31: "Yes, now"): only voxels of `overSegment` are written, so Necrosis painted over Tumor stays inside the tumor.
+export type OverwriteMode = "all" | "visible" | "none" | "segment";
 
-export interface MaskOpts { segment: number; overwrite?: OverwriteMode; visibleSegments?: number[]; }
+export interface MaskOpts { segment: number; overwrite?: OverwriteMode; visibleSegments?: number[]; overSegment?: number; }
 
 /** True if the active segment may write voxel currently holding `cur` under the overwrite rule. */
-function canWrite(cur: number, o: Required<Pick<MaskOpts, "segment">> & MaskOpts): boolean {
+export function canWrite(cur: number, o: Required<Pick<MaskOpts, "segment">> & MaskOpts): boolean {
   if (cur === o.segment) return true;
   const mode = o.overwrite ?? "all";
+  if (mode === "segment") return cur === o.overSegment;          // one structure: not even empty voxels
   if (cur === 0) return true;                                    // background is always writable
   if (mode === "all") return true;
   if (mode === "none") return false;                            // only background (handled above)
@@ -33,7 +36,7 @@ export function segmentMask(labelmap: Scalars, segment: number): Uint8Array {
 
 /** Write a binary result mask back as the active segment id, honoring the overwrite rule. Voxels that were
  *  the active segment but are 0 in `result` are cleared (to background). */
-function writeBack(labelmap: Scalars, result: Uint8Array, o: MaskOpts): Uint8Array {
+export function writeBack(labelmap: Scalars, result: Uint8Array, o: MaskOpts): Uint8Array {
   const seg = o.segment;
   const out = Uint8Array.from(labelmap as ArrayLike<number>);
   for (let i = 0; i < out.length; i++) {

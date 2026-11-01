@@ -22,8 +22,8 @@
 // `concept-regions.csv`, curated by Ron; this script seeds that file once from the name rules and
 // afterwards only adds rows for concepts that are new, never touching a row a person has edited.
 //
-// FIVE OF THE SIX SHEETS. OMAS/CADS is not served by haversack, so it is not imported; the row
-// below is the one place to add it when it is.
+// ALL SIX SHEETS since 2026-10-31: OMAS/CADS was left out while haversack did not serve it; it does now (cads:head and
+// five more), and its sheet ("omas with colors") is read last.
 // SheetJS, version in deno.jsonc ("npm:xlsx"): 0.20.3 from SheetJS's own CDN since 2026-09-28 -- the npm package stopped at
 // 0.18.5 (2022), which has public advisories (critic, 2026-09-28, finding 13). The output was checked unchanged.
 import * as XLSX from "npm:xlsx";
@@ -73,7 +73,17 @@ const SHEETS: { sheet: string; model: string; tasks?: (row: Row) => string[] }[]
   { sheet: "moose", model: "moose", tasks: (r) => [String(r["Model"] ?? "").trim()].filter(Boolean) },
   { sheet: "auto3dseg", model: "auto3dseg" },
   { sheet: "multitalent", model: "multitalent" },
+  // CADS (the workbook's "omas" sheets; Ron, 2026-10-31, on cads:head's nine Unclassified structures: "cads needs the
+  // color treatment too"). haversack serves it now. Last: a label another model also writes keeps that model's row.
+  { sheet: "omas with colors", model: "cads", tasks: (r) => [cadsTask(String(r["omas_model_group"] ?? ""))].filter(Boolean) },
 ];
+
+/** The workbook's CADS group ("brain (557)") as haversack names the task ("head"): the six haversack serves, read from
+ *  its job records on 2026-10-31; the rest by their own name until it serves them. */
+function cadsTask(group: string): string {
+  const g = group.replace(/\s*\(\d+\)\s*$/, "").trim().toLowerCase();
+  return ({ brain: "head", "oar-rad": "oar", muscles: "muscles", organs: "organs", ribs: "ribs", vertebrae: "vertebrae" } as Record<string, string>)[g] ?? g.replace(/[^a-z0-9]+/g, "_");
+}
 
 type Row = Record<string, string | number>;
 
@@ -226,16 +236,17 @@ if (import.meta.main) {
     if (!ws) throw new Error(`sheet "${spec.sheet}" not in the workbook; sheets are ${wb.SheetNames.join(", ")}`);
     let n = 0;
     for (const row of rows(ws)) {
-      const label = pick(row, "label_name", "Name");
+      const label = pick(row, "label_name", "Name", "omas_structure");   // the omas sheet's label_name is mostly empty
       if (!label || label === "background") continue;
       n++;
-      const scheme = pick(row, "Type.CodingSchemeDesignator", "SegmentedPropertyTypeCodeSequence.CodingSchemeDesignator");
-      const value = codeText(pick(row, "Type.CodeValue", "SegmentedPropertyTypeCodeSequence.CodeValue"));
-      const type = pick(row, "Type.CodeMeaning", "SegmentedPropertyTypeCodeSequence.CodeMeaning");
-      const mod = pick(row, "TypeModifier.CodeMeaning", "SegmentedPropertyTypeModifierCodeSequence.CodeMeaning");
-      const category = pick(row, "Category.CodeMeaning", "SegmentedPropertyCategoryCodeSequence.CodeMeaning");
-      const region = pick(row, "AnatomicRegion.CodeMeaning", "AnatomicRegionSequence.CodeMeaning");
-      const regionMod = pick(row, "AnatomicRegionModifier.CodeMeaning", "AnatomicRegionModifierSequence.CodeMeaning");
+      // The omas sheets spell the DICOM attributes with an underscore where the others have a dot.
+      const scheme = pick(row, "Type.CodingSchemeDesignator", "SegmentedPropertyTypeCodeSequence.CodingSchemeDesignator", "SegmentedPropertyTypeCodeSequence_CodingSchemeDesignator");
+      const value = codeText(pick(row, "Type.CodeValue", "SegmentedPropertyTypeCodeSequence.CodeValue", "SegmentedPropertyTypeCodeSequence_CodeValue"));
+      const type = pick(row, "Type.CodeMeaning", "SegmentedPropertyTypeCodeSequence.CodeMeaning", "SegmentedPropertyTypeCodeSequence_CodeMeaning");
+      const mod = pick(row, "TypeModifier.CodeMeaning", "SegmentedPropertyTypeModifierCodeSequence.CodeMeaning", "SegmentedPropertyTypeModifierCodeSequence_CodeMeaning");
+      const category = pick(row, "Category.CodeMeaning", "SegmentedPropertyCategoryCodeSequence.CodeMeaning", "SegmentedPropertyCategoryCodeSequence_CodeMeaning");
+      const region = pick(row, "AnatomicRegion.CodeMeaning", "AnatomicRegionSequence.CodeMeaning", "AnatomicRegionSequence_CodeMeaning");
+      const regionMod = pick(row, "AnatomicRegionModifier.CodeMeaning", "AnatomicRegionModifierSequence.CodeMeaning", "AnatomicRegionModifierSequence_CodeMeaning");
       const code = scheme && value ? `${scheme}:${value}` : undefined;
       const tasks = spec.tasks?.(row) ?? [];
       const models = tasks.length ? tasks.map((t) => `${spec.model}${spec.model === "moose" ? "/" : ":"}${t}`) : [spec.model];

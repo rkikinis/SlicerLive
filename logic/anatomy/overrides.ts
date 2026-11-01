@@ -101,6 +101,12 @@ export interface NameOverride {
  * contradicts itself between tasks, and these say which side is right.
  */
 export const OVERRIDES: Record<string, NameOverride> = {
+  // CADS writes `scalp`; the workbook's meaning is SNOMED's "Scalp structure", which no one says.
+  scalp: {
+    name: "Scalp",
+    why: "The harmonized table names a structure by its SNOMED meaning where no extension name exists; 'Scalp structure' is that wording, and the code stays SNOMED's.",
+    by: "Ron Kikinis, 2026-10-31 (\"cads needs the color treatment too\")",
+  },
   // THE PAROTIDS HAVE NO SIDE IN THE CATALOG. Both entries are `type: "Parotid gland"` with the
   // same name and no `mod`, so the pairing had nothing to key off and produced two sibling rows both
   // reading "Parotid gland" -- indistinguishable on screen, which for a paired organ is the failure

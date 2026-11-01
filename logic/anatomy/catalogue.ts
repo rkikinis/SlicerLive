@@ -57,10 +57,32 @@ function merge(a: CatalogueStructure | undefined, b: CatalogueStructure | undefi
   };
 }
 
-/** Every label either table knows, keyed by the label name the segmenter writes. */
-export const SEGMENTER_STRUCTURES: Record<string, CatalogueStructure> = Object.fromEntries(
-  [...new Set([...Object.keys(A), ...Object.keys(B)])].map((k) => [k, merge(A[k], B[k])]),
-);
+/**
+ * LABELS A MODEL WRITES THAT NO SOURCE MAPS, written here by hand until the source has them. Each says the model, and
+ * a code only where a sourced table already gives that structure one (MOOSE's or TotalSegmentator's own rows for the
+ * sided bones); otherwise none -- an invented code is worse than a missing one (overrides.ts). Neither table wins over
+ * these, because neither has them; when one gains a label, its row wins and the entry here can go.
+ *
+ * MOOSE's clin_ct_all_bones_v1 (Ron, 2026-10-31: "It seems that moose did not get the color treatment yet"): its six
+ * labels are skull, sternum, clavicle, scapula, ribcage and spine; MOOSE's mapping (moose_snomed_mapping.csv, at our
+ * pinned commit and at its main of 2026-10-31) has no rows for this model, so the four without a namesake in another
+ * model's table came out Unclassified in the segmenter's own colors. Clavicle and scapula are both sides as one label.
+ * "ribcage" is the ribs (the sternum is a label of its own in the same model); "spine" the vertebral column. Codes for
+ * the last two: none sourced -- Slicer's General Anatomy list has the cervical, thoracic and lumbar spine apart and
+ * "Bone of thorax" (sternum and thoracic spine included), neither the same structure.
+ */
+const ADDED: Record<string, CatalogueStructure> = {
+  clavicle: { name: "Clavicle", system: "Skeletal system", code: "SCT:51299004", type: "Clavicle", models: ["moose/clin_ct_all_bones"] },
+  scapula: { name: "Scapula", system: "Skeletal system", code: "SCT:79601000", type: "Scapula", models: ["moose/clin_ct_all_bones"] },
+  ribcage: { name: "Ribs", system: "Skeletal system", models: ["moose/clin_ct_all_bones"] },
+  spine: { name: "Spine", system: "Skeletal system", models: ["moose/clin_ct_all_bones"] },
+};
+
+/** Every label either table knows, keyed by the label name the segmenter writes, and the ones added above. */
+export const SEGMENTER_STRUCTURES: Record<string, CatalogueStructure> = {
+  ...ADDED,
+  ...Object.fromEntries([...new Set([...Object.keys(A), ...Object.keys(B)])].map((k) => [k, merge(A[k], B[k])])),
+};
 
 /** Where the harmonized table came from, for anything that cites it. */
 export const HARMONIZED_SOURCE = (harmonized as { source: Record<string, string> }).source;

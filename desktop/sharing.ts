@@ -35,6 +35,16 @@ async function readShared(galleryRoot?: string): Promise<Shared> {
   const list = (k: string) => (sec?.get(k) ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   return { ids: list("databases"), networks: list("networks") };
 }
+/**
+ * A DATABASE THAT LEAVES THE LIST LEAVES THE SHARED LIST TOO (critic 2026-10-29, Databases section, finding 1): the shared
+ * list holds ids, and an id comes from a name, so an id left behind was shared again when a database came back under it
+ * -- the same one switched on again, or ANOTHER database given that name, not public perhaps -- with no switch moved
+ * and no Touch ID. Called by every way a database leaves the list (db-serve.ts /_db/_remove).
+ */
+export async function unshareDatabase(galleryRoot: string | undefined, id: string): Promise<void> {
+  if (!(await readShared(galleryRoot)).ids.includes(id)) return;
+  await changeShared(galleryRoot, (s) => { s.ids = s.ids.filter((x) => x !== id); });
+}
 async function changeShared(galleryRoot: string | undefined, f: (s: Shared) => void): Promise<Shared> {
   const file = resolveSettingsPath(galleryRoot);
   return await withSettingsLock(file, async () => {

@@ -23,6 +23,7 @@ import { readDicomHead } from "../logic/readers/dicom-head.ts";
 import { DEFLATED_EXPLICIT_VR_LE, datasetOffset } from "../logic/dicom-deflate.ts";
 import { busy, IMPORT_FOLDER, indexImportedSeries, knownInstances, withIndexLock, type AuditResult, type ImportSeries } from "./db-index.ts";
 import { ctkInstancePath } from "./md5.ts";
+import { indexFiles, surveySeries } from "./private-fields.ts";
 
 export { IMPORT_FOLDER };
 
@@ -283,6 +284,15 @@ export async function importFiles(dbDir: string, files: string[], opts: { move?:
       series.push({ uid: res.seriesUID, studyUID: first.study, patientID: first.h.get("00100020") ?? "", patientName: first.h.get("00100010") ?? "",
         modality: first.h.get("00080060") ?? "OT", description: description(list), instances: list.length });
     }
+  }
+
+  // WHICH PRIVATE FIELDS EACH SERIES HOLDS (desktop/private-fields.ts; Ron, 2026-10-29), from the files the index lists
+  // for it now -- a series that was already there and grew is looked at whole, not as this import's images alone (critic
+  // 2026-10-29, finding 1). A failure here takes nothing back: the series is in, and the Databases section's own check
+  // looks at it again.
+  if (series.length) {
+    const files = await indexFiles(dbDir).catch(() => new Map<string, string[]>());
+    for (const s of series) await surveySeries(dbDir, s.uid, files.get(s.uid)).catch(() => undefined);
   }
 
   prog.phase = "done";

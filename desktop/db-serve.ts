@@ -32,22 +32,31 @@ import { provenancePathFor } from "./db-index.ts";
 import { auditDatabase, cohorts, createCohort, deleteCohort, deleteSeriesFromDatabase, setCohortMembers, type CohortLevel, indexFilesIntoDatabase, provenanceEdges, seriesAttributes, setSeriesAttribute, seriesSizes, type IndexMeta } from "./db-index.ts";
 import { handleSceneRoutes } from "./scenes.ts";
 import { picturesFolder } from "./pictures.ts";
-import { isAbsolute, join, normalize } from "jsr:@std/path@1";
+import { basename, dirname, isAbsolute, join, normalize } from "jsr:@std/path@1";
 import { parseIni } from "../logic/settings.ts";
 import { readSettings, resolveSettingsPath, withSettingsLock, writeSettings } from "./settings-file.ts";
 import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
+import { privateFieldsSummary } from "./private-fields.ts";
 import { chooseFolder, chosenFolder } from "./choose-folder.ts";
 import { bringDatabase, carryRecords, inspectFolder, packageFacts } from "./package-open.ts";
 import { isInside, placeOf } from "./paths.ts";
 import { moveToTrash, otherItems, trashRefusal } from "./db-remove.ts";
 import { handleRemoteRequest, remoteDatabases, remoteEntries } from "./db-remote.ts";
-import { handleSharingRequest } from "./sharing.ts";
-import { databaseChanged, jobsStatus } from "./extension-jobs.ts";
+import { handleSharingRequest, unshareDatabase } from "./sharing.ts";
+import { databaseChanged, jobsStatus, workspaceOf } from "./extension-jobs.ts";
 import { DTI_SAMPLE, getDtiSample, getTestCases, SampleError, TEST_CASES, testCasesComplete, type DtiSampleProgress, type DtiSampleResult, type TestCaseProgress } from "./test-cases.ts";
 import { readRecord, recordKept, removeTransferred, sameDatabase, transferSeries, type TransferProgress, type TransferResult, type TransferSide } from "./db-transfer.ts";
+import { sqliteScript } from "./sqlite.ts";
+import { archivedAmong, isRecordFile, listRecordFiles, trashPreviousVersion, withRecordLock } from "./archive.ts";
 
 const SECTION = "Database";
+/**
+ * DATABASES SWITCHED OFF THAT ARE NOT IN THE DATABASES FOLDER (critic 2026-10-29, Databases section, finding 4): their
+ * path, kept so the section still shows them with their switch off and can switch them on again where they are. A
+ * database in the folder needs no entry here: the folder itself is looked at. id = path, in the same settings file.
+ */
+const OFF_SECTION = "Databases not in use";
 
 export interface RegisteredDb {
   id: string;
@@ -93,7 +102,7 @@ export async function registeredDatabases(galleryRoot?: string): Promise<Registe
 /** Register a path, or change which is current. Returns the list as it now stands. */
 export async function updateDatabases(
   galleryRoot: string | undefined,
-  change: { register?: { id: string; path: string }; current?: string; unregister?: string },
+  change: { register?: { id: string; path: string }; current?: string; unregister?: string; keepOff?: string },
 ): Promise<RegisteredDb[]> {
   const file = resolveSettingsPath(galleryRoot);
   // READ, CHANGED AND WRITTEN UNDER ONE LOCK (settings-file.ts withSettingsLock; critic 2026-10-26, database remove,
@@ -103,6 +112,11 @@ export async function updateDatabases(
     const sec = cfg.get(SECTION) ?? new Map<string, string>();
     cfg.set(SECTION, sec);
     if (change.register) sec.set(change.register.id, change.register.path);
+    // Kept while off (outside the databases folder), and forgotten once it is on again.
+    const off = cfg.get(OFF_SECTION) ?? new Map<string, string>();
+    if (change.register) for (const [k, v] of off) if (v === change.register.path) off.delete(k);
+    if (change.keepOff && !isInDatabasesFolderSync(change.keepOff)) off.set(change.keepOff, change.keepOff);
+    if (off.size) cfg.set(OFF_SECTION, off); else cfg.delete(OFF_SECTION);
     // OFF THE LIST (desktop/db-remove.ts): the entry only; what the folder holds is not touched here. When it was the
     // default, the default moves to the first other one whose folder is there -- chosen on THIS reading of the file.
     if (change.unregister && change.unregister !== "current") {
@@ -164,6 +178,9 @@ const FEATURES = [
   "sharing",       // GET/POST /_db/_sharing, POST /_db/_sharing/forget, GET /_db/_nearby (sharing.ts)
   "remove",        // POST /_db/_remove {id, trash?, dry?} -- off the list; with trash, its folder to the macOS Trash too (db-remove.ts)
   "describe",      // GET/PUT /_db/<id>/_description
+  "private-fields", // GET /_db/<id>/_private-fields -- vendor private fields held and read (private-fields.ts)
+  "found",         // GET /_db answers {folder, found}: the databases in "SlicerAlbulaDatabases" not in the list; POST /_db/_register {path} lists one
+  "reveal",        // POST /_db/_reveal {id} | {path}: Finder shows a database's folder, or the databases folder
   "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
   "import",        // POST /_db/<id>/_import {token, sub?, move?} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
@@ -379,6 +396,21 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
   // moving to another database, chosen on the same reading of the list), THEN the folder goes to the Trash; a Trash that
   // fails puts the entry back (critic 2026-10-26, finding 2). Refused while work runs on it (finding 3). Answers in plain
   // words, the system's own in the session log (finding 5).
+  // POST /_db/_reveal {id} | {path} -- Finder shows it: a database in the list, one found in the databases folder, or the
+  // databases folder itself. Nothing else (the page names no arbitrary path).
+  if (url.pathname === "/_db/_reveal" && req.method === "POST") {
+    const b = await jsonBody().catch(() => ({} as Record<string, unknown>));
+    const d = typeof b.id === "string" ? (await registeredDatabases(galleryRoot)).find((x) => x.id === b.id) : undefined;
+    let folder = "";
+    try { folder = defaultDatabasesFolder(); } catch { /* no home folder */ }
+    const path = d?.path ?? (typeof b.path === "string" ? (b.path === folder ? folder : (await inDatabasesFolder(b.path, galleryRoot))?.path) : undefined);
+    if (!path) return Response.json({ error: "Albula does not know that folder." }, { status: 404 });
+    // In words, not the system's message with its path (MODULE-DESIGN-RULES: no file paths).
+    if (!(await Deno.stat(path).then(() => true, () => false))) return Response.json({ error: "Finder cannot show it: the folder is not there (a disk not connected, or not made yet)." }, { status: 404 });
+    try { await revealInFinder(path); return Response.json({ ok: true }, noStore); }
+    catch (e) { console.warn("reveal:", path, (e as Error).message); return Response.json({ error: "Finder could not show it." }, { status: 500 }); }
+  }
+
   if (url.pathname === "/_db/_remove" && req.method === "POST") {
     const b = await jsonBody().catch(() => ({} as Record<string, unknown>));
     const registered = await registeredDatabases(galleryRoot);
@@ -394,11 +426,11 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       return Response.json({ id: d.id, name, exists: d.exists, current: d.current, trash: refusal ? { ok: false, why: refusal } : { ok: true },
         otherItems: d.exists ? await otherItems(d.path) : 0, busy: busy ?? null }, noStore);
     }
-    if (busy) return Response.json({ error: `“${name}” was not removed: ${busy}. Remove it when that has finished.` }, { status: 409 });
     const trash = b.trash === true;
+    if (busy) return Response.json({ error: trash ? `“${name}” was not moved to the Trash: ${busy}. Try again when that has finished.` : `Albula still uses “${name}”: ${busy}. Switch it off when that has finished.` }, { status: 409 });
     if (trash && refusal) return Response.json({ error: `“${name}” was not removed: ${refusal}.` }, { status: 400 });
     let list: RegisteredDb[];
-    try { list = await updateDatabases(galleryRoot, { unregister: d.id }); }
+    try { list = await updateDatabases(galleryRoot, { unregister: d.id, ...(trash ? {} : { keepOff: d.path }) }); }
     catch (e) {
       console.warn("remove database: the list could not be written:", (e as Error).message);
       return Response.json({ error: `“${name}” was not removed: Albula could not update its list of databases. Nothing was changed.` }, { status: 500 });
@@ -413,6 +445,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
           databases: list }, { status: 500 });
       }
     }
+    await unshareDatabase(galleryRoot, d.id).catch((e) => console.warn("remove database: the shared list could not be updated:", (e as Error).message));
     const now = list.find((x) => x.current);
     return Response.json({ removed: d.id, name, trashed: trash, wasCurrent: d.current,
       current: now ? { id: now.id, name: now.description?.name ?? now.id, exists: now.exists } : null, databases: list, features: FEATURES }, noStore);
@@ -425,8 +458,12 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     try {
       const b = await jsonBody();
       const taken = (await registeredDatabases(galleryRoot)).map((d) => d.id);
-      const chosen = b.token ? chosenFolder(String(b.token)) : undefined;
+      // A DATABASE FOUND IN THE FOLDER (`path`, register only): one of `found`, checked again here -- a folder directly in
+      // "SlicerAlbulaDatabases" -- so a page cannot list an arbitrary folder by naming it.
+      const chosen = b.token ? chosenFolder(String(b.token))
+        : url.pathname === "/_db/_register" && typeof b.path === "string" ? await inDatabasesFolder(b.path, galleryRoot) : undefined;
       if (b.token && !chosen) return Response.json({ error: "that folder was not chosen in this session; choose it again" }, { status: 404 });
+      if (!b.token && typeof b.path === "string" && url.pathname === "/_db/_register" && !chosen) return Response.json({ error: "Albula cannot use that folder from here: it is not a database in the databases folder." }, { status: 400 });
       const registered = await registeredDatabases(galleryRoot);
       const hasIndex = (p: string) => Deno.stat(`${p}/ctkDICOM.sql`).then((x) => x.isFile, () => false);
       let path: string, description: DbDescription | undefined, warning: string | undefined;
@@ -444,14 +481,14 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
         const fileThere = await Deno.stat(`${path}/${DESCRIPTION_FILE}`).then(() => true, () => false);
         if (!description) {
           description = cleanDescription({ name: String(b.name ?? chosen.name) });
-          if (fileThere) warning = "Its description file could not be read and was left as it is; Edit shows a new one.";
+          if (fileThere) warning = "Its description file could not be read and was left as it is; its ⋯, Add a description…, gives it a new one.";
           else await writeDescription(path, description).catch(() => {});
         }
       } else {
         description = cleanDescription(b);
         const folderName = description.name.replace(/[\/:]/g, "-").replace(/^\.+/, "").trim() || "Database";
         // NOT INSIDE ANOTHER DATABASE (finding 10): its audit would count the new one's files as orphans from then on.
-        if (chosen && await hasIndex(chosen.path)) return Response.json({ error: "that folder already holds a DICOM database; use “Add an existing database folder” for it, or choose another folder" }, { status: 400 });
+        if (chosen && await hasIndex(chosen.path)) return Response.json({ error: "that folder already holds a DICOM database; use “Add from elsewhere…” for it, or choose another folder" }, { status: 400 });
         path = chosen ? chosen.path : join(defaultDatabasesFolder(), folderName);
         // A FOLDER OF THAT NAME ALREADY THERE gets a number (two databases may share a name: "Start fresh" keeps the old
         // one as an archive and makes a new one under its name; transfer-window.ts).
@@ -530,7 +567,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       const hasIndex = await Deno.stat(`${defaultPath}/ctkDICOM.sql`).then(() => true, () => false);
       if (hasIndex) {
         const desc = await readDescription(defaultPath).catch(() => null);
-        if (desc && desc.source !== DTI_SAMPLE.source) throw new Error(`there is already a database named “${DTI_SAMPLE.name}” that is not Albula's sample; rename it (Databases…) and press again`);
+        if (desc && desc.source !== DTI_SAMPLE.source) throw new Error(`there is already a database named “${DTI_SAMPLE.name}” that is not Albula's sample; rename it (Load / Save › Databases, its ⋯, Describe…) and press again`);
       } else {
         await createDatabase(defaultPath, { name: DTI_SAMPLE.name, holds: DTI_SAMPLE.holds, patientData: false, source: DTI_SAMPLE.source });
       }
@@ -653,7 +690,10 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     // The local ones, then those on another Mac (desktop/db-remote.ts); a remote one may be the default.
     const local = await registeredDatabases(galleryRoot), remotes = await remoteEntries(galleryRoot);
     if (remotes.some((r) => r.current)) for (const d of local) d.current = false;
-    return Response.json({ databases: [...local, ...remotes], features: FEATURES }, {
+    // EVERY DATABASE IN THE FOLDER (Ron, 2026-10-29: "List all, provide sliders to add them to the listing"): the ones
+    // not in the list come back as `found`, for the Databases section to show with their switch off.
+    const { folder, folderExists, found } = await foundDatabases(local, galleryRoot);
+    return Response.json({ databases: [...local, ...remotes], folder, folderExists, found, features: FEATURES }, {
       headers: { "cache-control": "no-store" },
     });
   }
@@ -687,7 +727,42 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     // they are invisible, because the browser lists what the INDEX holds. So the writer can undo its
     // own writes: same confined folder, same sanitized name, and a file that is already gone is a
     // success rather than an error, since the caller's goal is that it not be there.
+    // NEVER AN INDEXED OR ARCHIVED FILE (the critic, 2026-10-29, archive guard finding 1): this route takes back a writer's
+    // own unindexed writes; a series in the index leaves through Delete (deleteSeriesFromDatabase), which asks the archive.
+    const writeRel = `${sub}/${name}`;
+    const indexedHere = async () => (await sqliteScript(`${wdb.path}/ctkDICOM.sql`, `SELECT COUNT(*) FROM Images WHERE Filename='${writeRel.replace(/'/g, "''")}';`).catch(() => "0")).trim() !== "0";
+    // THE LIST IS ASKED only when something already there could go (a DELETE, or a POST over an existing file): a new
+    // file needs no answer from it, so an unreadable list never stops a segmentation's first save (the critic,
+    // 2026-10-29, records finding 3). An unreadable list refuses, in words.
+    const isRecord = isRecordFile(wdb.path, writeRel);
+    const there = await Deno.stat(`${dir}/${name}`).then((x) => x.isFile, () => false);
+    let listedHere = false;
+    if (there || req.method === "DELETE") {
+      try { listedHere = (await archivedAmong(wdb.path, [writeRel])).length > 0; }
+      catch (e) { return Response.json({ error: (e as Error).message }, { status: 409 }); }
+    }
+    // A RECORD a person made (the tract review's verdicts) is updated only by its own writer, through POST, never with
+    // an index record (a failed index would take the record back out: finding 2). Any other listed file is kept.
+    if (isRecord && req.method === "POST" && req.headers.get("x-albula-index")) return Response.json({ error: `${writeRel} is a record, not a DICOM object; it is not indexed` }, { status: 400 });
+    if (listedHere && !(isRecord && req.method === "POST")) return Response.json({ error: `${writeRel} is in the database's archive and is kept` }, { status: 409 });
+    if (isRecord && req.method === "POST") {
+      // One save of a record at a time; the version it replaces goes to the Trash first, then it is written and listed.
+      return await withRecordLock(`${dir}/${name}`, async () => {
+        try { await trashPreviousVersion(wdb.path, writeRel); }
+        catch (e) { return Response.json({ error: (e as Error).message }, { status: 500 }); }
+        try {
+          await Deno.mkdir(dir, { recursive: true });
+          const bytes = new Uint8Array(await req.arrayBuffer());
+          const tmp = `${dir}/.${name}.${Deno.pid}-${crypto.randomUUID().slice(0, 8)}.tmp`;
+          try { await Deno.writeFile(tmp, bytes); await Deno.rename(tmp, `${dir}/${name}`); }
+          catch (e) { await Deno.remove(tmp).catch(() => {}); throw e; }
+          await listRecordFiles(wdb.path).catch((e) => console.warn(`archive: ${(e as Error).message}`));
+          return Response.json({ path: `${dir}/${name}`, dir, rel: writeRel, bytes: bytes.byteLength });
+        } catch (e) { return Response.json({ error: (e as Error).message }, { status: 500 }); }
+      });
+    }
     if (req.method === "DELETE") {
+      if (await indexedHere()) return Response.json({ error: `${writeRel} is in the database's index: delete its series instead` }, { status: 409 });
       try {
         await Deno.remove(`${dir}/${name}`);
       } catch (e) {
@@ -801,6 +876,21 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 400 });
     }
+  }
+
+  // GET /_db/<id>/_private-fields -- which vendor private fields the database's series hold and which Albula reads
+  // (desktop/private-fields.ts). With ?check=1, series not yet looked at are checked in the background, and the answer
+  // says how far.
+  const pf = /^\/_db\/([^/]+)\/_private-fields$/.exec(url.pathname);
+  if (pf && req.method === "GET") {
+    const db = (await registeredDatabases(galleryRoot)).find((d) => d.id === decodeURIComponent(pf[1]));
+    if (!db || !db.exists) return Response.json({ error: "no such database" }, { status: 404 });
+    // The extension list as the import-time jobs find it: the workspace beside the gallery this server serves. In a
+    // compiled server with no workspace there is none, and the summary says so (critic 2026-10-29, finding 2).
+    const extensionList = Deno.env.get("ALBULA_EXTENSIONS") ?? (galleryRoot ? workspaceOf(galleryRoot)?.list : undefined);
+    // ?check=1: also look at the series not looked at yet (asked on the page; finding 7 of the section's critic).
+    try { return Response.json(await privateFieldsSummary(db.path, { startCheck: url.searchParams.get("check") === "1", extensionList: extensionList ?? "" }), noStore); }
+    catch (e) { return Response.json({ error: (e as Error).message }, { status: 500 }); }
   }
 
   // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (DICOM files…, a drop), waiting in the staging folder.
@@ -1131,4 +1221,79 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
   const headers = new Headers(res.headers);
   headers.set("cache-control", /\.(sql|sqlite|db)$/i.test(safe) ? "no-store" : "no-cache");
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+/**
+ * THE DATABASES IN "SlicerAlbulaDatabases" THAT ARE NOT IN THE LIST (Ron, 2026-10-29: "List all"): every folder directly
+ * in it that holds a DICOM index (ctkDICOM.sql), not hidden, and not the same folder as one in the list. Named by its own
+ * description when it has one. The restricted data was moved out of that folder for this (2026-10-29), so nothing there
+ * is to be hidden.
+ */
+export async function foundDatabases(listed: { path: string }[], galleryRoot?: string): Promise<{ folder: string; folderExists: boolean; found: { path: string; name: string; holds?: string; elsewhere?: boolean; exists: boolean }[] }> {
+  let folder = "";
+  try { folder = defaultDatabasesFolder(); } catch { return { folder, folderExists: false, found: [] }; }
+  const folderExists = await Deno.stat(folder).then((x) => x.isDirectory, () => false);
+  const found: { path: string; name: string; holds?: string; elsewhere?: boolean; exists: boolean }[] = [];
+  // Those switched off outside the folder, from the settings file: shown whether or not their disk is there.
+  for (const path of await offPaths(galleryRoot)) {
+    let same = false;
+    for (const d of listed) if (await sameDatabase(d.path, path).catch(() => false)) { same = true; break; }
+    if (same) continue;
+    const exists = await Deno.stat(`${path}/ctkDICOM.sql`).then((x) => x.isFile, () => false);
+    const ds = exists ? await readDescription(path).catch(() => undefined) : undefined;
+    found.push({ path, name: ds?.name ?? basename(path), ...(ds?.holds ? { holds: ds.holds } : {}), elsewhere: true, exists });
+  }
+  try {
+    for await (const e of Deno.readDir(folder)) {
+      if (!e.isDirectory || e.name.startsWith(".")) continue;
+      const path = join(folder, e.name);
+      if (!(await Deno.stat(`${path}/ctkDICOM.sql`).then((x) => x.isFile, () => false))) continue;
+      let same = false;
+      for (const d of listed) if (await sameDatabase(d.path, path)) { same = true; break; }
+      if (same) continue;
+      const ds = await readDescription(path).catch(() => undefined);
+      found.push({ path, name: ds?.name ?? e.name, ...(ds?.holds ? { holds: ds.holds } : {}), exists: true });
+    }
+  } catch { /* no such folder yet */ }
+  found.sort((a, b) => a.name.localeCompare(b.name));
+  return { folder, folderExists, found };
+}
+
+/** The paths in the settings file's "Databases not in use". */
+async function offPaths(galleryRoot?: string): Promise<string[]> {
+  const sec = parseIni(await readSettings(resolveSettingsPath(galleryRoot)).catch(() => "")).get(OFF_SECTION);
+  return sec ? [...sec.values()].filter((p) => isAbsolute(p)) : [];
+}
+
+/** Directly in the databases folder, by the path as written (the folder's own rule, for the settings file). */
+function isInDatabasesFolderSync(p: string): boolean {
+  try {
+    const folder = Deno.realPathSync(defaultDatabasesFolder());
+    return dirname(Deno.realPathSync(p)) === folder;
+  } catch { return false; }
+}
+
+/**
+ * A folder the section may switch on by its path: directly inside "SlicerAlbulaDatabases", not hidden, or one switched
+ * off from elsewhere (the settings file's "Databases not in use"); holding a DICOM index. As a chosen folder, with its
+ * REAL path (critic 2026-10-29, finding 10: a path with "..", a trailing slash or a link was stored as sent, and code that
+ * compares paths as strings then missed it). Undefined otherwise.
+ */
+async function inDatabasesFolder(p: string, galleryRoot?: string): Promise<{ path: string; name: string } | undefined> {
+  if (!isAbsolute(p)) return undefined;
+  const real = await Deno.realPath(p).catch(() => "");
+  if (!real || !(await Deno.stat(`${real}/ctkDICOM.sql`).then((x) => x.isFile, () => false))) return undefined;
+  let folder = "";
+  try { folder = await Deno.realPath(defaultDatabasesFolder()); } catch { /* no folder: only the off list */ }
+  if (folder && dirname(real) === folder && !basename(real).startsWith(".")) return { path: real, name: basename(real) };
+  for (const off of await offPaths(galleryRoot)) if ((await Deno.realPath(off).catch(() => "")) === real) return { path: real, name: basename(real) };
+  return undefined;
+}
+
+/** Finder shows the folder (macOS); Explorer on Windows. */
+async function revealInFinder(path: string): Promise<void> {
+  const cmd = Deno.build.os === "windows" ? new Deno.Command("explorer.exe", { args: [`/select,${path}`] })
+    : new Deno.Command("/usr/bin/open", { args: ["-R", path] });
+  const r = await cmd.output();
+  if (!r.success && Deno.build.os !== "windows") throw new Error(new TextDecoder().decode(r.stderr).trim() || `exit ${r.code}`);
 }

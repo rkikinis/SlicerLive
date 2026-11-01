@@ -113,3 +113,37 @@ Deno.test("odd groups in the curve, overlay and pixel-data ranges keep their num
   // Written back: the numbered keys are left out, as 0.41 left them; nothing lands in group 7F00.
   assertEquals(Object.keys(io.denaturalize(nat)).filter((t) => t.startsWith("7F") || t.startsWith("5001") || t.startsWith("6001")), []);
 });
+
+Deno.test("dcmjs's piece lookup: the same bytes as dcmjs's own scan, and time growing with the size, not its square", async () => {
+  setDicomLibrary(dcmjs);
+  const io = await dicomIO();
+  // A Tractography-like dataset of n tracks of 60 points: the shape that took 945 s to write at 370,000 (2026-10-30).
+  const file = (n: number) => io.toFile({
+    SOPClassUID: "1.2.840.10008.5.1.4.1.1.66.6", SOPInstanceUID: "2.25.1",
+    TrackSetSequence: Array.from({ length: 10 }, (_, i) => ({ TrackSetNumber: i + 1, TrackSetLabel: `set ${i}`,
+      TrackSequence: Array.from({ length: n / 10 }, (_, k) => ({ PointCoordinatesData: Float32Array.from({ length: 180 }, (_, j) => (k * 7 + j) % 100).buffer })) })),
+    _meta: { MediaStorageSOPClassUID: { Value: ["1.2.840.10008.5.1.4.1.1.66.6"], vr: "UI" }, MediaStorageSOPInstanceUID: { Value: ["2.25.1"], vr: "UI" }, TransferSyntaxUID: { Value: ["1.2.840.10008.1.2.1"], vr: "UI" } },
+  });
+  const timed = (n: number) => { const f = file(n), t0 = performance.now(), b = new Uint8Array(f.write()); return { b, s: (performance.now() - t0) / 1000 }; };
+  // The patched lookup against dcmjs's own scan on the same dataset: the bytes must be identical.
+  const proto = Object.getPrototypeOf(new (dcmjs as unknown as { data: { WriteBufferStream: new (n: number) => { view: object } } }).data.WriteBufferStream(16).view) as Record<string | symbol, unknown>;
+  const own = proto[Symbol.for("albula.dcmjs.binaryFindStart")] as (() => number) | undefined;
+  assertEquals(typeof own, "function", "the binary search is installed and dcmjs's own scan kept beside it");
+  const fast = timed(10_000).b, ours = proto.findStart;
+  proto.findStart = own!;
+  try { assertEquals(timed(10_000).b, fast); } finally { proto.findStart = ours; }
+  // Linear, not quadratic: 8 times the tracks may take at most 16 times as long (dcmjs's own scan on this dataset: about
+  // 38 times, 0.45 -> 17 s on an M1 Max under load; the critic, 2026-10-30). A floor of 0.05 s keeps a very fast first run
+  // from deciding it.
+  const small = timed(10_000).s, big = timed(80_000).s;
+  if (big > 16 * Math.max(small, 0.05)) throw new Error(`80,000 tracks took ${big.toFixed(2)} s against ${small.toFixed(2)} s for 10,000`);
+});
+
+Deno.test("dcmjs's piece lookup: a position that is not a number is refused as dcmjs's own scan refuses it", async () => {
+  setDicomLibrary(dcmjs);
+  await dicomIO();
+  const view = new (dcmjs as unknown as { data: { WriteBufferStream: new (n: number) => { view: { checkSize(n: number): void; findStart(s: number): number | undefined } } } }).data.WriteBufferStream(16).view;
+  view.checkSize(100);
+  assertEquals(view.findStart(NaN), undefined);
+  assertEquals(view.findStart(40), 2);
+});

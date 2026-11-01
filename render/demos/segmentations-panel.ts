@@ -23,6 +23,7 @@
 // with poor fine motor control." So every move has a NON-DRAG path first: select rows, then choose
 // a destination from a menu. Drag, when it lands, is the fast path on top — never the only one.
 import { shownMember } from "../../logic/sequences.ts";
+import { eyeSvg } from "./eye-icon.ts";
 import { afterPress, pressedIn } from "./press-guard.ts";
 import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { escapeHtml } from "./html.ts";
@@ -42,41 +43,8 @@ import { definitionFor } from "../../logic/anatomy/definitions.ts";
 import { addTerm, mintCode, newTerminology, proposeColour, terminologies, terminology, type TerminologySource, toColorTableCsv } from "../../logic/anatomy/terminology.ts";
 import { describeCorrections } from "../../logic/anatomy/overrides.ts";
 
-/**
- * What the show/hide-all button says, and what it will do.
- *
- * Ron: "can you add a turn off/on all button to the segmentations display?" With 111 structures,
- * "show me only the vessels" is otherwise a hundred and five clicks, and getting back is a hundred
- * and eleven.
- *
- * Separated from the panel because the DECISION is the part that can be wrong, and it needs no DOM:
- * which way the click goes, what it is scoped to, and what it therefore says.
- *
- * - ONE BUTTON, following the same rule the per-row eyes follow: anything still visible means the
- *   click hides; nothing visible means it shows. So it is never a no-op and the way back from a hide
- *   is the same button.
- * - SCOPED TO WHAT THE LIST SHOWS. With a filter typed it acts on the matches only, which is the
- *   useful half of it -- "rib" then Hide these 24 leaves everything else alone.
- * - THE LABEL SAYS WHICH, so there is nothing to discover: "Hide all" or "Show these 24".
- */
-export function showHideAllState(
-  shown: readonly { labelValue?: number; visible?: boolean }[],
-  filtered: boolean,
-): { label: string; title: string; show: boolean; labels: number[] } {
-  const labels = shown.map((x) => x.labelValue).filter((v): v is number => typeof v === "number");
-  const anyVisible = shown.some((x) => x.visible !== false);
-  const show = !anyVisible;
-  const n = shown.length;
-  const label = show
-    ? (filtered ? `Show these ${n}` : "Show all")
-    : (filtered ? `Hide these ${n}` : "Hide all");
-  return {
-    label,
-    title: show ? "Show every structure in the list below" : "Hide every structure in the list below",
-    show,
-    labels,
-  };
-}
+export { showHideAllState } from "./show-hide-all.ts";
+import { showHideAllState } from "./show-hide-all.ts";
 
 interface Root {
   id: string;
@@ -486,7 +454,7 @@ export function registerSegmentationsPanel(
     const state2 = state;
     eye.className = "sl-anat-eye" + (state2 === "none" ? " sl-anat-off" : state2 === "some" ? " sl-anat-mixed" : "");
     eye.type = "button";
-    eye.textContent = state2 === "none" ? "🚫" : "👁";
+    eye.innerHTML = eyeSvg(state2 === "none" ? "hidden" : state2 === "some" ? "some" : "shown");
     eye.title = state2 === "all" ? "Hide" : state2 === "none" ? "Show" : "Some hidden — click to show all";
     eye.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -640,7 +608,7 @@ export function registerSegmentationsPanel(
       const eye = document.createElement("button");
       eye.className = "sl-anat-eye" + (shown ? "" : " sl-anat-off");
       eye.type = "button";
-      eye.textContent = shown ? "👁" : "🚫";
+      eye.innerHTML = eyeSvg(shown ? "shown" : "hidden");
       eye.title = shown ? "Showing in the views — click to hide" : "Hidden — click to show";
       // THE EYE COVERS THE 3D VIEW TOO. `visible` is the slices; the 3D view reads `visible3D`,
       // which the Scene module's 3D button sets and this eye never touched -- so once 3D had been
@@ -824,7 +792,7 @@ export function registerSegmentationsPanel(
     const updateAll = () => {
       const f = filter.trim().toLowerCase();
       act = showHideAllState(matchingLeaves(tree, f), f.length > 0);
-      allBtn.textContent = act.show ? "🚫" : "👁";
+      allBtn.innerHTML = eyeSvg(act.show ? "hidden" : "shown");
       allBtn.title = `${act.label}: ${act.title.charAt(0).toLowerCase()}${act.title.slice(1)}`;
       allBtn.setAttribute("aria-label", act.label);
       allBtn.disabled = act.labels.length === 0;

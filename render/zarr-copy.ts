@@ -12,6 +12,7 @@
 // `{ missing }` and the caller reads the DICOM files as always. Nothing depends on a copy existing.
 import { workerUrl } from "./build-id.ts";
 import { COPY_CODE } from "../desktop/duckn-copy-code.ts";
+import { sameCopyCode } from "../desktop/duckn-copy-same.ts";
 import { interpreterCodes } from "../logic/readers/volume-interpreters.ts";
 import { assembleChunk } from "./zarr-assemble.ts";
 import type { Volume } from "../logic/readers/nifti.ts";
@@ -134,7 +135,7 @@ function zarrDisagrees(arr: ArrayDesc & { shape?: unknown; data_type?: unknown; 
  *  interpreters are the extensions' (volume-interpreters.ts): a copy made with another version of one, or with one more
  *  or fewer, would hold other values per volume (the diffusion b-values, ...). */
 export function copyMadeByOtherCode(code: string | undefined, pageCode = COPY_CODE, interpreters?: Record<string, string>, pageInterpreters: Record<string, string> = interpreterCodes()): string | null {
-  if (code !== pageCode) return `the copy was made by other code than this page reads with (${code ?? "none named"}; this page is ${pageCode})`;
+  if (!sameCopyCode(code, pageCode)) return `the copy was made by other code than this page reads with (${code ?? "none named"}; this page is ${pageCode})`;
   const a = JSON.stringify(interpreters ?? {}), b = JSON.stringify(pageInterpreters);
   return a === b ? null : `the copy was read with other extensions than this page has (${a}; this page ${b})`;
 }

@@ -1587,6 +1587,8 @@ fn fs_solid(v : Varyings) -> SolidOut {
   // the step only has to be short enough not to jump over a structure, and a voxel-wide structure
   // is still caught (its smoothed copy or its labels hold the step that lands in it).
   let step = scene_step() / 0.7;
+  // Whether the ray starts INSIDE the box (the camera, or its near plane, within it) or enters it through a face.
+  let startsInBox = t_near <= 0.0;
   t_near = max(t_near + step, 0.0);
   t_far = t_far - step;
   var t = t_near;
@@ -1599,11 +1601,17 @@ fn fs_solid(v : Varyings) -> SolidOut {
   var walls : i32 = 0;
   var inside : i32 = 0;
   var wasClipped = false;
+  // How far back the last sample was: a step, or less in a block holding a structure too thin for the blur (below).
+  var prevDt = step;
   // The structure the ray is in, per colored volume: walls are where it changes. STARTED IN THE STATE
   // OF THE POINT THE RAY STARTS AT, so a camera inside a structure is not met by a wall behind the eye
   // filling the view with one flat color (critic, finding 13).
+  // ONLY WHEN THE RAY STARTS IN THE BOX. A ray entering through one of its faces starts outside everything: started in the
+  // state a step inside, a structure that reaches the edge of the scan had no wall where the ray came in, and its face
+  // there was not drawn -- open boxes, by the camera's position, after Grow from seeds filled out to the edge (Ron,
+  // 2026-10-31, build 20:15).
 ${clz.map((p) => `  var lab${p.slot} : i32 = 0;
-  if (u_material.clz${p.slot}_params.w > 0.5) { lab${p.slot} = solid_class_clz${p.slot}(ro + rd * t_near, 0, rd); }`).join("\n")}
+  if (startsInBox && u_material.clz${p.slot}_params.w > 0.5) { lab${p.slot} = solid_class_clz${p.slot}(ro + rd * t_near, 0, rd); }`).join("\n")}
   loop {
     if (t >= t_far || safety >= 5000 || acc.a >= 0.99) { break; }
     let wp = ro + rd * t;
@@ -1624,6 +1632,7 @@ ${clz.map((p) => `  var lab${p.slot} : i32 = 0;
 ${clz.map((p) => `    if (u_material.clz${p.slot}_params.w > 0.5) { leap = min(leap, solid_skip_clz${p.slot}(wp, rd, lab${p.slot})); }`).join("\n")}
     if (!clipped && !wasClipped && leap > step && leap < 1e29) {
       t = t + leap + 0.01 * step;
+      prevDt = step;                         // the look-back after a leap is a step, inside the block, as before
       safety = safety + 1;
       leaps = leaps + 1;
       continue;
@@ -1639,7 +1648,7 @@ ${clz.map((p) => `      lab${p.slot} = 0;`).join("\n")}
       for (var ci = 0u; ci < ccount; ci = ci + 1u) {
         let cp = u_material.clip_planes[ci];
         let dCur = dot(wp, cp.xyz) + cp.w;
-        let dPrev = dot(wp - rd * step, cp.xyz) + cp.w;
+        let dPrev = dot(wp - rd * prevDt, cp.xyz) + cp.w;
         let den = dot(rd, cp.xyz);
         if (dPrev < 0.0 && dCur >= 0.0 && abs(den) > 1e-6) {
           let sHit = -dCur / den;                                // <= 0: back along the ray
@@ -1664,7 +1673,7 @@ ${clz.map((p) => `      if (u_material.clz${p.slot}_params.w > 0.5) {
         let nl = solid_class_clz${p.slot}(wp, lab${p.slot}, rd);
         if (nl != lab${p.slot}) {
           walls = walls + 1;
-          let c = solid_wall_clz${p.slot}(wp - rd * step, wp, lab${p.slot}, nl, rd);
+          let c = solid_wall_clz${p.slot}(wp - rd * prevDt, wp, lab${p.slot}, nl, rd);
           if (c.a > 0.0) {
             if (!opaque && c.a >= 0.99) { opaque = true; hp = g_solid_p; hn = g_solid_n; }
             // A SEE-THROUGH WALL keeps its own depth (VEIL_K): listed, not blended into the layer.
@@ -1676,7 +1685,18 @@ ${clz.map((p) => `      if (u_material.clz${p.slot}_params.w > 0.5) {
       }`).join("\n")}
     }
     if (${clz.map((p) => `lab${p.slot} > 0`).join(" || ") || "false"}) { inside = inside + 1; }
-    t = t + step;
+    // FINER STEPS NEAR A STRUCTURE TOO THIN FOR THE BLUR (colorize-field.ts solid_fine: a BRICK_THIN block, the structure
+    // within the blur's reach). Such a structure is inside only where its labels' occupancy reaches THIN_INSIDE, a band
+    // about a voxel deep for a plate one voxel thick, and a ray crossing it at one step a voxel landed in it or stepped
+    // over it by the angle: holes in thin bone, more or fewer as the view turned (Ron, 2026-10-31, the maxilla of MOOSE's
+    // clin_ct_dental: "a lot of artefacts ... they again depend on camera angle"). Measured (render/test/thin-plate.gpu
+    // .test.ts, six directions; render/solid-look.gpu-bench.ts on a whole-body ts.v2:total, 800 x 800): no holes up to
+    // 0.85 of a step, holes at 0.9; the solid frame 22-27 ms before, 33 ms at 0.75, 47 ms at 0.4. 0.75: a margin under
+    // the edge.
+    var dt = step;
+${clz.map((p) => `    if (u_material.clz${p.slot}_params.w > 0.5 && solid_fine_clz${p.slot}(wp)) { dt = step * 0.75; }`).join("\n")}
+    t = t + dt;
+    prevDt = dt;
     safety = safety + 1;
   }
   if (u_material.scene.w > 0.5) {          // never: names every binding (see above)
@@ -2108,6 +2128,15 @@ ${pickDispatch}
     const d: Vec3 = [f[0] - o[0], f[1] - o[1], f[2] - o[2]];
     const L = Math.hypot(d[0], d[1], d[2]) || 1;
     return { origin: o, dir: [d[0] / L, d[1] / L, d[2] / L] };
+  }
+
+  /**
+   * THE MATRIX FROM WORLD TO THE VIEW (column-major, as worldRay reads it): the inverse of the one the shaders unproject
+   * with, so a point projected with it lands where the renderer draws it. For the Segment Editor's Scissors (2026-10-30),
+   * which cuts every voxel whose projection falls inside an outline drawn on this view. null before the first frame.
+   */
+  viewMatrix(): Float32Array | null {
+    return this.baseInvVP ? new Float32Array(invert(this.baseInvVP) as unknown as Float32Array) : null;
   }
 
   /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a

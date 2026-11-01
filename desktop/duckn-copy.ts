@@ -30,7 +30,7 @@
 import * as zlib from "node:zlib";
 import dcmjs from "../logic/dcmjs.ts";
 import { lastHeaderMs, lastSkipped, lastSkipReasons, parseInstances, setDcmjs, volumesOfSeries } from "../logic/readers/dicom-series.ts";
-import { DICOM_HEADER_LAYOUT, ducknView, mergeSlice, sameHeader, splitShared } from "../logic/readers/dicom-tags.ts";
+import { ducknView, mergeSlice, sameHeader, splitShared } from "../logic/readers/dicom-tags.ts";
 import { percentileWindowLevel, sha256, volumeToZarr } from "../logic/ingest.ts";
 import { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
 import { COPY_CODE, COPY_FOLDER } from "./duckn-copy-code.ts";
@@ -47,7 +47,7 @@ const ZSTD_LEVEL = 3;
 // with the reason (critic, 2026-09-25, finding 7), so a writer reading the copy knows whether the series is complete.
 // 0.4 (2026-10-27): the `dicom` view follows duckn dicom-spec 1.0 as haversack writes it (logic/readers/dicom-tags.ts
 // ducknView): `stored_values: false`, the source transfer syntax, `sample_units` from the scan's own Rescale Type.
-const ALBULA_EXT_VERSION = "0.4";
+const ALBULA_EXT_VERSION = "0.5";   // 0.5 (2026-10-29): no full header copy beside the array
 
 const DATA_TYPE: Record<string, string> = { "<i2": "int16", "<u2": "uint16", "|u1": "uint8", "|i1": "int8", "<f4": "float32" };
 
@@ -227,11 +227,12 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
         pieces++;
       }
       const meta = (vol.meta ?? {}) as Record<string, string | undefined>;
-      // THE WHOLE HEADER (step 5 of the brief; logic/readers/dicom-tags.ts). The RECORD in the DICOM JSON Model -- every
-      // attribute, private and binary ones included -- shared once and per slice, zstd-compressed beside the array
-      // (`dicom-header.json.zst`: a vendor's binary header can be kilobytes a slice, and the page's load never reads
-      // it). Michael Halle's keyword VIEW of the same header where his layout puts it: shared as the array's DICOM
-      // tags, the rest per slice in the samples.
+      // THE HEADER: Michael Halle's keyword VIEW where his layout puts it, shared as the array's DICOM tags, the rest per
+      // slice in the samples. NO FULL COPY BESIDE IT since 2026-10-29 (Ron: "q1: yes", on Mike's reply: duckn leaves
+      // private and binary tags out "because it cannot analyze them for phi"): every attribute, private and binary ones
+      // included, is kept as received in the archive's original DICOM files; what a reader needs from a private tag it
+      // extracts into a readable, named field. Copies made before then carried `dicom-header.json.zst` (layout
+      // albula-dicom-header-4).
       const th = performance.now();
       // The view as duckn's dicom-spec 1.0 defines it for rescaled values (ducknView), as haversack writes its copies.
       const views = (vol.sliceHeaders ?? []).map((h) => ducknView(h.tags));
@@ -243,12 +244,6 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
       const sourceTs = one((vol.sliceHeaders ?? []).map((h) => h.tags.TransferSyntaxUID as string | undefined));
       const rescaleType = one((vol.sliceHeaders ?? []).map((h) => h.tags.RescaleType as string | undefined));
       const sampleUnits = typeof rescaleType === "string" && rescaleType.trim() && rescaleType.trim().toUpperCase() !== "US" ? rescaleType.trim() : undefined;
-      const record = splitShared((vol.sliceHeaders ?? []).map((h) => h.json));
-      const headerFile = vol.sliceHeaders?.length ? "dicom-header.json.zst" : undefined;
-      if (headerFile) {
-        await Deno.mkdir(arr, { recursive: true });
-        await Deno.writeFile(`${arr}/${headerFile}`, zstd(new TextEncoder().encode(JSON.stringify({ layout: DICOM_HEADER_LAYOUT, standard: "DICOM PS3.18 Annex F (DICOM JSON Model)", shared: record.shared, perSlice: record.perSlice }))));
-      }
       const dicomTags: Record<string, unknown> = { ...shared };
       for (const [k, v] of [["SeriesInstanceUID", meta.seriesInstanceUID], ["StudyInstanceUID", meta.studyInstanceUID], ["Modality", meta.modality]] as const) if (v && !(k in dicomTags)) dicomTags[k] = v;
       const arrayJson = {
@@ -269,7 +264,6 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
               dicom: { version: "1.0", stored_values: false, ...(sourceTs ? { source_transfer_syntax: sourceTs } : {}), ...(lossy ? { lossy_compressed: true } : {}), tags: dicomTags },
               albula: {
                 version: ALBULA_EXT_VERSION,
-                ...(headerFile ? { header: { file: headerFile, layout: DICOM_HEADER_LAYOUT } } : {}),
                 // Everything the page's Volume carries except its voxels, as the reader made it.
                 volume: { name: vol.name, dims: vol.dims, ijkToRAS: vol.ijkToRAS, dtype: vol.dtype, meta: vol.meta, geometry: vol.geometry },
                 frame: { index: f, label: seq.labels[f], timing: seq.timing[f] },
@@ -283,17 +277,13 @@ export async function writeDucknCopy(dbDir: string, seriesUID: string, opts: { o
         },
       };
       await Deno.writeTextFile(`${arr}/zarr.json`, JSON.stringify(arrayJson));
-      // THE HEADER CHECK, as for the pieces: read back from disk, every slice's header rebuilt from the copy (shared +
-      // its own) is the one the files gave, attribute for attribute, for everything the layout keeps.
-      if (vol.sliceHeaders?.length && headerFile) {
+      // THE HEADER CHECK, as for the pieces: read back from disk, every slice's view rebuilt from the copy (shared + its
+      // own) is the one written, attribute for attribute.
+      if (vol.sliceHeaders?.length) {
         const back = JSON.parse(await Deno.readTextFile(`${arr}/zarr.json`));
         const d = back.attributes.duckn;
         const own = (k: number) => d.axes[0].samples?.[k]?.metadata?.dicom as Record<string, unknown> | undefined;
-        const rec = JSON.parse(new TextDecoder().decode(unzstd(await Deno.readFile(`${arr}/${headerFile}`))));
         for (let k = 0; k < vol.sliceHeaders.length; k++) {
-          // The record: every attribute of the file, private and binary included, byte for byte (base64).
-          if (!sameHeader(vol.sliceHeaders[k].json, mergeSlice(rec.shared, rec.perSlice[k]))) throw new Error(`${seriesUID}: slice ${k}'s DICOM header does not come back from the copy as it was`);
-          // Mike's view: the same, in his form.
           if (!sameHeader(views[k], mergeSlice(d.extensions.dicom.tags, own(k)))) throw new Error(`${seriesUID}: slice ${k}'s keyword view does not come back from the copy as it was written`);
         }
       }

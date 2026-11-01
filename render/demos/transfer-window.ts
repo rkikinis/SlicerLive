@@ -376,7 +376,7 @@ export function openTransferWindow(o: TransferWindowOptions = {}): void {
     w.innerHTML = `<b>${esc(dbName(to))} is described as public data.</b> ${move ? "Moving" : "Copying"} scans into it from ${esc(dbName(from))}, which is not public, would change that.`;
     const a = document.createElement("div"); a.className = "sl-tw-acts";
     const other = document.createElement("button"); other.textContent = "Choose another database"; other.title = "Leaves everything as it is; choose where the scans go.";
-    const anyway = document.createElement("button"); anyway.textContent = `${move ? "Move" : "Copy"} anyway`; anyway.title = `Goes ahead. Edit ${dbName(to)}'s description afterwards (Databases…) so it says what it holds.`;
+    const anyway = document.createElement("button"); anyway.textContent = `${move ? "Move" : "Copy"} anyway`; anyway.title = `Goes ahead. Edit ${dbName(to)}'s description afterwards (Load / Save › Databases, its ⋯, Describe…) so it says what it holds.`;
     other.addEventListener("click", () => { w.remove(); body.querySelectorAll<HTMLSelectElement>(".sl-tw-f select")[1]?.focus(); });
     anyway.addEventListener("click", () => { w.remove(); onGo(); });
     a.append(other, anyway); w.appendChild(a);
@@ -544,7 +544,7 @@ export function openTransferWindow(o: TransferWindowOptions = {}): void {
     const r = await listDatabases();
     dbs = r.databases;
     if (!r.features.includes("transfer")) { body.appendChild(hint("This Albula's server is older than this window and cannot transfer between databases; rebuild the application.")); return; }
-    if (dbs.filter((d) => d.exists).length < 2) { body.appendChild(hint("There is only one database. Make a second one in Databases… first.")); return; }
+    if (dbs.filter((d) => d.exists).length < 2) { body.appendChild(hint("There is only one database. Make a second one in Load / Save › Databases first.")); return; }
     await render();
   })();
 }

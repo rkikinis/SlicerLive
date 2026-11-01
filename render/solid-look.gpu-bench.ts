@@ -23,10 +23,9 @@ import { SceneRenderer } from "./scene-renderer.ts";
 import { ColorizeField } from "./colorize-field.ts";
 import { encodePNG } from "./png.ts";
 
-const DEFAULT_CASE = new URL(
-  "../../../Slicer/SlicerDICOMDatabase/SlicerAlbula-Checkpoints/2026-09-23T16-22-19-991Z-ts.v2_total.seg.nrrd",
-  import.meta.url,
-).pathname;
+// The checkpoint of 09-23 went with the old database folder; the databases live in ~/SlicerAlbulaDatabases since 10-13.
+// A whole-body ts.v2:total of the main database, 452 x 332 x 993 (critic 2026-10-31 evening, nit: the default was gone).
+const DEFAULT_CASE = `${Deno.env.get("HOME")}/SlicerAlbulaDatabases/SlicerAlbulaMain/SlicerAlbula-Checkpoints/2026-10-19T13-39-55-718Z-ts.v2_total_fastest.seg.nrrd`;
 const args = Deno.args.filter((a) => !a.startsWith("--"));
 const pngDir = Deno.args.find((a) => a.startsWith("--png="))?.slice(6);
 const file = args[0] ?? DEFAULT_CASE;

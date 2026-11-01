@@ -6,6 +6,7 @@ import { serveDir } from "jsr:@std/http@1/file-server";
 import { handleSettingsRequest } from "./settings-file.ts";
 import { handleHaversackRequest, handleOpenRequest } from "./haversack-proxy.ts";
 import { handleDbRequest, registeredDatabases } from "./db-serve.ts";
+import { listRecordFiles } from "./archive.ts";
 import { startSharing } from "./sharing.ts";
 import { handleJobsRequest, handleJobsRunRequest, startExtensionJobs } from "./extension-jobs.ts";
 import { handleHeadsetRequest } from "./headset.ts";
@@ -92,6 +93,11 @@ self.onmessage = (e: MessageEvent<{ root: string; port: number; windowFile?: str
             startExtensionJobs({ port: addr.port, databases: () => registeredDatabases(root), galleryRoot: root });   // { id, path, exists }
             // Sharing this Mac's databases with its other Macs, when switched on and on an allowed network (sharing.ts).
             startSharing(root);
+            // THE RECORDS INTO THE ARCHIVE'S LIST (desktop/archive.ts): the tract review's verdicts, a database's
+            // description, its transfer record and run log, wherever they exist and are not listed yet.
+            void (async () => {
+              for (const d of await registeredDatabases(root).catch(() => [])) if (d.exists) await listRecordFiles(d.path).catch((e) => console.warn(`archive (${d.id}): ${(e as Error).message}`));
+            })();
           },
         },
         // Three dynamic routes; everything else is the static gallery.

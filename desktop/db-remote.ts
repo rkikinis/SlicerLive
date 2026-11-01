@@ -122,7 +122,7 @@ const shortHost = (h: string) => h.replace(/\.local$/, "");
 /** Why a request to the other Mac failed, in words (the critic, finding 13). */
 function whyNot(host: string, e: unknown): string {
   const m = String((e as Error)?.message ?? e);
-  if (m === "no key") return `This Mac's key for ${shortHost(host)} is missing; pair with it again (Databases › Add a database on another Mac…).`;
+  if (m === "no key") return `This Mac's key for ${shortHost(host)} is missing; pair with it again (Load / Save › Databases › More › Open a database on another Mac…).`;
   if (/certificate|UnknownIssuer|NotValidForName|InvalidCertificate/i.test(m)) return `${shortHost(host)} answered with a different certificate than when you paired. If that Mac made a new one, pair again; otherwise something else is answering in its name.`;
   return `That database is on ${shortHost(host)}, which cannot be reached just now (asleep, sharing stopped, or on another network?).`;
 }

@@ -4,7 +4,7 @@
 //
 // A voxel is inside when its CENTER lies inside the polygon (even-odd rule) once projected onto the slice plane, and
 // within half a voxel of that plane along the axis of the grid most aligned with the plane's normal -- the same
-// thickness the 2D brush paints (segmentation-editor.ts paintStroke), so a drawn region and a painted one on the same
+// thickness the 2D brush paints (segment-tools.ts paintStroke), so a drawn region and a painted one on the same
 // slice cover the same layer of voxels, whatever the slice's tilt against the grid. The window is HALF-OPEN, so a plane
 // exactly between two layers fills one of them, the one behind it (critic 2026-10-20, section 11: such a tie filled
 // scattered voxels of both layers, or of neither, as the floating-point rounding fell).
@@ -52,7 +52,7 @@ export function insidePolygon(x: number, y: number, poly: readonly (readonly [nu
  * Write `value` into every voxel of `labelmap` inside `points` (RAS, on one slice plane with unit `normal`). Returns
  * the number of voxels written. `ijkToRAS` is the label map's row-major 4x4 and `invIjk` its inverse.
  */
-export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number, number], ijkToRAS: readonly number[], invIjk: readonly number[], points: readonly Vec3[], normal: Vec3, value: number): number {
+export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number, number], ijkToRAS: readonly number[], invIjk: readonly number[], points: readonly Vec3[], normal: Vec3, value: number, may?: (cur: number) => boolean): number {
   if (points.length < 3) return 0;
   const [nx, ny, nz] = dims;
   const m = ijkToRAS, n = unit(normal);
@@ -79,7 +79,9 @@ export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number
     const p: Vec3 = [m[0] * i + m[1] * j + m[2] * k + m[3], m[4] * i + m[5] * j + m[6] * k + m[7], m[8] * i + m[9] * j + m[10] * k + m[11]];
     if (!inLayer(dot(p, n) - d0)) continue;
     if (!insidePolygon(dot(p, e1), dot(p, e2), poly)) continue;
-    labelmap[k * nx * ny + j * nx + i] = value;
+    const at = k * nx * ny + j * nx + i;
+    if (may && !may(labelmap[at])) continue;     // the editor's "over" rule (logic/segment-effects.ts canWrite)
+    labelmap[at] = value;
     written++;
   }
   return written;

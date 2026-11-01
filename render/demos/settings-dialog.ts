@@ -116,7 +116,7 @@ export function openSettingsDialog(deps: SettingsDeps): void {
       const dbSel = document.createElement("select"); dbSel.title = "Make another registered database the current one";
       const dbRow = row("DICOM database", "Everything loaded, computed or saved goes through it.", dbVal, dbSel);
       into.appendChild(dbRow);
-      const dbHint = hint("Where the studies are. To make or add a database: Load / Save › Load from the DICOM database › Databases….");
+      const dbHint = hint("Where the studies are. To make or add a database: Load / Save › Databases.");
       into.appendChild(dbHint);
       deps.databases().then((list) => {
         dbSel.replaceChildren();

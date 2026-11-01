@@ -80,6 +80,7 @@ interface Dcmjs {
     datasetToDict(ds: Dataset): WritableFile;
     DicomDict: new (meta: DicomJson) => WritableFile;
     Colors: { dicomlab2RGB(lab: number[]): number[] };
+    WriteBufferStream?: new (defaultSize: number, littleEndian?: boolean) => { view?: object };
   };
   normalizers: { Normalizer: { normalizeToDataset(datasets: Dataset[]): Dataset } };
   derivations: { Segmentation: new (datasets: Dataset[]) => SegmentationBuilder };
@@ -194,7 +195,44 @@ function creatorsAsText(dict: DicomJson): DicomJson {
   return dict;
 }
 
+/**
+ * dcmjs's lookup of the piece of buffer a position lies in, as a binary search instead of a scan from the start.
+ *
+ * WHY THIS EXISTS: since dcmjs's #444 (2025-07) a stream is a list of fixed-size pieces (4 KB for a written file, 256 bytes
+ * for a tag's value), and `SplitDataView.findStart` scans that list from the first piece on every read and write. Writing
+ * N bytes therefore takes time growing with N squared: a whole-brain tracking of 370,000 streamlines took about 945 s to
+ * write as DICOM, and 4.0 s with this lookup, the same result (the import job's dry run, 2026-10-30; WORKING-STATE).
+ * Nearly all of the scanning is in the 256-byte stream holding one sequence's contents (Tag.write), so it is long
+ * sequences that are slow, not large files (critic, qa/2026-10-30-dcmjs-issue.md). Measured on the build Albula ships
+ * (logic/dcmjs-version.ts); dcmjs master and its 1.0-beta have the same loop.
+ * The pieces' offsets are made in increasing order and touch end to end (checkSize, addBuffer), which is what a binary
+ * search needs; a position it does not find goes to dcmjs's own scan, so nothing that scan found is lost.
+ * Upstream: https://github.com/dcmjs-org/dcmjs/issues/629 (filed 2026-10-30); remove when a dcmjs we use searches faster.
+ */
+const PIECE_LOOKUP = Symbol.for("albula.dcmjs.binaryFindStart");
+function fasterPieceLookup(d: Dcmjs): void {
+  const W = d.data.WriteBufferStream;
+  const proto = W ? Object.getPrototypeOf(new W(16, true).view ?? {}) as Record<string | symbol, unknown> : null;
+  if (!proto || typeof proto.findStart !== "function" || proto[PIECE_LOOKUP]) return;
+  const scan = proto.findStart as (this: unknown, start?: number) => number | undefined;
+  proto.findStart = function (this: { offsets: number[]; lengths: number[]; buffers: unknown[] }, start = 0) {
+    // Anything but a number from 0 up goes to dcmjs's scan, which refuses NaN as before (critic 2026-10-30, finding 5:
+    // a NaN position compared false both ways and got the middle piece, so a write could succeed and change nothing).
+    if (!(start >= 0)) return scan.call(this, start);
+    let lo = 0, hi = this.buffers.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (start < this.offsets[mid]) hi = mid - 1;
+      else if (start >= this.offsets[mid] + this.lengths[mid]) lo = mid + 1;
+      else return mid;
+    }
+    return scan.call(this, start);
+  };
+  proto[PIECE_LOOKUP] = scan;   // dcmjs's own, kept for the test that compares the two
+}
+
 function wrap(d: Dcmjs): DicomIO {
+  fasterPieceLookup(d);
   const { DicomMessage, DicomMetaDictionary } = d.data;
   const names = DicomMetaDictionary.nameMap ?? {};
   return {

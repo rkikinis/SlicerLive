@@ -2,6 +2,7 @@
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
 import { fitList } from "./fit-list.ts";
+import { eyeSvg } from "./eye-icon.ts";
 import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
 import { renameCurrentScene, sceneControl, unsavedMarkups } from "./scene-control.ts";
 import { escapeHtml } from "./html.ts";
@@ -29,7 +30,7 @@ import { volumeForSeg } from "../../logic/seg-placement.ts";
 import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../../logic/segmentation-editor.ts";
 import { keepScroll } from "./panel-scroll.ts";
 import { openFloatingWindow } from "./floating-window.ts";
-import { chooseFolder, dbName, listDatabases, openDatabasesWindow } from "./databases-window.ts";
+import { chooseFolder, dbName, listDatabases, mountDatabases, type DatabasesSection } from "./databases-window.ts";
 import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { openPackageWindow } from "./package-window.ts";
@@ -51,7 +52,8 @@ import { loadedElsewhere as loadedElsewhereIn, otherPatientsOpen } from "../../l
 import { startWork } from "../working.ts";
 import { databaseForPath, dbIdOf, mergeListings, scanDatabases, seriesNamedIn, windowDatabase } from "../database-routing.ts";
 import { documentSeriesFor, parsePictures } from "../../logic/readers/dicom-picture.ts";
-import { readDicomHead } from "../../logic/readers/dicom-head.ts";
+import { headValue, readDicomHead } from "../../logic/readers/dicom-head.ts";
+import { scanKind, type ScanKind } from "../../logic/scan-kind.ts";
 import { DIFFUSION_SCAN, explainSeries } from "../../logic/series-explain.ts";
 
 /**
@@ -405,9 +407,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       DICOM scans loaded with <i>DICOM files…</i>, <i>DICOM folder…</i> or dropped as a folder are copied into
       the database named there, so they are there next time, after the disc or USB stick is gone. Nothing
       already in the database is copied twice. Untick it to look without keeping.</p>
-      <p><b>Databases…</b> shows every database Albula knows, what each holds, and which one opens by
-      default; it makes a new one, adds an existing one, and offers the public brain tumor test cases
-      (a download, its size said first).</p>
+      <p><b>Databases</b> (its own section) lists every database in the databases folder and any added from elsewhere
+      or opened from another Mac, with what each holds. A click on one makes it the one Albula opens; its <i>In use</i>
+      switch says whether Albula uses it, its <i>Shared</i> switch whether your other Macs may open it; its ⋯ describes
+      it, shows it in Finder or moves it to the Trash. <i>New database…</i> makes one, <i>Add from elsewhere…</i>
+      brings one in; the public brain tumor test cases (a download, its size said first) are offered there.</p>
       <p><b>Transfer between databases…</b> copies patients or studies from one of your databases into another:
       from a project into the one you work in, or what you made back to where the scans came from. Every image is read
       back and compared before it counts as there. A move (under Advanced) removes from the first database only on a
@@ -473,7 +477,6 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <div class="sl-load-db" hidden>
       <div class="sl-row">
         <button class="sl-primary" data-act="dicom-db" title="Browse the indexed DICOM database and load a series. This is the usual way in when working on a study.">DICOM database…</button>
-        <button data-act="databases" title="Which databases there are, what each holds, which one opens by default; make a new one.">Databases…</button>
         <button data-act="transfer" title="Copy patients or studies from one of your databases into another — from a project into the one you work in, or what you made back to where the scans came from. Opens a window; nothing changes until you press its yellow button.">Transfer between databases…</button>
         <span class="sl-scene-slot"></span>
       </div>
@@ -483,6 +486,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <input type="file" multiple accept=".nrrd,.nhdr,.nii,.nii.gz,.gz" hidden>
       <input type="file" multiple data-dicom hidden>`;
     el.appendChild(panes);
+    // THE DATABASES, a section of its own, open, in place of the Databases window (Ron, 2026-10-29: "Q1: a section",
+    // "2 gone"; databases-window.ts mountDatabases). After the panes, so a pane the graph opens stays right under it.
+    // Filled below, once the panel's own database code is set up. Green: a list of what exists (MODULE-DESIGN-RULES.md).
+    const dbSecBody = shell.section(el, "Databases", { open: true, band: "green" });
     const adv = shell.section(el, "Advanced", { open: false, band: "none" });
     adv.innerHTML = `<div class="sl-row">
         <button data-act="terminology" title="Load a terminology: the names, codes and colors a lab or an extension uses for its structures. Slicer's .term.json or a color-table CSV. Once loaded, segmentations can be named in it (Segmentations → Advanced).">Terminology…</button>
@@ -1771,7 +1778,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           const ok = await shell.confirm({
             title: `Delete ${list.length === 1 ? "this series" : `${list.length} series`} from the DICOM database?`,
             ok: "Delete", cancel: "Keep", destructive: true,
-            body: `<p>This removes ${what} from the DICOM database: ${instances} files and their index rows. It cannot be undone.</p>` +
+            body: `<p>This removes ${what} from the DICOM database: its ${instances} files go to the Trash and its index rows are removed. To bring it back, put the files back from the Trash and add them again.</p>` +
               (orphaned ? `<p>${orphaned} series made from ${list.length === 1 ? "it" : "them"} will stay, no longer listed under ${list.length === 1 ? "it" : "them"}.</p>` : "") +
               `<p>Is this what you meant to do, or was it a click by accident?</p>`,
           });
@@ -1789,12 +1796,13 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           gone++;
           files += (r.files ?? []).length;
           kept += (r.leftInPlace ?? []).length;
+          if (r.error) failures.push(`${s.description || s.seriesInstanceUID}: ${r.error}`);   // deleted, but some files stayed (the Trash refused them)
           if (r.audit && !r.audit.ok) failures.push(`after deleting ${s.description}: ${auditWords(r.audit)}`);
         }
         // Files a row named outside the database folder are the person's own and stay; said where it is seen
         // (critic, review-bugfixes finding 8), not only in the server's console.
         const keptWords = kept ? `; ${kept} file${kept === 1 ? "" : "s"} outside the database folder left where ${kept === 1 ? "it is" : "they are"}` : "";
-        const said = `deleted ${gone} series, ${files} files${keptWords}${failures.length ? ` — ${failures[0]}` : ", and the database checks out"}`;
+        const said = `deleted ${gone} series, ${files} files to the Trash${keptWords}${failures.length ? ` — ${failures[0]}` : ", and the database checks out"}`;
         status(said);
         setBusy(said);
         selected.clear();
@@ -2146,11 +2154,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             delBtn.addEventListener("click", (e) => {
               e.stopPropagation();
               void (async () => {
-              const ok = await shell.confirm({ title: `Delete the scene "${sc.name}"?`, ok: "Delete", cancel: "Keep", destructive: true, body: `<p>The scene file and its row go; this cannot be undone. The series it names stay in the database.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
+              const ok = await shell.confirm({ title: `Delete the scene "${sc.name}"?`, ok: "Delete", cancel: "Keep", destructive: true, body: `<p>The scene file goes to the Trash and its row is removed. The series it names stay in the database.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
               if (!ok) return;
               await runAction(delBtn, async () => {
-                const r = await fetch(`/_db/${encodeURIComponent(dbId ?? "")}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then((x) => x.ok).catch(() => false);
-                if (!r) { shell.notify({ title: "The scene was not deleted" }); throw new Error("not deleted"); }
+                const ans = await fetch(`/_db/${encodeURIComponent(dbId ?? "")}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then(async (x) => ({ ok: x.ok, j: await x.json().catch(() => ({})) as { removed?: boolean; error?: string } })).catch(() => ({ ok: false, j: {} as { removed?: boolean; error?: string } }));
+                const r = ans.ok && ans.j.removed !== false;
+                if (!r) { shell.notify({ title: "The scene was not deleted", body: ans.j.error ? `<p>${esc(ans.j.error)}</p>` : undefined }); throw new Error("not deleted"); }
                 setBusy(`Scene "${sc.name}" deleted`);
                 setTimeout(() => { scRow.el.remove(); rows.splice(rows.indexOf(scRow), 1); }, 1200);   // after the button has said so
               }, { busyLabel: "Deleting…", doneLabel: "Deleted ✓", failedLabel: "Not deleted" }).catch(() => {});
@@ -2714,6 +2723,21 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }));
         return mergeListings([own, ...more]);     // the open database's rows first
       },
+      /** WHAT KIND OF SCAN each series is (logic/scan-kind.ts), from the first file's header in the open database, for the
+       *  Segment Editor (a tumor's enhancing part only with a post-contrast scan of the same day). A series not in it, or
+       *  whose header cannot be read, is left out. */
+      __seriesKinds: async (uids: string[]): Promise<Record<string, { kind: ScanKind; how: string }>> => {
+        const db = await ensureOpenDb(); if (!db) return {};
+        const out: Record<string, { kind: ScanKind; how: string }> = {};
+        await Promise.all(uids.map(async (uid) => {
+          const e = db.series.find((x) => x.seriesInstanceUID === uid); if (!e || !e.available) return;
+          const raw = await db.readSeriesFileHead(e, 65536).catch(() => null); if (!raw) return;
+          const h = readDicomHead(raw.head.buffer.slice(raw.head.byteOffset, raw.head.byteOffset + raw.head.byteLength) as ArrayBuffer);
+          const n = (k: Parameters<typeof headValue>[1]) => { const v = parseFloat(headValue(h, k) ?? ""); return Number.isFinite(v) ? v : undefined; };
+          out[uid] = scanKind({ modality: headValue(h, "Modality") ?? e.modality, agent: headValue(h, "ContrastBolusAgent"), repetitionTime: n("RepetitionTime"), echoTime: n("EchoTime"), inversionTime: n("InversionTime"), description: headValue(h, "SeriesDescription") ?? e.description, sequenceName: headValue(h, "SequenceName") });
+        }));
+        return out;
+      },
       /** SDK 17: the registered database a module's file is in -- named after a series of a scan loaded from another
        *  database, that one (finding 10); otherwise the database this window has open. */
       __databaseIdFor: (path: string): Promise<string | null> => databaseIdFor(path),
@@ -3178,7 +3202,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (!hint) return;
       const cur = registered.find((d) => d.current) ?? registered[0];
       hint.textContent = !registered.length
-        ? "no database yet — make one with Databases…, or bring scans in with Load from files"
+        ? "no database yet — make one in Databases below, or bring scans in with Load from files"
         : cur.exists
         ? cur.path
         : `${cur.path} (not reachable)`;
@@ -3256,10 +3280,14 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // ---- "Also add to [database]" and the Databases window (Ron, 2026-10-01; desktop/db-import.ts) ----
     const addBox = el.querySelector(".sl-add-db") as HTMLInputElement, addWhich = el.querySelector(".sl-add-db-which") as HTMLSelectElement;
     const noPatientData = new Set<string>();
-    const afterDatabasesChanged = async (madeId?: string) => {
+    let dbSection: DatabasesSection | undefined;
+    /** After a database was made, chosen, added or removed: the panel's list, and the Databases section unless the
+     *  change came from it (it draws itself again). */
+    const afterDatabasesChanged = async (madeId?: string, fromSection = false) => {
       await loadRegistered();
       showCurrentDb();   // the line naming the open database, said again (a database removed: finding 4)
       await fillAddWhich(madeId);
+      if (!fromSection) await dbSection?.refresh();
     };
     afterDatabasesChangedOutside = afterDatabasesChanged;
     const fillAddWhich = async (select?: string) => {
@@ -3283,14 +3311,20 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       addWhich.value = usable.some((d) => d.id === keep) ? keep : ((allowed.find((d) => d.current) ?? allowed[0]) ?? usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
       (el.querySelector(".sl-add-row") as HTMLElement).hidden = !features.includes("import");
     };
+    dbSection = mountDatabases(dbSecBody, { notify: shell.notify, onChanged: (id) => void afterDatabasesChanged(id, true) });
+    // "New database…" and "All databases…" in the Also add to menu: to the Databases section, opened and in sight.
     addWhich.addEventListener("change", () => {
       if (addWhich.value !== "_new" && addWhich.value !== "_all") return;
       const startWithNew = addWhich.value === "_new";
-      void fillAddWhich();   // back to a real database while the window is open
-      openDatabasesWindow({ notify: shell.notify, startWithNew, onChanged: (id) => void afterDatabasesChanged(id) });
+      void fillAddWhich();   // back to a real database
+      const sec = dbSecBody.closest("details");
+      if (sec) sec.open = true;
+      // TO THE FORM ITSELF for New database… (finding 6: scrolling to the section's top took the form out of sight again).
+      const form = startWithNew ? dbSection?.startNew() : undefined;
+      (form ?? dbSecBody).scrollIntoView({ block: form ? "center" : "start", behavior: "smooth" });
+      if (form) setTimeout(() => (form.querySelector('[name="name"]') as HTMLInputElement | null)?.focus({ preventScroll: true }), 400);
     });
     void fillAddWhich();
-    (el.querySelector('[data-act="databases"]') as HTMLButtonElement).addEventListener("click", () => openDatabasesWindow({ notify: shell.notify, onChanged: (id) => void afterDatabasesChanged(id) }));
     (el.querySelector('[data-act="transfer"]') as HTMLButtonElement).addEventListener("click", () => openTransferWindow({ onChanged: () => void afterDatabasesChanged(), onOpenBrowser: () => openDatabase(false) }));
     /** The database DICOM loaded from disk is added to, or null when "Also add to" is unticked. */
     const addTarget = (): { id: string; name: string } | null =>
@@ -3357,11 +3391,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const tdDel = document.createElement("td"); tdDel.style.cssText = "padding:4px 8px;width:1%;";
         const delBtn = document.createElement("button"); delBtn.textContent = "Delete"; delBtn.title = "Delete this scene from the database. Its series stay.";
         delBtn.addEventListener("click", async () => {
-          const ok = await shell.confirm({ title: "Delete the scene?", ok: "Delete", destructive: true, cancel: "Keep", body: `<p>“${esc(sc.name)}” is removed from the database; this cannot be undone. The series it lists stay.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
+          const ok = await shell.confirm({ title: "Delete the scene?", ok: "Delete", destructive: true, cancel: "Keep", body: `<p>“${esc(sc.name)}” is removed from the database; its file goes to the Trash. The series it lists stay.</p><p>Is this what you meant to do, or was it a click by accident?</p>` });
           if (!ok) return;
           void runAction(delBtn, async () => {
-            const done = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then((x) => x.ok).catch(() => false);
-            if (!done) throw new Error("not deleted");
+            const ans = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then(async (x) => ({ ok: x.ok, j: await x.json().catch(() => ({})) as { removed?: boolean; error?: string } })).catch(() => ({ ok: false, j: {} as { removed?: boolean; error?: string } }));
+            if (!ans.ok || ans.j.removed === false) { if (ans.j.error) shell.notify({ title: "The scene was not deleted", body: `<p>${esc(ans.j.error)}</p>` }); throw new Error("not deleted"); }
             const gg = globalThis as unknown as { __currentScene?: () => { uid: string } | null; __setCurrentScene?: (c: null) => void };
             if (gg.__currentScene?.()?.uid === sc.uid) gg.__setCurrentScene?.(null);   // the open one: the next save is a new scene
             setTimeout(() => tr.remove(), 900);
@@ -3608,7 +3642,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             `<button class="sl-sh-view${visible2D ? "" : " sl-sh-view-off"}" data-vis2d title="2D (slices)">2D</button>` +
             `<button class="sl-sh-view sl-sh-view-3d${visible3D ? "" : " sl-sh-view-off"}" data-view3d title="3D">3D</button>`;
         } else {
-          controls = `<button class="sl-sh-vis" data-vis="${n.id}" title="Show/hide">${(n.visible === false) ? "🚫" : "👁"}</button>`;
+          controls = `<button class="sl-sh-vis" data-vis="${n.id}" title="${n.visible === false ? "Hidden — click to show" : "Showing — click to hide"}">${eyeSvg(n.visible === false ? "hidden" : "shown")}</button>`;
         }
         return `<div class="sl-sh-row${depth ? " sl-sh-child" : ""}" data-id="${n.id}"${(n as { sequence?: string }).sequence ? ` data-sequence="${(n as { sequence?: string }).sequence}"` : ""} title="${escapeHtml(title)}">` +
           `<span class="sl-sh-icon">${ICON[n.type as string] ?? "•"}</span>` +

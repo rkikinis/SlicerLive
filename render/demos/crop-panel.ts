@@ -17,6 +17,7 @@
 // of ijkToRAS moves. See logic/crop.ts.
 
 import { makeNameEditable } from "./row-actions.ts";
+import { eyeSvg } from "./eye-icon.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
@@ -395,7 +396,7 @@ export function registerCropPanel(shell: AppShell, opts: CropPanelOpts): void {
     const eye = (label: string, on: boolean, title: string, cls: string, click: () => void) => {
       const row = shell.row(sec, label, { wide: true });
       row.innerHTML = `<button class="sl-anat-eye ${cls}${on ? "" : " sl-anat-off"}" type="button"
-        title="${title}">${on ? "👁" : "🚫"}</button>`;
+        title="${title}">${eyeSvg(on ? "shown" : "hidden")}</button>`;
       row.querySelector(`.${cls}`)?.addEventListener("click", () => { click(); render(); });
     };
     // An explicit switch as well as the automatic hide: a first-time user asking "how do I turn this

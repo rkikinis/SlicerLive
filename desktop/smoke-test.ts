@@ -11,6 +11,8 @@ const args = parseArgs(Deno.args, { string: ["url", "gallery"] });
 const page = args.url ?? "/webgpu/cardiac.html";
 const gallery = resolve(args.gallery ?? join(dirname(dirname(dirname(fromFileUrl(import.meta.url)))), "live"));
 
+// A server for checks writes no archive list into the databases it serves (desktop/archive.ts; the critic 2026-10-29).
+if (Deno.env.get("ALBULA_ARCHIVE_LISTING") !== "on") Deno.env.set("ALBULA_ARCHIVE_LISTING", "off");
 const worker = new Worker(new URL("./server-worker.ts", import.meta.url), { type: "module" });
 const port = await new Promise<number>((resolve) => {
   worker.onmessage = (e) => resolve(e.data.port);

@@ -1,6 +1,6 @@
 // REMOVING A DATABASE (Ron, 2026-10-26: "remove should offer the option to remove from the app or remove and delete").
-// Two ways, both from the Databases window:
-//   - from the list only: the folder stays where it is, untouched; "Add an existing database folder…" lists it again;
+// Two ways, both from Load / Save's Databases section (the Databases window until 2026-10-29):
+//   - from the list only (its In use switch): the folder stays where it is, untouched, and its row stays, switched off;
 //   - and its folder to the Trash: macOS's own Trash, so Finder's Put Back works until the Trash is emptied. Nothing is
 //     deleted for good here (CLAUDE.md: the Trash over rm).
 // The records beside the folder (provenance.sqlite: its scenes, collection and license, what was made from what) are left

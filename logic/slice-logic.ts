@@ -67,3 +67,27 @@ export function reformatSliceToRAS(orient: Orientation, center: Vec3): number[] 
     case "coronal": return [1, 0, 0, cx, 0, 0, 1, cy, 0, 1, 0, cz, 0, 0, 0, 1];
   }
 }
+
+/**
+ * THE SLICE ON A VOXEL'S MIDDLE (vtkMRMLSliceLogic::SnapSliceOffsetToIJK, Slicer's Libs/MRML/Logic/vtkMRMLSliceLogic.cxx
+ * 2420-2436, called when a view is fitted to a volume): the offset `mm` along the unit `normal` moved to the middle of the
+ * nearest slice of the grid `ijkToRAS` (row-major 16). Slicer truncates to the slice the offset is in; this takes the
+ * nearest, so a view already on a voxel's middle does not move.
+ *
+ * Why (Ron, 2026-10-31, build 18:44): a view placed at a volume's middle sits ON THE BORDER between two slices when the
+ * count is even, and a whole-slice wheel step keeps it there. The view then draws one of the two and a flat brush stroke
+ * (one voxel deep) rounded to the other: the stroke went into the slice not on screen and showed only in 3D.
+ *
+ * Only when one of the grid's axes lies along the normal (an oblique view has no slice to snap to); otherwise `mm`.
+ */
+export function snapOffsetToVoxel(mm: number, normal: Vec3, ijkToRAS: ArrayLike<number> | undefined): number {
+  const m = ijkToRAS; if (!m || m.length < 12) return mm;
+  for (let a = 0; a < 3; a++) {
+    const along = m[a] * normal[0] + m[4 + a] * normal[1] + m[8 + a] * normal[2];   // one step on this axis, along the normal
+    const sp = Math.hypot(m[a], m[4 + a], m[8 + a]);
+    if (!(sp > 0) || Math.abs(along) < sp * 0.9999) continue;
+    const o = m[3] * normal[0] + m[7] * normal[1] + m[11] * normal[2];               // voxel 0's middle, along the normal
+    return o + Math.round((mm - o) / along) * along;
+  }
+  return mm;
+}

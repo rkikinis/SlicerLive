@@ -23,7 +23,7 @@
 //
 // Pure over its inputs (voxels + geometry + the source instance bytes); the caller supplies all three.
 import { type DicomJson, dicomIO } from "./dicom-io.ts";
-import { PRIVATE_RULE_VERSION, privateToCarry } from "./private-attributes.ts";
+import { PRIVATE_RULE_VERSION, privateToCarry, stripNestedPrivate } from "./private-attributes.ts";
 
 /** The single-frame storage class for each modality this can write. */
 const LEGACY_SOP_CLASS: Record<string, string> = {
@@ -66,8 +66,8 @@ export interface DicomImageExport {
   slices: number;
   rows: number;
   columns: number;
-  /** The source's private attributes, carried slice by slice (logic/private-attributes.ts, rule `privateRule`):
-   *  how many elements went into the new files in all, and which tags were left out as private image data. */
+  /** The source's private attributes by rule `privateRule` (logic/private-attributes.ts): how many elements went into
+   *  the new files in all (none since rule 2), and which tags were left out. */
   privateCarried: number;
   privateLeftOut: string[];
   privateRule: number;
@@ -263,6 +263,12 @@ export interface ImageExportOpts {
   /** The file's own value scale (a NIfTI's scl_slope / scl_inter), tried before any rounding: when it turns every value
    *  back into a whole stored number, those numbers are written with it as Rescale Slope / Intercept, exactly. */
   valueScale?: { slope: number; intercept: number };
+  /** THE VOLUME'S OWN SLICES (their SOP instance UIDs), when its series holds more than one volume (a 4D diffusion
+   *  scan in single-slice files): only these are a slice's source and the header's template. Without it, one volume of
+   *  a GE or Philips diffusion scan named slices of other volumes as its source, 44 of 44 and 70 of 70 (the critic,
+   *  2026-10-29, private rule 2 finding 1), and took volume 1's timing (finding 2). Under rule 2 those references are the
+   *  way back to the source's private attributes. */
+  sourceInstanceUIDs?: string[];
 }
 
 /**
@@ -295,9 +301,7 @@ export async function volumeToDicomSeries(
   const pad2 = (n: number) => String(n).padStart(2, "0");
   // A TEMPLATE FROM THE SUBJECT when there is no source: the patient and study modules as the
   // standard wants them, nothing invented beyond what was named, and a new frame of reference.
-  const template: Ds = sourceInstances.length
-    ? dcm.naturalize(dcm.readFile(sourceInstances[0]).dict) as Ds
-    : {
+  const subjectTemplate = (): Ds => ({
       PatientName: opts.subject!.patientName, PatientID: opts.subject!.patientID, PatientBirthDate: "", PatientSex: "",
       ...(opts.subject!.comments ? { PatientComments: opts.subject!.comments } : {}),
       StudyInstanceUID: opts.subject!.studyInstanceUID ?? newUid(), StudyID: "1", AccessionNumber: "", ReferringPhysicianName: "",
@@ -307,7 +311,9 @@ export async function volumeToDicomSeries(
       Modality: opts.subject!.modality, FrameOfReferenceUID: opts.subject!.frameOfReferenceUID ?? newUid(), PositionReferenceIndicator: "",
       Manufacturer: "SlicerAlbula", SeriesDescription: opts.seriesDescription ?? "Volume", SeriesNumber: 1,
       ...(opts.subject!.extra ?? {}),
-    };
+    });
+  const own = opts.sourceInstanceUIDs?.length ? new Set(opts.sourceInstanceUIDs) : null;
+  let firstOwn: Ds | undefined;
   // WHICH SOURCE SLICE EACH OUTPUT SLICE CAME FROM, by position along the normal rather than by
   // file order: a crop keeps whole voxels of the same grid, so every output plane coincides with a
   // source plane exactly, and matching on geometry is true regardless of how the instances arrived.
@@ -318,10 +324,13 @@ export async function volumeToDicomSeries(
     let ds: Ds;
     let raw: DicomJson;
     try { raw = dcm.readFile(b).dict; ds = dcm.naturalize(raw) as Ds; } catch { continue; /* an unreadable instance is one fewer reference, not a failed save */ }
-    // THE SOURCE'S PRIVATE ATTRIBUTES, kept raw: naturalize-then-denaturalize loses every one of them (critic,
-    // 2026-09-26, finding 3: 233 -> 0 on a public Philips file). Carried into the slice made from this one, below.
+    if (own && !own.has(String(ds.SOPInstanceUID ?? ""))) continue;   // another volume's slice (sourceInstanceUIDs)
+    firstOwn ??= ds;
+    // THE SOURCE'S PRIVATE ATTRIBUTES, by the versioned rule (logic/private-attributes.ts): since rule 2 (2026-10-29) none
+    // is carried -- the source keeps them in the archive, and this object names it (SourceImageSequence). Rule 1 carried
+    // them raw (naturalize-then-denaturalize loses every one: critic, 2026-09-26, finding 3). What is left out is named.
     const { carry, leftOut } = privateToCarry(raw);
-    for (const l of leftOut) if (l.why.startsWith("private image data")) leftOutTags.add(l.tag);
+    for (const l of leftOut) if (l.kind !== "group-length") leftOutTags.add(l.tag);
     // A MULTI-FRAME SOURCE is refused in plain words, as the SEG writer refuses it (critic, 2026-09-25, finding 9): the
     // new images would lack what the file's per-frame groups say -- the MR attributes, the diffusion b-value and
     // direction, the timing -- and could not name their source frame. Until the writers read the copy's header.
@@ -379,6 +388,9 @@ export async function volumeToDicomSeries(
     px = { ok: true, pixels, signed };
     perSlice = rs;
   }
+  // THE TEMPLATE: the volume's own first slice (sourceInstanceUIDs), or, with no source, the subject named for it.
+  if (sourceInstances.length && !firstOwn) throw new Error(own ? "none of the source series' files is one of this volume's own slices" : "none of the source instances could be read");
+  const template: Ds = sourceInstances.length ? firstOwn! : subjectTemplate();
   const modality = String(template.Modality ?? "OT");
   const sopClass = LEGACY_SOP_CLASS[modality];
   if (!sopClass) {
@@ -402,6 +414,8 @@ export async function volumeToDicomSeries(
   // the acknowledgement -- and a keep-list would have dropped every one of them. What must go is
   // what described the OLD pixels or the old object's identity.
   const base: Ds = { ...template };
+  // Rule 2 at every depth: a private element inside a standard sequence goes too, and is named (finding 4).
+  if (PRIVATE_RULE_VERSION >= 2) for (const t of stripNestedPrivate(base as Record<string, unknown>)) leftOutTags.add(t);
   for (
     const k of [
       "PixelData", "NumberOfFrames", "PerFrameFunctionalGroupsSequence", "SharedFunctionalGroupsSequence",
@@ -472,7 +486,8 @@ export async function volumeToDicomSeries(
     SpacingBetweenSlices: geom.sliceSpacing,
     ImageOrientationPatient: geom.imageOrientationPatient,
   });
-  if (opts.derivation) base.DerivationDescription = opts.derivation;
+  // THE RULE, IN THE OBJECT ITSELF (finding 3): which private-attribute rule wrote it.
+  base.DerivationDescription = `${opts.derivation ? opts.derivation + " " : ""}Private attributes: rule ${PRIVATE_RULE_VERSION} (${PRIVATE_RULE_VERSION >= 2 ? "none of the source's carried; the source keeps them" : "the source's carried"}).`.slice(0, 1024);
   // The scene's values are REAL values: the reader already applied the source's rescale on the way
   // in, so re-declaring that slope here would apply it twice. Identity for a modality that needs the
   // attributes (CT is in Hounsfield units by definition of them), absent for one that does not.

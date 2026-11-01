@@ -1,8 +1,8 @@
-// The paint stroke's stamp spacing (logic/segmentation-editor.ts paintStepMm) at three scales, and unchanged on
+// The paint stroke's stamp spacing (logic/segment-tools.ts paintStepMm) at three scales, and unchanged on
 // clinical grids.
 //   deno test -A --no-check logic/segmentation-editor.test.ts
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { paintStepMm } from "./segmentation-editor.ts";
+import { paintStepMm } from "./segment-tools.ts";
 import { SCALES } from "../render/scale-fixtures.ts";
 
 for (const [what, v] of SCALES) {

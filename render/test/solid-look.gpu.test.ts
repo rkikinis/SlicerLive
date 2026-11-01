@@ -113,3 +113,48 @@ Deno.test({
     dev.destroy();
   },
 });
+
+// A STRUCTURE THAT REACHES THE EDGE OF THE SCAN IS CLOSED THERE (Ron, 2026-10-31, build 20:15: after Grow from seeds filled
+// out to the edge, the 3D view showed open boxes, "the front face disappears depending on the camera position"). The ray
+// started in the state of its first step INSIDE the scan, so where a structure touched the face the ray came in through,
+// it was already "in" it and met no wall there. A red slab on the face the camera looks at, a blue block behind it: the
+// middle must be the red face, not the blue seen through a missing one.
+Deno.test({
+  name: "the solid look closes a structure where it meets the edge of the scan",
+  ignore: !hasGpu,
+  sanitizeResources: false,
+  sanitizeOps: false,
+  async fn() {
+    const gpu = await initDevice();
+    const dev = gpu.device;
+    const N = 48;
+    const lab = new Uint8Array(N * N * N);
+    for (let k = 8; k < 40; k++) for (let j = 12; j < N; j++) for (let i = 8; i < 40; i++) {
+      lab[(k * N + j) * N + i] = j >= 36 ? 7 : 8;               // red to the +y face, blue behind it
+    }
+    const ijkToRAS = [1, 0, 0, -N / 2, 0, 1, 0, -N / 2, 0, 0, 1, -N / 2, 0, 0, 0, 1];
+    dev.pushErrorScope("validation");
+    const field = new ColorizeField(dev, null, lab, [N, N, N], new Uint8Array(256 * 4), {
+      clim: [-1000, 1600], ijkToRAS, contextOpacity: 0, shade: [0.3, 0.7, 0.15, 20],
+    });
+    field.setSegmentColor(7, [0.9, 0.2, 0.2]); field.setSegmentOpacity(7, 1);
+    field.setSegmentColor(8, [0.2, 0.2, 0.9]); field.setSegmentOpacity(8, 1);
+    field.flushPalette();
+    field.setSolid(true);
+    await new Promise((r) => setTimeout(r, 0));
+    await dev.queue.onSubmittedWorkDone();
+    const W = 64, H = 64, FMT: GPUTextureFormat = "rgba8unorm-srgb";
+    const sr = new SceneRenderer(gpu, FMT);
+    sr.build([field]);
+    sr.setDrawingLook(true);
+    sr.setCamera([0, 120, 0], [0, 0, 0], [0, 0, 1], 30, W, H);   // looking at the +y face, where the red slab is
+    const img = await renderToImage(dev, FMT, W, H, (v) => { for (let i = 0; i < 4; i++) sr.renderAccum(v, W, H, i === 0); });
+    const err = await dev.popErrorScope();
+    assertEquals(err?.message ?? null, null, "the card refused part of the solid look");
+    const o = ((H >> 1) * W + (W >> 1)) * 4;
+    const [r, g, b] = Array.from(img.data.subarray(o, o + 3));
+    assert(r > 100 && r > g + 40 && r > b + 40, `the middle should be the red face on the scan's edge, got ${[r, g, b]}`);
+    field.destroy();
+    dev.destroy();
+  },
+});

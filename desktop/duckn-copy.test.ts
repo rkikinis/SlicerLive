@@ -37,6 +37,10 @@ Deno.test("the copy holds the page's own pieces, under the page's own names", as
   assertEquals(group.attributes.albula.source.files, 70);
 
   const arr = JSON.parse(await Deno.readTextFile(`${r.path}/0/zarr.json`));
+  // No full header copy beside the array since 2026-10-29 (Ron, on Mike's reply): the archive's originals keep every
+  // attribute, private and binary ones included.
+  assertEquals(await Deno.stat(`${r.path}/0/dicom-header.json.zst`).then(() => true, () => false), false, "no dicom-header.json.zst");
+  assertEquals(arr.attributes.duckn.extensions.albula.header, undefined);
   assertEquals(arr.shape, desc.shape);
   assertEquals(arr.chunk_grid.configuration.chunk_shape, desc.chunks);
   assertEquals(arr.data_type, "int16");

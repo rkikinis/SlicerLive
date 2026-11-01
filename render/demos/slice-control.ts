@@ -21,6 +21,8 @@ export interface SliceControlHooks {
   /** Optional telemetry. */
   onScroll?: (forward: boolean) => void;
   onZoom?: () => void;
+  /** A wheel step, before the slice scroll and zoom: return true to take it (Shift+wheel sizes the editor's brush). */
+  onWheel?: (e: WheelEvent) => boolean;
 }
 
 export interface SliceControlCfg {
@@ -69,6 +71,7 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
   const onContext = (e: Event) => e.preventDefault();
   const onWheel = (e: WheelEvent) => {
     e.preventDefault();
+    if (h.onWheel?.(e)) return;
     if (e.ctrlKey || e.metaKey) {                                  // pinch / ctrl-wheel = zoom about cursor
       const { u, v, w, h: hh } = uv(e);
       cfg.getSlice().zoomAbout(cfg.orient, Math.exp(-e.deltaY * 0.0015), u, v, w, hh);

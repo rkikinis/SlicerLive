@@ -17,6 +17,8 @@ import { sqliteScript } from "./sqlite.ts";
 /** One row of the series list, as the page's DbSeriesEntry is built from it. */
 export interface ListedSeries {
   uid: string; num: number | null; modality: string | null; description: string | null;
+  /** DICOM Body Part Examined (the Segment Editor's region default; 2026-10-31). */
+  bodyPart: string | null;
   seriesDate: string | null; seriesTime: string | null;
   studyUID: string | null; studyDescription: string | null; studyDate: string | null;
   patientName: string | null; patientID: string | null;
@@ -34,7 +36,7 @@ export async function listSeries(dbDir: string): Promise<{ series: ListedSeries[
 .mode json
 BEGIN;
 SELECT CAST(se.SeriesInstanceUID AS TEXT) AS uid, se.SeriesNumber AS num, CAST(se.Modality AS TEXT) AS modality,
-       CAST(se.SeriesDescription AS TEXT) AS description,
+       CAST(se.SeriesDescription AS TEXT) AS description, CAST(se.BodyPartExamined AS TEXT) AS bodyPart,
        CAST(se.SeriesDate AS TEXT) AS seriesDate, CAST(se.SeriesTime AS TEXT) AS seriesTime,
        CAST(st.StudyInstanceUID AS TEXT) AS studyUID, CAST(st.StudyDescription AS TEXT) AS studyDescription,
        CAST(st.StudyDate AS TEXT) AS studyDate,

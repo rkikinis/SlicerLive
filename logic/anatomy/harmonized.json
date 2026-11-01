@@ -14,7 +14,7 @@
   "committed": "2026-07-07",
   "license": "GPL-3.0"
  },
- "generated": "2026-09-12",
+ "generated": "2026-11-01",
  "structures": {
   "rib_left_1": {
    "name": "First rib, left",
@@ -32,7 +32,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_2": {
@@ -51,7 +52,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_3": {
@@ -70,7 +72,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_4": {
@@ -89,7 +92,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_5": {
@@ -108,7 +112,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_6": {
@@ -127,7 +132,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_7": {
@@ -146,7 +152,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_8": {
@@ -165,7 +172,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_9": {
@@ -184,7 +192,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_10": {
@@ -203,7 +212,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_11": {
@@ -222,7 +232,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_12": {
@@ -241,7 +252,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_left_13": {
@@ -275,7 +287,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_2": {
@@ -294,7 +307,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_3": {
@@ -313,7 +327,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_4": {
@@ -332,7 +347,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_5": {
@@ -351,7 +367,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_6": {
@@ -370,7 +387,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_7": {
@@ -389,7 +407,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_8": {
@@ -408,7 +427,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_9": {
@@ -427,7 +447,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_10": {
@@ -446,7 +467,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_11": {
@@ -465,7 +487,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_12": {
@@ -484,7 +507,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:ribs"
    ]
   },
   "rib_right_13": {
@@ -517,7 +541,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:oar"
    ]
   },
   "heart_myocardium": {
@@ -533,7 +558,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "heart_atrium_left": {
@@ -549,7 +575,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "heart_atrium_right": {
@@ -565,7 +592,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "heart_ventricle_left": {
@@ -581,7 +609,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "heart_ventricle_right": {
@@ -597,7 +626,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "aorta": {
@@ -617,7 +647,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "iliac_artery_left": {
@@ -637,7 +668,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "iliac_artery_right": {
@@ -657,7 +689,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "iliac_vena_left": {
@@ -677,7 +710,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "iliac_vena_right": {
@@ -697,7 +731,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "inferior_vena_cava": {
@@ -716,7 +751,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "portal_splenic_vein": {
@@ -746,7 +782,8 @@
    "models": [
     "moose/cardiac",
     "ts:heartchambers_highres",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "adrenal_gland_left": {
@@ -766,7 +803,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "adrenal_gland_right": {
@@ -786,7 +824,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "bladder": {
@@ -819,7 +858,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "gallbladder": {
@@ -838,7 +878,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "kidney_left": {
@@ -858,7 +899,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "kidney_right": {
@@ -878,7 +920,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "liver": {
@@ -897,7 +940,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "lung_lower_lobe_left": {
@@ -916,7 +960,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "lung_lower_lobe_right": {
@@ -935,7 +980,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "lung_middle_lobe_right": {
@@ -953,7 +999,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "lung_upper_lobe_left": {
@@ -972,7 +1019,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "lung_upper_lobe_right": {
@@ -991,7 +1039,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "pancreas": {
@@ -1010,7 +1059,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "spleen": {
@@ -1029,7 +1079,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "stomach": {
@@ -1048,7 +1099,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "thyroid_left": {
@@ -1096,7 +1148,8 @@
     "ts:total",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "vertebra_C1": {
@@ -1466,7 +1519,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "hip_right": {
@@ -1486,7 +1540,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "sacrum": {
@@ -1506,7 +1561,8 @@
     "ts:vertebrae_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "carpal_left": {
@@ -1586,7 +1642,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "femur_right": {
@@ -1606,7 +1663,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "fibula_left": {
@@ -1686,7 +1744,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "humerus_right": {
@@ -1706,7 +1765,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "metacarpal_left": {
@@ -1846,7 +1906,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "scapula_right": {
@@ -1866,7 +1927,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "skull": {
@@ -2025,7 +2087,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "autochthon_right": {
@@ -2045,7 +2108,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_maximus_left": {
@@ -2065,7 +2129,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_maximus_right": {
@@ -2085,7 +2150,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_medius_left": {
@@ -2105,7 +2171,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_medius_right": {
@@ -2125,7 +2192,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_minimus_left": {
@@ -2145,7 +2213,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "gluteus_minimus_right": {
@@ -2165,7 +2234,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "iliopsoas_left": {
@@ -2185,7 +2255,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "iliopsoas_right": {
@@ -2205,7 +2276,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "colon": {
@@ -2224,7 +2296,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "duodenum": {
@@ -2243,7 +2316,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "esophagus": {
@@ -2262,7 +2336,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "small_bowel": {
@@ -2281,7 +2356,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "spinal_chord": {
@@ -2413,7 +2489,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:oar"
    ]
   },
   "Face": {
@@ -2752,7 +2829,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "clavicula_right": {
@@ -2771,7 +2849,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:muscles"
    ]
   },
   "common_carotid_artery_left": {
@@ -3019,7 +3098,8 @@
    "models": [
     "ts:face",
     "ts:face_mr",
-    "ts2.0"
+    "ts2.0",
+    "cads:cardiac"
    ]
   },
   "femur": {
@@ -3110,7 +3190,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:oar"
    ]
   },
   "hip_implant": {
@@ -4125,7 +4206,8 @@
    ],
    "models": [
     "ts:head_glands_cavities",
-    "ts:oculomotor_muscles"
+    "ts:oculomotor_muscles",
+    "cads:headneck"
    ]
   },
   "optic_nerve_right": {
@@ -4141,7 +4223,8 @@
    ],
    "models": [
     "ts:head_glands_cavities",
-    "ts:oculomotor_muscles"
+    "ts:oculomotor_muscles",
+    "cads:headneck"
    ]
   },
   "oropharynx": {
@@ -4184,7 +4267,8 @@
     0
    ],
    "models": [
-    "ts:head_glands_cavities"
+    "ts:head_glands_cavities",
+    "cads:headneck"
    ]
   },
   "parotid_gland_right": {
@@ -4199,7 +4283,8 @@
     0
    ],
    "models": [
-    "ts:head_glands_cavities"
+    "ts:head_glands_cavities",
+    "cads:headneck"
    ]
   },
   "patella": {
@@ -4343,7 +4428,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:organs"
    ]
   },
   "posterior_scalene_left": {
@@ -4574,7 +4660,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:body_regions"
    ]
   },
   "sterno_thyroid_left": {
@@ -4725,7 +4812,8 @@
     107
    ],
    "models": [
-    "ts:head_glands_cavities"
+    "ts:head_glands_cavities",
+    "cads:headneck"
    ]
   },
   "submandibular_gland_right": {
@@ -4740,7 +4828,8 @@
     107
    ],
    "models": [
-    "ts:head_glands_cavities"
+    "ts:head_glands_cavities",
+    "cads:headneck"
    ]
   },
   "subscapularis": {
@@ -5236,7 +5325,8 @@
     "ts:total_mr",
     "ts2.0",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:cardiac"
    ]
   },
   "venous_sinuses": {
@@ -5459,7 +5549,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C2": {
@@ -5478,7 +5569,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C3": {
@@ -5497,7 +5589,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C4": {
@@ -5516,7 +5609,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C5": {
@@ -5535,7 +5629,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C6": {
@@ -5554,7 +5649,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_C7": {
@@ -5573,7 +5669,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_L1": {
@@ -5592,7 +5689,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_L2": {
@@ -5611,7 +5709,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_L3": {
@@ -5630,7 +5729,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_L4": {
@@ -5649,7 +5749,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_L5": {
@@ -5668,7 +5769,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_S1": {
@@ -5704,7 +5806,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T10": {
@@ -5723,7 +5826,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T11": {
@@ -5742,7 +5846,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T12": {
@@ -5761,7 +5866,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T2": {
@@ -5780,7 +5886,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T3": {
@@ -5799,7 +5906,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T4": {
@@ -5818,7 +5926,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T5": {
@@ -5837,7 +5946,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T6": {
@@ -5856,7 +5966,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T7": {
@@ -5875,7 +5986,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T8": {
@@ -5894,7 +6006,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "vertebrae_T9": {
@@ -5913,7 +6026,8 @@
     "ts2.0",
     "moose/vertebrae",
     "auto3dseg",
-    "multitalent"
+    "multitalent",
+    "cads:vertebrae"
    ]
   },
   "zygomatic_arch_left": {
@@ -5959,6 +6073,755 @@
    "models": [
     "moose/vertebrae"
    ]
+  },
+  "bowel_bag": {
+   "name": "Colostomy bag",
+   "system": "Alimentary system",
+   "code": "SCT:339648008",
+   "type": "Colostomy bag",
+   "rgb": [
+    12,
+    34,
+    89
+   ],
+   "category": "Physical object",
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "larynx": {
+   "name": "Larynx",
+   "system": "Respiratory system",
+   "code": "SCT:4596009",
+   "type": "Larynx",
+   "rgb": [
+    23,
+    145,
+    220
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "left psoas major": {
+   "name": "Structure of psoas major muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:57240007",
+   "type": "Structure of psoas major muscle",
+   "mod": "Left",
+   "rgb": [
+    255,
+    69,
+    0
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "left rectus abdominis": {
+   "name": "Rectus abdominis muscle, left",
+   "system": "Muscular system",
+   "code": "SCT:31243008",
+   "type": "Rectus abdominis muscle",
+   "mod": "Left",
+   "rgb": [
+    128,
+    0,
+    128
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "left_mammary_gland": {
+   "name": "Mammary gland, left",
+   "system": "Integument",
+   "code": "SCT:279009002",
+   "type": "Mammary gland",
+   "mod": "Left",
+   "rgb": [
+    255,
+    182,
+    193
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "rectum": {
+   "name": "Rectum",
+   "system": "Alimentary system",
+   "code": "SCT:34402009",
+   "type": "Rectum",
+   "rgb": [
+    60,
+    179,
+    113
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "right psoas major": {
+   "name": "Structure of psoas major muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:57240007",
+   "type": "Structure of psoas major muscle",
+   "mod": "Right",
+   "rgb": [
+    210,
+    105,
+    30
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "right rectus abdominis": {
+   "name": "Rectus abdominis muscle, right",
+   "system": "Muscular system",
+   "code": "SCT:31243008",
+   "type": "Rectus abdominis muscle",
+   "mod": "Right",
+   "rgb": [
+    123,
+    104,
+    238
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "right_mammary_gland": {
+   "name": "Mammary gland, right",
+   "system": "Integument",
+   "code": "SCT:279009002",
+   "type": "Mammary gland",
+   "mod": "Right",
+   "rgb": [
+    139,
+    0,
+    139
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "seminal_vesicle": {
+   "name": "Seminal vesicle",
+   "system": "Genital system",
+   "code": "SCT:64739004",
+   "type": "Seminal vesicle",
+   "rgb": [
+    218,
+    165,
+    32
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "sigmoid": {
+   "name": "Sigmoid colon",
+   "system": "Alimentary system",
+   "code": "SCT:60184004",
+   "type": "Sigmoid colon",
+   "rgb": [
+    72,
+    61,
+    139
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "spinal_canal": {
+   "name": "Spinal canal",
+   "system": "Skeletal system",
+   "code": "SCT:61853006",
+   "type": "Spinal canal",
+   "rgb": [
+    220,
+    20,
+    60
+   ],
+   "models": [
+    "cads:oar"
+   ]
+  },
+  "abdominal_cavity": {
+   "name": "Abdominal cavity structure",
+   "system": "Body regions",
+   "code": "SCT:52731004",
+   "type": "Abdominal cavity structure",
+   "rgb": [
+    255,
+    140,
+    0
+   ],
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "bones": {
+   "name": "Bone",
+   "system": "Skeletal system",
+   "code": "SCT:272673000",
+   "type": "Bone",
+   "rgb": [
+    30,
+    144,
+    255
+   ],
+   "category": "Tissue",
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "breast_implant": {
+   "name": "Prosthetic breast implant",
+   "system": "Integument",
+   "code": "SCT:2282003",
+   "type": "Prosthetic breast implant",
+   "rgb": [
+    46,
+    139,
+    87
+   ],
+   "category": "Physical object",
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "mediastinum": {
+   "name": "Mediastinum",
+   "system": "Body regions",
+   "code": "SCT:72410000",
+   "type": "Mediastinum",
+   "rgb": [
+    186,
+    85,
+    211
+   ],
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "muscle": {
+   "name": "Muscle",
+   "system": "Muscular system",
+   "code": "SCT:71616004",
+   "type": "Muscle",
+   "rgb": [
+    70,
+    130,
+    180
+   ],
+   "category": "Tissue",
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "pericardium": {
+   "name": "Pericardium",
+   "system": "Body regions",
+   "code": "SCT:76848001",
+   "type": "Pericardium",
+   "rgb": [
+    152,
+    251,
+    152
+   ],
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "subcutaneous_tissue": {
+   "name": "Subcutaneous tissue structure",
+   "system": "Body regions",
+   "code": "SCT:71966008",
+   "type": "Subcutaneous tissue structure",
+   "rgb": [
+    0,
+    255,
+    127
+   ],
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "thoracic_cavity": {
+   "name": "Thoracic cavity structure",
+   "system": "Body regions",
+   "code": "SCT:43799004",
+   "type": "Thoracic cavity structure",
+   "rgb": [
+    205,
+    92,
+    92
+   ],
+   "models": [
+    "cads:body_regions"
+   ]
+  },
+  "blood": {
+   "name": "Blood",
+   "system": "Cardiovascular system",
+   "code": "SCT:87612001",
+   "type": "Blood",
+   "rgb": [
+    148,
+    0,
+    211
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "compact bone": {
+   "name": "Compact bone",
+   "system": "Skeletal system",
+   "code": "SCT:32217005",
+   "type": "Compact bone",
+   "rgb": [
+    240,
+    230,
+    140
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "csf": {
+   "name": "Cerebrospinal fluid",
+   "system": "Nervous system",
+   "code": "SCT:65216001",
+   "type": "Cerebrospinal fluid",
+   "rgb": [
+    0,
+    250,
+    154
+   ],
+   "category": "Body substance",
+   "models": [
+    "cads:head"
+   ]
+  },
+  "eye balls": {
+   "name": "Eyeball",
+   "system": "Sense organs",
+   "code": "SCT:79652003",
+   "type": "Eyeball",
+   "rgb": [
+    154,
+    205,
+    50
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "gray matter": {
+   "name": "Gray matter",
+   "system": "Nervous system",
+   "code": "SCT:389081007",
+   "type": "Gray matter",
+   "rgb": [
+    238,
+    130,
+    238
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "head muscles": {
+   "name": "Muscle of head",
+   "system": "Muscular system",
+   "code": "SCT:22688005",
+   "type": "Muscle of head",
+   "rgb": [
+    222,
+    184,
+    135
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "scalp": {
+   "name": "Scalp structure",
+   "system": "Integument",
+   "code": "SCT:41695006",
+   "type": "Scalp structure",
+   "rgb": [
+    100,
+    149,
+    237
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "spongy bone": {
+   "name": "Spongy bone",
+   "system": "Skeletal system",
+   "code": "SCT:20870005",
+   "type": "Spongy bone",
+   "rgb": [
+    255,
+    215,
+    0
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "white matter": {
+   "name": "White matter",
+   "system": "Nervous system",
+   "code": "SCT:389080008",
+   "type": "White matter",
+   "rgb": [
+    127,
+    255,
+    212
+   ],
+   "models": [
+    "cads:head"
+   ]
+  },
+  "OAR_A_Carotid_L": {
+   "name": "Carotid Artery, left",
+   "system": "Cardiovascular system",
+   "code": "SCT:69105007",
+   "type": "Carotid Artery",
+   "mod": "Left",
+   "rgb": [
+    255,
+    105,
+    180
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_A_Carotid_R": {
+   "name": "Carotid Artery, right",
+   "system": "Cardiovascular system",
+   "code": "SCT:69105007",
+   "type": "Carotid Artery",
+   "mod": "Right",
+   "rgb": [
+    255,
+    105,
+    180
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Arytenoid": {
+   "name": "Arytenoid cartilage structure",
+   "system": "Respiratory system",
+   "code": "SCT:77578007",
+   "type": "Arytenoid cartilage structure",
+   "rgb": [
+    176,
+    196,
+    222
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Bone_Mandible": {
+   "name": "Mandible",
+   "system": "Skeletal system",
+   "code": "SCT:91609006",
+   "type": "Mandible",
+   "rgb": [
+    255,
+    20,
+    147
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Brainstem": {
+   "name": "Brainstem structure",
+   "system": "Nervous system",
+   "code": "SCT:15926001",
+   "type": "Brainstem structure",
+   "rgb": [
+    64,
+    224,
+    208
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_BuccalMucosa": {
+   "name": "Buccal mucosa",
+   "system": "Alimentary system",
+   "code": "SCT:16811007",
+   "type": "Buccal mucosa",
+   "rgb": [
+    0,
+    206,
+    209
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Cavity_Oral": {
+   "name": "Oral cavity",
+   "system": "Body regions",
+   "code": "SCT:74262004",
+   "type": "Oral cavity",
+   "rgb": [
+    255,
+    228,
+    181
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Cochlea_L": {
+   "name": "Cochlear structure, left",
+   "system": "Sense organs",
+   "code": "SCT:80169004",
+   "type": "Cochlear structure",
+   "mod": "Left",
+   "rgb": [
+    173,
+    216,
+    230
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Cochlea_R": {
+   "name": "Cochlear structure, right",
+   "system": "Sense organs",
+   "code": "SCT:80169004",
+   "type": "Cochlear structure",
+   "mod": "Right",
+   "rgb": [
+    173,
+    216,
+    230
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Cricopharyngeus": {
+   "name": "Cricopharyngeus",
+   "system": "Alimentary system",
+   "code": "SCT:28276008",
+   "type": "Cricopharyngeus",
+   "rgb": [
+    50,
+    205,
+    50
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Esophagus_S": {
+   "name": "Cervical esophagus",
+   "system": "Alimentary system",
+   "code": "SCT:60075002",
+   "type": "Cervical esophagus",
+   "rgb": [
+    255,
+    160,
+    122
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Eye_AL": {
+   "name": "Anterior eyeball segment structure, left",
+   "system": "Sense organs",
+   "code": "SCT:32259006",
+   "type": "Anterior eyeball segment structure",
+   "mod": "Left",
+   "rgb": [
+    245,
+    222,
+    179
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Eye_AR": {
+   "name": "Anterior eyeball segment structure, right",
+   "system": "Sense organs",
+   "code": "SCT:32259006",
+   "type": "Anterior eyeball segment structure",
+   "mod": "Right",
+   "rgb": [
+    245,
+    222,
+    179
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Eye_PL": {
+   "name": "Posterior eyeball segment structure, left",
+   "system": "Sense organs",
+   "code": "SCT:77205005",
+   "type": "Posterior eyeball segment structure",
+   "mod": "Left",
+   "rgb": [
+    188,
+    143,
+    143
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Eye_PR": {
+   "name": "Posterior eyeball segment structure, right",
+   "system": "Sense organs",
+   "code": "SCT:77205005",
+   "type": "Posterior eyeball segment structure",
+   "mod": "Right",
+   "rgb": [
+    188,
+    143,
+    143
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Glnd_Lacrimal_L": {
+   "name": "Both lacrimal glands, left",
+   "system": "Sense organs",
+   "code": "SCT:30641009",
+   "type": "Both lacrimal glands",
+   "mod": "Left",
+   "rgb": [
+    139,
+    69,
+    19
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Glnd_Lacrimal_R": {
+   "name": "Both lacrimal glands, right",
+   "system": "Sense organs",
+   "code": "SCT:30641009",
+   "type": "Both lacrimal glands",
+   "mod": "Right",
+   "rgb": [
+    139,
+    69,
+    19
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Glnd_Thyroid": {
+   "name": "Thyroid structure",
+   "system": "Endocrine glands",
+   "code": "SCT:69748006",
+   "type": "Thyroid structure",
+   "rgb": [
+    45,
+    82,
+    160
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Glottis": {
+   "name": "Glottis",
+   "system": "Respiratory system",
+   "code": "SCT:1307006",
+   "type": "Glottis",
+   "rgb": [
+    250,
+    250,
+    210
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Larynx_SG": {
+   "name": "Supraglottis",
+   "system": "Respiratory system",
+   "code": "SCT:119255006",
+   "type": "Supraglottis",
+   "rgb": [
+    0,
+    255,
+    255
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Lips": {
+   "name": "Both lips",
+   "system": "Alimentary system",
+   "code": "SCT:81083006",
+   "type": "Both lips",
+   "rgb": [
+    160,
+    82,
+    45
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_OpticChiasm": {
+   "name": "Optic chiasm",
+   "system": "Nervous system",
+   "code": "SCT:244453006",
+   "type": "Optic chiasm",
+   "rgb": [
+    255,
+    69,
+    158
+   ],
+   "models": [
+    "cads:headneck"
+   ]
+  },
+  "OAR_Pituitary": {
+   "name": "Pituitary gland",
+   "system": "Endocrine glands",
+   "code": "SCT:56329008",
+   "type": "Pituitary gland",
+   "rgb": [
+    75,
+    0,
+    130
+   ],
+   "models": [
+    "cads:headneck"
+   ]
   }
  },
  "conflicts": [
@@ -6001,6 +6864,16 @@
    "label": "gluteus_maximus_right",
    "kept": "SCT:206007 (Gluteus maximus muscle)",
    "also": "SCT:181674001 (Gluteus maximus muscle) in multitalent"
+  },
+  {
+   "label": "gluteus_maximus_left",
+   "kept": "SCT:206007 (Gluteus maximus muscle)",
+   "also": "SCT:181674001 (Gluteus maximus muscle) in omas with colors"
+  },
+  {
+   "label": "gluteus_maximus_right",
+   "kept": "SCT:206007 (Gluteus maximus muscle)",
+   "also": "SCT:181674001 (Gluteus maximus muscle) in omas with colors"
   }
  ],
  "errata": [

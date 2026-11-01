@@ -19,6 +19,7 @@
 // The critic's round on the first version: Contents/docs/qa/2026-10-02-database-transfer.md (SlicerAlbula workspace).
 import { deleteSeriesBatchLocked, provenanceEdges, provenancePathFor, seriesAttributes, seriesFilePaths, withIndexLock, type ProvenanceEdge } from "./db-index.ts";
 import { importFiles, type ImportProgress } from "./db-import.ts";
+import { archivedAmong } from "./archive.ts";
 import { deleteScene, importScene, listScenes, mergeProvenance, type SceneRow } from "./scenes.ts";
 import { seriesNamed } from "../logic/scene/check.ts";
 
@@ -338,6 +339,9 @@ export async function removeTransferred(from: TransferSide, to: TransferSide, re
       const c = await compare(images, dst);
       if (!images.length) kept.push({ uid, description: s.description, reason: `no longer in ${from.name}` });
       else if (c.missing || c.different || c.same) kept.push({ uid, description: s.description, reason: `not whole and identical in ${to.name} any more` });
+      // IN THE FIRST DATABASE'S ARCHIVE (desktop/archive.ts): it stays there, and the copy in the second stays too; one
+      // listed scan no longer stops the whole move (the critic, 2026-10-29, archive guard finding 4).
+      else if ((await archivedAmong(from.path, images.map(([, v]) => v.raw))).length) kept.push({ uid, description: s.description, reason: `in ${from.name}'s archive, so it stays there (the copy in ${to.name} stays too)` });
       else ok.push(uid);
       prog.seriesDone++;
       opts.onProgress?.({ ...prog });
@@ -360,7 +364,9 @@ export async function removeTransferred(from: TransferSide, to: TransferSide, re
       if (!row) continue;
       const named = [...new Set(seriesNamed(JSON.parse(await Deno.readTextFile(`${from.path}/${row.path}`)) as Record<string, unknown>).map((x) => x.uid))];
       if ((await describe(from.path, named)).length) continue;            // some of its scans are still here: it stays
-      if (await deleteScene(from.path, uid)) out.scenes++;
+      // A scene the first database's archive lists stays there too, said in the server's log (desktop/archive.ts).
+      try { if (await deleteScene(from.path, uid)) out.scenes++; }
+      catch (e) { console.warn(`transfer: the scene ${uid} stays in ${from.name}: ${(e as Error).message}`); }
     }
   }
   if (removed.length) {

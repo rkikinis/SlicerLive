@@ -31,6 +31,16 @@ import { toF16Array } from "./cine-field.ts";
 import type { Field } from "./fields.ts";
 import { BRICK, BRICK2, BRICK_MIXED, BRICK_THIN, EMPTY_CUTOFF, buildSmoothSolid, makeBrick2Texture, makeBrickTexture, makeSmoothSolidTexture, smoothPasses } from "./solid-smooth.ts";
 
+/**
+ * WHERE A STRUCTURE TOO THIN FOR THE BLUR IS INSIDE: its labels' trilinear occupancy at least this. It was one half,
+ * which put a one-voxel structure's surface half a voxel either side of its centers -- and opened it wherever two of its
+ * voxels touch only along an edge, as a tilted plate one voxel thick does at every step from one row to the next: holes
+ * along the steps, more or fewer by the viewing angle (Ron, 2026-10-31, thin bone of MOOSE's maxilla: "a lot of
+ * artefacts ... they again depend on camera angle"; render/test/thin-plate.gpu.test.ts). Only the thin path reads it;
+ * every structure the blur reaches is drawn from the smoothed copy at one half, as before.
+ */
+export const THIN_INSIDE = 0.35;
+
 export interface ColorizeFieldOpts {
   clim: [number, number];                 // HU range the CT LUT spans
   ijkToRAS?: ArrayLike<number>;
@@ -619,6 +629,12 @@ fn solid_thin_block_clz${s}(wp : vec3<f32>) -> bool {
   let bdim = vec3<f32>(textureDimensions(t_brick_clz${s}));
   return textureLoad(t_brick_clz${s}, vec3<i32>(clamp(floor(bt / ${BRICK}.0), vec3<f32>(0.0), bdim - vec3<f32>(1.0))), 0).r == ${BRICK_THIN}u;
 }
+/** SOLID LOOK: should the ray step finely here (scene-renderer.ts fs_solid) -- a block holding a structure too thin for
+ *  the blur, and a structure near (the smoothed copy above its "nothing here" cut-off), not the block's empty space.
+ *  Measured, it saves little (49 -> 44-47 ms at 0.4 of a step): the blocks marked thin are mostly near structures. */
+fn solid_fine_clz${s}(wp : vec3<f32>) -> bool {
+  return solid_thin_block_clz${s}(wp) && smooth_clz${s}(wp) >= ${EMPTY_CUTOFF.toFixed(5)};
+}
 /**
  * SOLID LOOK: which structure a point is in, 0 for none, given the one the ray is in now (cur).
  *
@@ -660,7 +676,7 @@ fn solid_class_clz${s}(wp : vec3<f32>, cur : i32, rd : vec3<f32>) -> i32 {
   // is outside without reading a label -- most of the reads near surfaces were this check.
   if (!solid_thin_block_clz${s}(wp)) { return 0; }
   let v = visocc_clz${s}(wp);
-  if (v.x < 0.5) { return 0; }
+  if (v.x < ${THIN_INSIDE}) { return 0; }
   // A step of a LARGE structure (its smoothed surface is within a voxel and a half, and it is the SAME
   // structure there) defers to the smooth surface. Asked of any structure, this cut a thin vessel off
   // for a voxel and a half next to the organ it leaves -- 5.6 mm with 5 mm slices (critic, finding 3).
@@ -703,7 +719,7 @@ fn solid_wall_clz${s}(pw : vec3<f32>, wp : vec3<f32>, la : i32, lb : i32, rd : v
     for (var k = 0; k < 4; k = k + 1) {
       let mid = 0.5 * (lo + hi);
       var inMid : bool;
-      if (bySmooth) { inMid = smooth_clz${s}(mid) >= 0.5; } else { inMid = visocc_clz${s}(mid).x >= 0.5; }
+      if (bySmooth) { inMid = smooth_clz${s}(mid) >= 0.5; } else { inMid = visocc_clz${s}(mid).x >= ${THIN_INSIDE}; }
       if (inMid == (la > 0)) { lo = mid; } else { hi = mid; }
     }
   }
@@ -786,7 +802,7 @@ fn sample_field_clz${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     // surfaces' targets; the trace draws only what is around them. The pick still finds them here.
     if (g_solid_prepass) {
       if (u_material.clz${s}_params.y <= 0.0) { return vec4<f32>(0.0); }   // no body shown: nothing left to draw
-      if (visocc_clz${s}(wp).x >= 0.5) { return vec4<f32>(0.0); }
+      if (visocc_clz${s}(wp).x >= ${THIN_INSIDE}) { return vec4<f32>(0.0); }
     } else {
       let sc = solid_clz${s}(wp, rd, 2.0 * scene_step());
       if (sc.a >= 0.0) { return sc; }

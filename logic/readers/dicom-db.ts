@@ -37,6 +37,8 @@ export interface DbSeriesEntry {
   seriesTime?: string;
   modality?: string;
   description?: string;
+  /** DICOM Body Part Examined, as the file says it (often empty): the Segment Editor's region default. */
+  bodyPart?: string;
   count: number;
   /** false when some/all instances are recorded as absolute paths outside this folder. */
   available: boolean;
@@ -51,6 +53,8 @@ const OLDER_SERVER = "Albula's server is older than this window (it was rebuilt 
 /** A row of the server's series list (desktop/db-listing.ts; its own type there -- keep the two alike). */
 export interface ListedSeries {
   uid: string; num: number | string | null; modality: string | null; description: string | null;
+  /** Absent from a server older than 2026-10-31. */
+  bodyPart?: string | null;
   seriesDate: string | null; seriesTime: string | null;
   studyUID: string | null; studyDescription: string | null; studyDate: string | null;
   patientName: string | null; patientID: string | null;
@@ -118,7 +122,7 @@ export function directorySource(dir: FileSystemDirectoryHandle): DbSource {
     // The index is read by Albula's server (it has SQLite; the page no longer carries a copy). A folder picked in a
     // plain browser, with no server behind it, can therefore not be listed -- the app never had this path (WKWebView
     // has no folder picker); Steve's static pages did.
-    listSeries: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server: open it with Load / Save › Load from the DICOM database › Databases… instead.")),
+    listSeries: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server: add it in Load / Save › Databases instead.")),
     seriesFiles: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server.")),
     readFile: async (rel) => (await fileAt(dir, rel)).arrayBuffer(),
     readHead: async (rel, maxBytes) => {
@@ -321,6 +325,7 @@ export async function openDicomDatabase(
       seriesTime: str(r.seriesTime),
       modality: str(r.modality),
       description: str(r.description),
+      bodyPart: str(r.bodyPart),
       count,
       externalCount,
       available: count > 0 && externalCount === 0,

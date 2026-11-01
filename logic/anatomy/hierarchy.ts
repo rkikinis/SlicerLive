@@ -632,6 +632,11 @@ const PLACE: [RegExp, string][] = [
   [/^rib_right_/, "ribs-right"],
   [/^(sternum|costal_cartilages)$/, "thoracic-cage"],
   [/^(clavicula|clavicle|scapula)_/, "shoulder-girdle"], // `clavicle_left` is the same bone under another model's key -- and what "Clavicle, left" resolves to by name
+  // MOOSE's clin_ct_all_bones: both clavicles, both scapulae, every rib and the whole spine, each as one label
+  // (catalogue.ts ADDED). Unsided, so at the group's own level, as the bilateral limb bones below.
+  [/^(clavicle|scapula)$/, "shoulder-girdle"],
+  [/^ribcage$/, "ribs"],
+  [/^spine$/, "vertebral-column"],
   // BOTH FORMS OF EVERY LIMB BONE. TotalSegmentator emits `femur_left`/`femur_right` from one task
   // and a bilateral `femur` from another, and the sided rules matched only the first -- so the
   // bilateral labels fell through to the system root and the limb branch was missing half its bones.

@@ -3,6 +3,7 @@
 // so the two can never disagree about what counts as current.
 import { COPY_CODE, COPY_FOLDER, type CopyGroup } from "./duckn-copy-code.ts";
 import { seriesFileStamp } from "./series-files.ts";
+import { sameCopyCode } from "./duckn-copy-same.ts";
 
 export type CopyStatus = { valid: true; group: CopyGroup; dir: string } | { valid: false; why: string; absent?: boolean };
 
@@ -14,7 +15,7 @@ export async function copyStatus(dbPath: string, uid: string): Promise<CopyStatu
   try { group = (JSON.parse(groupText) as { attributes?: { albula?: CopyGroup } }).attributes?.albula; } catch { /* below */ }
   if (!group) return { valid: false, why: "the copy's description is not Albula's" };
   if (group.seriesInstanceUID !== uid) return { valid: false, why: `the copy in this series' folder is of another series (${group.seriesInstanceUID})` };
-  if (group.code !== COPY_CODE) return { valid: false, why: `the copy was made by other code (${group.code}; this server is ${COPY_CODE})` };
+  if (!sameCopyCode(group.code, COPY_CODE)) return { valid: false, why: `the copy was made by other code (${group.code}; this server is ${COPY_CODE})` };
   if (!Array.isArray(group.frames) || !group.frames.length || !group.frames.every((f) => /^[0-9]{1,4}$/.test(f))) return { valid: false, why: "the copy names its volumes in a way this server does not accept" };
   const now = await seriesFileStamp(dbPath, uid);
   if (!now) return { valid: false, why: "the series is no longer in the index" };

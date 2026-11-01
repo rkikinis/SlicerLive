@@ -22,6 +22,7 @@ import { dirname, join, resolve } from "jsr:@std/path@1";
 import { COPY_FOLDER } from "./duckn-copy-code.ts";
 import { sqliteScript, writeUnderWay } from "./sqlite.ts";
 export { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
+import { appendManifest, ArchiveRefusal, archivedAmong, toTrash } from "./archive.ts";
 
 
 /** Where a page's uploads wait inside a database folder until desktop/db-import.ts adds them; the audit does not count them. */
@@ -687,7 +688,7 @@ export interface DeleteResult {
   /** Index rows removed. */
   series: number;
   images: number;
-  /** Files removed from disk. */
+  /** Files moved to the Trash (desktop/archive.ts). */
   files: string[];
   /** Provenance edges removed with it. */
   edges: number;
@@ -731,9 +732,10 @@ export function insideDatabase(rel: string): boolean {
   return !rel.split(/[\\/]/).includes("..");
 }
 
-export async function deleteSeriesFromDatabase(dbDir: string, seriesUID: string): Promise<DeleteResult> {
+export interface DeleteOptions { replacingInArchive?: boolean; what?: string }
+export async function deleteSeriesFromDatabase(dbDir: string, seriesUID: string, opts: DeleteOptions = {}): Promise<DeleteResult> {
   if (!UID.test(seriesUID)) throw new Error(`not a DICOM UID: ${seriesUID}`);
-  return await withIndexLock(dbDir, () => deleteSeriesLocked(dbDir, [seriesUID]));
+  return await withIndexLock(dbDir, () => deleteSeriesLocked(dbDir, [seriesUID], opts));
 }
 
 /**
@@ -746,7 +748,7 @@ export async function deleteSeriesBatchLocked(dbDir: string, seriesUIDs: string[
   return await deleteSeriesLocked(dbDir, [...new Set(seriesUIDs)]);
 }
 
-async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<DeleteResult> {
+async function deleteSeriesLocked(dbDir: string, uids: string[], opts: DeleteOptions = {}): Promise<DeleteResult> {
   const dbPath = `${dbDir}/ctkDICOM.sql`;
   if (await busy(dbPath)) {
     throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
@@ -765,6 +767,21 @@ async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<Delete
     const present = (await sqlite(dbPath, `SELECT COUNT(*) FROM Series WHERE SeriesInstanceUID=${q(uids[0])};`)).trim();
     if (present === "0") throw new Error("no such series in this database");
   }
+  // THE ARCHIVE IS NEVER DELETED FROM HERE (desktop/archive.ts): before the index is touched, so a refusal changes
+  // nothing. Every ordinary removal of a series ends in this function (Delete, the editor's earlier copy, a move, the
+  // BIDS tool's replace, a scene's DICOM object); the server's write route has its own check (db-serve.ts). Only the
+  // files that would go are asked about: a file another series keeps is not removed, so it does not stop this one
+  // (the critic, finding 12). `opts.replacingInArchive`: a scene's own save replacing its DICOM object, which the
+  // archive then lists in the old one's place (scene-mrcom.ts; Ron: "only the final version").
+  const sharedRaw: string[] = [];
+  for (let i = 0; i < rows.length; i += 500) {
+    const part = rows.slice(i, i + 500);
+    const got = (await sqlite(dbPath, `.mode json\nSELECT DISTINCT Filename AS f FROM Images WHERE Filename IN (${part.map(q).join(",")}) AND SeriesInstanceUID NOT IN (${uids.map(q).join(",")});`)).trim();
+    for (const r of (got ? JSON.parse(got) as { f: string }[] : [])) sharedRaw.push(r.f);
+  }
+  const shared = new Set(sharedRaw);
+  const listedGoing = await archivedAmong(dbDir, rows.filter((r) => !shared.has(r)));
+  if (listedGoing.length && !opts.replacingInArchive) throw new ArchiveRefusal(listedGoing, opts.what);
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = `${dbPath}.backup-${stamp}`;
@@ -799,14 +816,27 @@ async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<Delete
   // or one with ".."): that file is the person's own, not the database's, and is left in place (A9). What is
   // removed is THE PATH THE ROW NAMES, never what a link there points at: resolving links first removed another
   // series' file through a link (critic, 2026-09-24, review-bugfixes finding 2).
+  // TO THE TRASH, not removed (desktop/archive.ts; Ron, 2026-10-29: "The way I deal with trash is the empty button"):
+  // a series deleted by mistake can be put back.
   const files: string[] = [];
   const leftInPlace: string[] = [];
+  const going = new Map<string, string>();           // absolute path -> the row's path
   for (const rel of rows) {
     if (still.has(rel)) continue;
     // An absolute row under the database folder itself is the database's too.
     const abs = rel.startsWith(dbDir + "/") && !rel.split("/").includes("..");
     if (!abs && !insideDatabase(rel)) { leftInPlace.push(rel); continue; }
-    if (await Deno.remove(abs ? rel : `${dbDir}/${rel}`).then(() => true).catch(() => false)) files.push(rel);
+    going.set(abs ? rel : `${dbDir}/${rel}`, rel);
+  }
+  const trash = await toTrash(dbDir, [...new Set(going.keys())]);
+  for (const a of trash.trashed) files.push(going.get(a)!);
+  // A FILE THE TRASH REFUSED stays in the folder without its row: said in the result, not only in the log (the critic,
+  // finding 6), and the audit below lists it as an orphan.
+  const trashError = trash.failed.length ? `${trash.failed.length} file(s) could not be moved to the Trash and stay in the database folder without their index rows, e.g. ${trash.failed[0]}` : "";
+  if (trashError) console.warn(`delete: ${trashError}`);
+  if (opts.replacingInArchive && listedGoing.length) {
+    const at = new Date().toISOString();
+    await appendManifest(dbDir, listedGoing.filter((p) => trash.trashed.includes(going.has(p) ? p : `${dbDir}/${p}`)).map((p) => ({ op: "remove" as const, path: p, added: at, note: "replaced by the scene's next save" })));
   }
   if (leftInPlace.length) console.warn(`delete: ${leftInPlace.length} file(s) outside the database folder left in place, e.g. ${leftInPlace[0]}`);
 
@@ -852,7 +882,7 @@ async function deleteSeriesLocked(dbDir: string, uids: string[]): Promise<Delete
   const extra = leftInPlace.length ? { leftInPlace } : {};
   if (audit.zombies.length === 0) {
     await Deno.remove(backup).catch(() => {});
-    return { series, images, files, edges, copyRemoved, audit, ...extra };
+    return { series, images, files, edges, copyRemoved, audit, ...extra, ...(trashError ? { error: trashError } : {}) };
   }
   return { series, images, files, edges, copyRemoved, audit, backup, error: "the audit found rows without files; the pre-delete backup has been kept", ...extra };
 }

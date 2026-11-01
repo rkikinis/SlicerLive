@@ -85,8 +85,19 @@ export function atPaletteVersion<T>(v: number, fn: () => T): T {
 /** The same structure under the names the tables use: our catalog says vertebra_T5 / clavicle_left where
  *  TotalSegmentator's class map (and so Mike's table) says vertebrae_T5 / clavicula_left. */
 function spellings(key: string): string[] {
-  return [key, key.replace(/^vertebra_/, "vertebrae_"), key.replace(/^clavicle_/, "clavicula_")];
+  return [key, key.replace(/^vertebra_/, "vertebrae_"), key.replace(/^clavicle_/, "clavicula_"), ...(WHOLE[key] ? [WHOLE[key]] : [])];
 }
+/** A LABEL THE TABLE HAS UNDER ANOTHER NAME takes that color: several of its structures as one (MOOSE's clin_ct_all_bones,
+ *  catalogue.ts ADDED -- both clavicles, both scapulae, the ribs (the color of all but the first), the vertebrae), or
+ *  the same tissue as another model calls it (CADS's head tissues, below). */
+const WHOLE: Record<string, string> = {
+  clavicle: "clavicula_left", scapula: "scapula_left", ribcage: "rib_left_5", spine: "vertebrae",
+  // CADS's head tissues (cads:head, 2026-10-31) where the table has the same tissue under another model's name: the eyeballs,
+  // the head's muscles as skeletal muscle, compact bone as the bone of the skull, the CSF as FreeSurfer's (light blue from
+  // v4). White and gray matter, spongy bone, scalp and blood have no tissue of their own in the table: they keep the
+  // workbook's colors until Mike gives them one.
+  "eye balls": "eyeball_left", "head muscles": "skeletal_muscle", "compact bone": "skull", csf: "CSF",
+};
 
 /** The color a palette version gives a structure, 0-255, or undefined where it gives none (v1: always; the rules
  *  in segment-naming.ts decide). */

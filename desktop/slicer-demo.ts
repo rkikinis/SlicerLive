@@ -39,6 +39,8 @@ if (await mtime(bundle) < srcNewest) {
 }
 
 // 2. static server for this repo (the page + bundles), in a Worker (webview.run blocks the main loop)
+// A server for checks writes no archive list into the databases it serves (desktop/archive.ts; the critic 2026-10-29).
+if (Deno.env.get("ALBULA_ARCHIVE_LISTING") !== "on") Deno.env.set("ALBULA_ARCHIVE_LISTING", "off");
 const worker = new Worker(new URL("./server-worker.ts", import.meta.url), { type: "module" });
 const port = await new Promise<number>((resolve) => { worker.onmessage = (e) => resolve(e.data.port); worker.postMessage({ root: ROOT, port: Number(args.port) }); });
 const origin = `http://127.0.0.1:${port}`;

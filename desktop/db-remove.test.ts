@@ -148,6 +148,83 @@ Deno.test("findings 6, 7, 11, 13: what the question is told; a link hands over i
   assertEquals(trashed.length, 0);
 });
 
+// THE DATABASES SECTION (Ron, 2026-10-29: "List all, provide sliders to add them to the listing"): a database in the
+// databases folder that is not in the list is `found`; its switch puts it in use by its path; Finder is asked only for a
+// folder Albula knows.
+Deno.test("a database in the databases folder and off the list is found, and put back in use by its path", async () => {
+  // NEVER THE PERSON'S OWN FOLDER: this test makes a database in the databases folder. Written first after the file's
+  // last test, which puts the process's own HOME back, it made two in Ron's SlicerAlbulaDatabases (2026-10-29; they went
+  // to the Trash). It stays before that test; this line stops it if it is ever moved after it again.
+  assertEquals(Deno.env.get("HOME"), home, "the test's own home folder");
+  const a = await make("Found again");
+  assertEquals((await call("POST", "/_db/_remove", { id: a.id })).status, 200);
+  const g = await call("GET", "/_db");
+  assertEquals(g.j.folder, `${home}/SlicerAlbulaDatabases`);
+  const found = g.j.found as { path: string; name: string }[];
+  assert(found.some((f) => f.path === a.path && f.name === "Found again"), JSON.stringify(found));
+  const r = await call("POST", "/_db/_register", { path: a.path });
+  assertEquals(r.status, 200, JSON.stringify(r.j));
+  const real = await Deno.realPath(a.path);   // stored as its real path (finding 10)
+  assert((await list()).some((d) => d.path === real));
+  assert(!((await call("GET", "/_db")).j.found as { path: string }[]).some((f) => f.path === a.path || f.path === real), "not found twice");
+});
+
+Deno.test("a path outside the databases folder, or one with no index, is not put in use; Finder only for known folders", async () => {
+  const outside = await Deno.makeTempDir({ prefix: "albula-outside-" });
+  await Deno.writeTextFile(`${outside}/ctkDICOM.sql`, "");
+  assertEquals((await call("POST", "/_db/_register", { path: outside })).status, 400);
+  const plain = `${home}/SlicerAlbulaDatabases/just a folder`;
+  await Deno.mkdir(plain, { recursive: true });
+  assertEquals((await call("POST", "/_db/_register", { path: plain })).status, 400);
+  assertEquals((await call("POST", "/_db/_register", { path: `${home}/SlicerAlbulaDatabases/../SlicerAlbulaDatabases/just a folder` })).status, 400);
+  assertEquals((await call("POST", "/_db/_reveal", { path: outside })).status, 404);
+  assertEquals((await call("POST", "/_db/_reveal", { id: "no-such-database" })).status, 404);
+  await Deno.remove(outside, { recursive: true });
+});
+
+Deno.test("the Databases section's critic, finding 1: a database switched off leaves the shared list", async () => {
+  assertEquals(Deno.env.get("HOME"), home, "the test's own home folder");
+  const a = await make("Shared one");
+  const file = resolveSettingsPath(gallery);
+  const { parseIni, formatIni } = await import("../logic/settings.ts");
+  const ini = parseIni(await Deno.readTextFile(file));
+  ini.set("Sharing", new Map([["databases", a.id], ["networks", ""]]));
+  await writeSettings(file, formatIni(ini));
+  assertEquals((await call("POST", "/_db/_remove", { id: a.id })).status, 200);
+  assertEquals(parseIni(await Deno.readTextFile(file)).get("Sharing")?.get("databases"), "", "its id is off the shared list");
+  // A new database given the same name is not shared by it.
+  const b = await make("Shared one");
+  assertEquals(b.id, a.id);
+  assertEquals(parseIni(await Deno.readTextFile(file)).get("Sharing")?.get("databases"), "");
+});
+
+Deno.test("findings 4 and 10: one switched off elsewhere keeps its row and comes back where it is; paths resolved, hidden refused", async () => {
+  assertEquals(Deno.env.get("HOME"), home, "the test's own home folder");
+  // Elsewhere: a database outside the databases folder, listed, then switched off.
+  const away = `${home}/Away db`;
+  await Deno.mkdir(away);
+  await Deno.copyFile(`${(await make("Template"))!.path}/ctkDICOM.sql`, `${away}/ctkDICOM.sql`);
+  assertEquals((await call("PUT", "/_db", { id: "away", path: away })).status, 200);
+  assertEquals((await call("POST", "/_db/_remove", { id: "away" })).status, 200);
+  const f = ((await call("GET", "/_db")).j.found as { path: string; elsewhere?: boolean; exists: boolean }[]).find((x) => x.path === away);
+  assertEquals([f?.elsewhere, f?.exists], [true, true], "its row stays, switched off, with its path");
+  const on = await call("POST", "/_db/_register", { path: away });
+  assertEquals(on.status, 200, JSON.stringify(on.j));
+  assertEquals((await list()).find((d) => d.id === on.j.id)?.path, await Deno.realPath(away), "listed where it is, not moved");
+  assert(!((await call("GET", "/_db")).j.found as { path: string }[]).some((x) => x.path === away), "and no longer found");
+  // In the folder: ".." and a link come in as the real path; a hidden folder is refused.
+  const t = await make("Through dots");
+  assertEquals((await call("POST", "/_db/_remove", { id: t.id })).status, 200);
+  const viaDots = await call("POST", "/_db/_register", { path: `${home}/SlicerAlbulaDatabases/../SlicerAlbulaDatabases/Through dots/` });
+  assertEquals(viaDots.status, 200, JSON.stringify(viaDots.j));
+  assertEquals((await list()).find((d) => d.id === viaDots.j.id)?.path, await Deno.realPath(t.path));
+  const h = await make("Hide me");
+  assertEquals((await call("POST", "/_db/_remove", { id: h.id })).status, 200);
+  const hidden = `${home}/SlicerAlbulaDatabases/.Hide me`;
+  await Deno.rename(h.path, hidden);
+  assertEquals((await call("POST", "/_db/_register", { path: hidden })).status, 400);
+});
+
 Deno.test("an unknown database: 404, the list unchanged", async () => {
   const n = (await list()).length;
   assertEquals((await call("POST", "/_db/_remove", { id: "no-such-database", trash: true })).status, 404);
