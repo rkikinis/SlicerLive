@@ -52,7 +52,7 @@ export function insidePolygon(x: number, y: number, poly: readonly (readonly [nu
  * Write `value` into every voxel of `labelmap` inside `points` (RAS, on one slice plane with unit `normal`). Returns
  * the number of voxels written. `ijkToRAS` is the label map's row-major 4x4 and `invIjk` its inverse.
  */
-export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number, number], ijkToRAS: readonly number[], invIjk: readonly number[], points: readonly Vec3[], normal: Vec3, value: number, may?: (cur: number) => boolean): number {
+export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number, number], ijkToRAS: readonly number[], invIjk: readonly number[], points: readonly Vec3[], normal: Vec3, value: number, may?: (cur: number) => boolean, mark?: Uint8Array): number {
   if (points.length < 3) return 0;
   const [nx, ny, nz] = dims;
   const m = ijkToRAS, n = unit(normal);
@@ -82,6 +82,7 @@ export function fillPolygon(labelmap: Uint8Array, dims: readonly [number, number
     const at = k * nx * ny + j * nx + i;
     if (may && !may(labelmap[at])) continue;     // the editor's "over" rule (logic/segment-effects.ts canWrite)
     labelmap[at] = value;
+    if (mark) mark[at] = 1;
     written++;
   }
   return written;

@@ -8,6 +8,8 @@
 // the same for the ray cast: the LIGHTING direction is taken from this blurred copy, read with the
 // card's own trilinear filter, while the position still comes from the labels themselves so a
 // vessel one or two voxels wide is not blurred out of existence.
+// (From solid-label-versions.ts v2 the position comes from the blurred copy too, and from v3 each field chooses how
+// wide the blur is from its voxels' anisotropy: solidBlurPasses.)
 //
 // How. Passes of a five-tap Gaussian (sigma about one voxel each), several per axis, over a packed byte
 // buffer -- a storage texture of single bytes is not in core WebGPU -- then one copy into an r8unorm
@@ -38,7 +40,7 @@ export function lonePeak(passes: readonly [number, number, number]): number {
  * wide as a step can interpolate across it (the stomach and heart still showed broad contour lines
  * at one pass, 2026-09-23).
  */
-export const smoothPasses: [number, number, number] = [3, 3, 1];
+export const smoothPasses: [number, number, number] = [3, 3, 1];   // v1 and v2; v3 chooses per field (solidBlurPasses)
 /**
  * THE "NOTHING HERE" CUT-OFF of the smoothed copy: half of what a lone labeled voxel reaches under the
  * passes above (0.011 for [3,3,1]), and never above 0.02. A fixed 0.02 sat one byte under the lone
@@ -46,7 +48,10 @@ export const smoothPasses: [number, number, number] = [3, 3, 1];
  * 2026-09-23, finding 12). Baked into the shaders when they are made; the live tuning hook
  * __smoothPasses does not move it.
  */
-export const EMPTY_CUTOFF = Math.min(0.02, lonePeak(smoothPasses) / 2);
+export const EMPTY_CUTOFF = emptyCutoff(smoothPasses);
+/** The "nothing here" cut-off for a smoothed copy made with these passes (above). From solid-label-versions.ts v3 each
+ *  field chooses its own passes, so each has its own cut-off; the block map and the field's shader take it from here. */
+export function emptyCutoff(passes: readonly [number, number, number]): number { return Math.min(0.02, lonePeak(passes) / 2); }
 
 const MASK_X_WGSL = /* wgsl */ `
 @group(0) @binding(0) var labs : texture_3d<u32>;
@@ -71,6 +76,68 @@ fn m(x : i32, y : i32, z : i32) -> f32 {
     word = word | (u32(round(clamp(s, 0.0, 1.0) * 255.0)) << (8u * b));
   }
   dst[(id.z * P.y + id.y) * P.w + id.x] = word;
+}`;
+
+/**
+ * LABELS THAT AGREE WITH THE SMOOTHED COPY (solid-label-versions.ts, v2): inside it (the copy at one half or more) a
+ * voxel draws as the visible structure painted there, or the nearest visible one within 2 voxels (a blur of 3 passes
+ * reaches about that far; at 16 passes it reaches further, so a few voxels get no label: critic 2026-11-06, finding 6); outside it, as nothing. M.x = 0 writes the labels as painted instead (the share lost was too large). Every
+ * run also counts the visible painted voxels and those outside the smoothed copy (counts[0], counts[1]), one global add
+ * per workgroup. Writes packed bytes for a copy to an r8uint texture, as the mask pass does.
+ */
+const AGREE_WGSL = /* wgsl */ `
+@group(0) @binding(0) var smoothT : texture_3d<f32>;
+@group(0) @binding(1) var labs : texture_3d<u32>;
+@group(0) @binding(2) var lut : texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> dst : array<u32>;
+@group(0) @binding(4) var<uniform> P : vec4<u32>;     // nx, ny, nz, words per row
+@group(0) @binding(5) var<storage, read_write> counts : array<atomic<u32>, 2>;
+@group(0) @binding(6) var<uniform> M : vec4<u32>;     // x: 1 = agreeing labels, 0 = the labels as painted
+var<workgroup> wPainted : atomic<u32>;
+var<workgroup> wOutside : atomic<u32>;
+fn vis(l : u32) -> bool { return l != 0u && textureLoad(lut, vec2<i32>(i32(l), 1), 0).a > 0.001; }
+fn inside(q : vec3<i32>) -> bool { return textureLoad(smoothT, q, 0).r >= 0.5; }
+fn agree(x : i32, y : i32, z : i32, l : u32) -> u32 {
+  if (!inside(vec3<i32>(x, y, z))) { return 0u; }
+  if (vis(l)) { return l; }
+  var best = 0u; var bd = 1000;
+  for (var dz = -2; dz <= 2; dz = dz + 1) {
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+      for (var dx = -2; dx <= 2; dx = dx + 1) {
+        let q = vec3<i32>(x + dx, y + dy, z + dz);
+        if (any(q < vec3<i32>(0)) || q.x >= i32(P.x) || q.y >= i32(P.y) || q.z >= i32(P.z)) { continue; }
+        let d = dx * dx + dy * dy + dz * dz;
+        if (d >= bd) { continue; }
+        let lq = textureLoad(labs, q, 0).r;
+        if (vis(lq)) { bd = d; best = lq; }
+      }
+    }
+  }
+  return best;
+}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3<u32>, @builtin(local_invocation_index) li : u32) {
+  let valid = id.x < P.w && id.y < P.y && id.z < P.z;
+  var painted = 0u; var outside = 0u;
+  if (valid) {
+    var word = 0u;
+    for (var b = 0u; b < 4u; b = b + 1u) {
+      let x = id.x * 4u + b;
+      if (x >= P.x) { continue; }
+      let l = textureLoad(labs, vec3<i32>(i32(x), i32(id.y), i32(id.z)), 0).r;
+      if (vis(l)) { painted = painted + 1u; if (!inside(vec3<i32>(i32(x), i32(id.y), i32(id.z)))) { outside = outside + 1u; } }
+      let v = select(l, agree(i32(x), i32(id.y), i32(id.z), l), M.x == 1u);
+      word = word | ((v & 255u) << (8u * b));
+    }
+    dst[(id.z * P.y + id.y) * P.w + id.x] = word;
+  }
+  if (painted > 0u) { atomicAdd(&wPainted, painted); }
+  if (outside > 0u) { atomicAdd(&wOutside, outside); }
+  workgroupBarrier();
+  if (li == 0u) {
+    let a = atomicLoad(&wPainted); let o = atomicLoad(&wOutside);
+    if (a > 0u) { atomicAdd(&counts[0], a); }
+    if (o > 0u) { atomicAdd(&counts[1], o); }
+  }
 }`;
 
 const BLUR_WGSL = /* wgsl */ `
@@ -123,6 +190,7 @@ const BRICK_WGSL = /* wgsl */ `
 @group(0) @binding(2) var lut : texture_2d<f32>;
 @group(0) @binding(3) var out : texture_storage_3d<r32uint, write>;
 @group(0) @binding(4) var<uniform> P : vec4<u32>;     // nx, ny, nz, _
+@group(0) @binding(5) var<uniform> C : vec4<f32>;     // x: the field's "nothing here" cut-off (emptyCutoff)
 @compute @workgroup_size(4, 4, 4) fn main(@builtin(global_invocation_id) id : vec3<u32>) {
   let bd = textureDimensions(out);
   if (id.x >= bd.x || id.y >= bd.y || id.z >= bd.z) { return; }
@@ -147,7 +215,7 @@ const BRICK_WGSL = /* wgsl */ `
   }
   var r = ${BRICK_MIXED}u;
   if (thin) { r = ${BRICK_THIN}u; }
-  if (mx < ${EMPTY_CUTOFF.toFixed(5)} && !thin) { r = 0u; }   // a lone labeled voxel is never "empty" (critic, finding 12)
+  if (mx < C.x && !thin) { r = 0u; }   // a lone labeled voxel is never "empty" (critic, finding 12)
   else if (!mixed && !outside && lab != 0u && mn >= 0.5) { r = lab; }
   textureStore(out, vec3<i32>(id), vec4<u32>(r, 0u, 0u, 0u));
 }`;
@@ -194,7 +262,7 @@ export function makeBrickTexture(dev: GPUDevice, dims: readonly [number, number,
   });
 }
 
-interface Pipes { mask: GPUComputePipeline; blur: GPUComputePipeline; brick: GPUComputePipeline; brick2: GPUComputePipeline }
+interface Pipes { mask: GPUComputePipeline; blur: GPUComputePipeline; agree: GPUComputePipeline; drawn: GPUComputePipeline; brick: GPUComputePipeline; brick2: GPUComputePipeline }
 const pipes = new WeakMap<GPUDevice, Pipes>();
 function pipesFor(dev: GPUDevice): Pipes {
   let p = pipes.get(dev);
@@ -202,12 +270,29 @@ function pipesFor(dev: GPUDevice): Pipes {
     p = {
       mask: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: MASK_X_WGSL }), entryPoint: "main" } }),
       blur: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } }),
+      agree: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: AGREE_WGSL }), entryPoint: "main" } }),
+      drawn: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: DRAWN_WGSL }), entryPoint: "main" } }),
       brick: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BRICK_WGSL }), entryPoint: "main" } }),
       brick2: dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BRICK2_WGSL }), entryPoint: "main" } }),
     };
     pipes.set(dev, p);
   }
   return p;
+}
+
+/** The block map's cut-off as a uniform; the caller destroys it after submitting (the card frees it once run). */
+function cutoffUniform(dev: GPUDevice, cutoff: number): GPUBuffer {
+  const u = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(u, 0, new Float32Array([cutoff, 0, 0, 0]));
+  return u;
+}
+
+/** An r8uint 3D texture of these dims for the labels that agree with the smoothed copy (`buildSmoothSolid`'s `agree`). */
+export function makeAgreeLabelsTexture(dev: GPUDevice, dims: readonly [number, number, number]): GPUTexture {
+  return dev.createTexture({
+    label: "solid labels, agreeing", size: dims as [number, number, number], dimension: "3d", format: "r8uint",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
 }
 
 /** An r8unorm 3D texture of these dims, the target `buildSmoothSolid` writes. The caller owns it. */
@@ -264,6 +349,7 @@ export function buildSmoothSolid(dev: GPUDevice, labels: GPUTexture, lut: GPUTex
   }
   pass.end();
   enc.copyBufferToTexture({ buffer: src, bytesPerRow: rowBytes, rowsPerImage: ny }, { texture: target }, [nx, ny, nz]);
+  const C = cutoffUniform(dev, emptyCutoff(passes));
   if (bricks) {
     const bp = enc.beginComputePass();
     const { brick } = pipesFor(dev);
@@ -271,7 +357,7 @@ export function buildSmoothSolid(dev: GPUDevice, labels: GPUTexture, lut: GPUTex
     bp.setBindGroup(0, dev.createBindGroup({ layout: brick.getBindGroupLayout(0), entries: [
       { binding: 0, resource: target.createView() }, { binding: 1, resource: labels.createView() },
       { binding: 2, resource: lut.createView() }, { binding: 3, resource: bricks.createView() },
-      { binding: 4, resource: { buffer: P } },
+      { binding: 4, resource: { buffer: P } }, { binding: 5, resource: { buffer: C } },
     ] }));
     bp.dispatchWorkgroups(Math.ceil(bricks.width / 4), Math.ceil(bricks.height / 4), Math.ceil(bricks.depthOrArrayLayers / 4));
     bp.end();
@@ -288,6 +374,118 @@ export function buildSmoothSolid(dev: GPUDevice, labels: GPUTexture, lut: GPUTex
   }
   dev.queue.submit([enc.finish()]);
   // Destroying after submit is allowed: the card frees them once the work above has run.
-  for (const buf of [P, ...ax]) buf.destroy();
+  for (const buf of [P, C, ...ax]) buf.destroy();
   releaseSolidScratch(dev);
+}
+
+/**
+ * THE LABELS THE SOLID LOOK DRAWS WITH (solid-label-versions.ts v2), from a smoothed copy already made: "agree" writes
+ * labels that agree with it into `out` (r8uint, the field's dims), "painted" the labels as painted, "count" nothing.
+ * Resolves to the visible painted voxels and those of them outside the smoothed copy: count first, choose, then write
+ * once, so the view never shows the copy that was not chosen.
+ */
+export async function buildAgreeLabels(dev: GPUDevice, smooth: GPUTexture, labels: GPUTexture, lut: GPUTexture, dims: readonly [number, number, number], out: GPUTexture, mode: "count" | "agree" | "painted"): Promise<{ painted: number; outside: number }> {
+  const agree = mode === "agree";
+  const [nx, ny, nz] = dims;
+  const rowBytes = Math.ceil(nx / 256) * 256, words = rowBytes / 4;
+  // THE SMOOTHING'S SCRATCH AGAIN, not a third buffer (critic 2026-11-06, finding 7: 1.25 GB at the peak on 768x768x709,
+  // the figure solid-scratch.ts records as having reset Ron's window). Work runs in order on one queue.
+  const buf = solidScratch(dev, "a", rowBytes * ny * nz);
+  const counts = dev.createBuffer({ size: 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+  const read = dev.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const P = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const M = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(P, 0, new Uint32Array([nx, ny, nz, words]));
+  dev.queue.writeBuffer(M, 0, new Uint32Array([agree ? 1 : 0, 0, 0, 0]));
+  dev.queue.writeBuffer(counts, 0, new Uint32Array([0, 0]));
+  const { agree: ag } = pipesFor(dev);
+  const enc = dev.createCommandEncoder({ label: "solid labels" });
+  const pass = enc.beginComputePass();
+  pass.setPipeline(ag);
+  pass.setBindGroup(0, dev.createBindGroup({ layout: ag.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: smooth.createView() }, { binding: 1, resource: labels.createView() }, { binding: 2, resource: lut.createView() },
+    { binding: 3, resource: { buffer: buf } }, { binding: 4, resource: { buffer: P } }, { binding: 5, resource: { buffer: counts } },
+    { binding: 6, resource: { buffer: M } },
+  ] }));
+  pass.dispatchWorkgroups(Math.ceil(words / 64), ny, nz);
+  pass.end();
+  if (mode !== "count") enc.copyBufferToTexture({ buffer: buf, bytesPerRow: rowBytes, rowsPerImage: ny }, { texture: out }, [nx, ny, nz]);
+  enc.copyBufferToBuffer(counts, 0, read, 0, 8);
+  dev.queue.submit([enc.finish()]);
+  for (const b of [counts, P, M]) b.destroy();   // freed once the work above has run
+  releaseSolidScratch(dev);
+  await read.mapAsync(GPUMapMode.READ);
+  const c = new Uint32Array(read.getMappedRange().slice(0));
+  read.unmap(); read.destroy();
+  return { painted: c[0], outside: c[1] };
+}
+
+/** Per structure, its visible painted voxels and those of them drawn: the labels the solid look draws with hold it there. */
+const DRAWN_WGSL = /* wgsl */ `
+@group(0) @binding(0) var labs : texture_3d<u32>;
+@group(0) @binding(1) var drawnT : texture_3d<u32>;
+@group(0) @binding(2) var lut : texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> counts : array<atomic<u32>, 512>;   // l: painted; 256 + l: drawn
+@group(0) @binding(4) var<uniform> P : vec4<u32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id : vec3<u32>) {
+  if (id.x >= P.x || id.y >= P.y || id.z >= P.z) { return; }
+  let q = vec3<i32>(id);
+  let l = textureLoad(labs, q, 0).r;
+  if (l == 0u || textureLoad(lut, vec2<i32>(i32(l), 1), 0).a <= 0.001) { return; }
+  atomicAdd(&counts[l], 1u);
+  if (textureLoad(drawnT, q, 0).r == l) { atomicAdd(&counts[256u + l], 1u); }
+}`;
+
+/** WHAT THE SOLID LOOK LEAVES OUT, PER STRUCTURE (critic 2026-11-06, finding 3): `painted[l]` and `drawn[l]`, for the line that says so. */
+export async function countDrawn(dev: GPUDevice, labels: GPUTexture, drawn: GPUTexture, lut: GPUTexture, dims: readonly [number, number, number]): Promise<{ painted: Uint32Array; drawn: Uint32Array }> {
+  const [nx, ny, nz] = dims;
+  const counts = dev.createBuffer({ size: 2048, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const read = dev.createBuffer({ size: 2048, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const P = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(P, 0, new Uint32Array([nx, ny, nz, 0]));
+  const pipe = pipesFor(dev).drawn;
+  const enc = dev.createCommandEncoder({ label: "solid labels drawn, per structure" });
+  const pass = enc.beginComputePass();
+  pass.setPipeline(pipe);
+  pass.setBindGroup(0, dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: labels.createView() }, { binding: 1, resource: drawn.createView() }, { binding: 2, resource: lut.createView() },
+    { binding: 3, resource: { buffer: counts } }, { binding: 4, resource: { buffer: P } },
+  ] }));
+  pass.dispatchWorkgroups(Math.ceil(nx / 64), ny, nz);
+  pass.end();
+  enc.copyBufferToBuffer(counts, 0, read, 0, 2048);
+  dev.queue.submit([enc.finish()]);
+  counts.destroy(); P.destroy();
+  await read.mapAsync(GPUMapMode.READ);
+  const c = new Uint32Array(read.getMappedRange().slice(0));
+  read.unmap(); read.destroy();
+  return { painted: c.slice(0, 256), drawn: c.slice(256, 512) };
+}
+
+/** The block maps (BRICK_WGSL, BRICK2_WGSL) from a smoothed copy and the labels the solid look draws with. */
+export function buildBricks(dev: GPUDevice, smooth: GPUTexture, labels: GPUTexture, lut: GPUTexture, dims: readonly [number, number, number], bricks: GPUTexture, bricks2: GPUTexture, cutoff = EMPTY_CUTOFF): void {
+  const [nx, ny, nz] = dims;
+  const P = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(P, 0, new Uint32Array([nx, ny, nz, Math.ceil(nx / 256) * 64]));
+  const C = cutoffUniform(dev, cutoff);
+  const enc = dev.createCommandEncoder({ label: "solid block maps" });
+  const { brick, brick2 } = pipesFor(dev);
+  const bp = enc.beginComputePass();
+  bp.setPipeline(brick);
+  bp.setBindGroup(0, dev.createBindGroup({ layout: brick.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: smooth.createView() }, { binding: 1, resource: labels.createView() },
+    { binding: 2, resource: lut.createView() }, { binding: 3, resource: bricks.createView() },
+    { binding: 4, resource: { buffer: P } }, { binding: 5, resource: { buffer: C } },
+  ] }));
+  bp.dispatchWorkgroups(Math.ceil(bricks.width / 4), Math.ceil(bricks.height / 4), Math.ceil(bricks.depthOrArrayLayers / 4));
+  bp.end();
+  const cp = enc.beginComputePass();
+  cp.setPipeline(brick2);
+  cp.setBindGroup(0, dev.createBindGroup({ layout: brick2.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: bricks.createView() }, { binding: 1, resource: bricks2.createView() },
+  ] }));
+  cp.dispatchWorkgroups(Math.ceil(bricks2.width / 4), Math.ceil(bricks2.height / 4), Math.ceil(bricks2.depthOrArrayLayers / 4));
+  cp.end();
+  dev.queue.submit([enc.finish()]);
+  P.destroy(); C.destroy();
 }

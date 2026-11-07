@@ -35,6 +35,10 @@ import type { MrsonNode } from "./mrson.ts";
 import { companionItem, frameMate, sequencePlays } from "../logic/sequences.ts";
 import { startWork, type Work } from "./working.ts";
 import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
+import { solidLabelsVersion } from "./solid-label-versions.ts";
+
+/** The solid look says so when more than this share of a structure is not drawn (the share where v2 switched back, solid-label-versions.ts MAX_LOST). */
+const MAX_LEFT_OUT = 0.05;
 
 export type Vec3 = [number, number, number];
 
@@ -1393,7 +1397,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
   // drawn by one ColorizeField with no CT. The members of a sequence stay with the colored volume, which
   // steps with the frames. (Ron, 2026-09-23: "keep the surfaces until we know for sure that it works";
   // 2026-10-21, option B: surface models are an export only, render/surface-export.ts.)
-  private solidGroups = new Map<string, { field: ColorizeField; labels: GPUTexture; sig: string; palSig: string; drawnKey: string; bytes: number }>();
+  private solidGroups = new Map<string, { field: ColorizeField; labels: GPUTexture; sig: string; palSig: string; drawnKey: string; bytes: number; names?: Map<number, string> }>();
   private finishWatch?: () => void;
   private solidScheduled = false;
   private lastScene?: LiveScene;
@@ -1406,9 +1410,34 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     queueMicrotask(() => { this.solidScheduled = false; this.updateSolid(scene); });
   }
   /** What the solid look is drawing now, by group: for the status line and for checking. */
-  solidReport(): { group: string; segmentations: string[] }[] {
-    return [...this.solidGroups.entries()].map(([k, g]) => ({ group: k, segmentations: g.drawnKey ? g.drawnKey.split("|") : [] }));
+  solidReport(): { group: string; segmentations: string[]; labelsVersion: number; notDrawn: { name: string; painted: number; drawn: number }[] }[] {
+    return [...this.solidGroups.entries()].map(([k, g]) => ({ group: k, segmentations: g.drawnKey ? g.drawnKey.split("|") : [], labelsVersion: g.field.solidLabels.version, notDrawn: this.notDrawnOf(g) }));
   }
+  /** The structures of a group the solid look leaves out, in whole or in more than MAX_LEFT_OUT of their voxels. */
+  private notDrawnOf(g: { field: ColorizeField; names?: Map<number, string> }): { name: string; painted: number; drawn: number }[] {
+    const d = g.field.solidDrawn; if (!d) return [];
+    const out: { name: string; painted: number; drawn: number }[] = [];
+    for (let l = 1; l < 256; l++) {
+      const painted = d.painted[l], drawn = d.drawn[l];
+      if (painted && 1 - drawn / painted > MAX_LEFT_OUT) out.push({ name: g.names?.get(l) ?? `Structure ${l}`, painted, drawn });
+    }
+    return out.sort((a, b) => a.drawn / a.painted - b.drawn / b.painted);
+  }
+  /**
+   * WHAT THE 3D VIEW LEAVES OUT IS SAID (critic 2026-11-06, finding 3): the clean edges drop what is thin or small against
+   * the blur, and a share over a whole field hides it (2 % of a field, and 3 of 10 outlined lymph nodes gone). Per structure,
+   * since a count of connected parts is not made; so a lost part of a structure that has others shows as a share.
+   */
+  private sayNotDrawn() {
+    const all = [...this.solidGroups.values()].flatMap((g) => this.notDrawnOf(g));
+    const words = all.slice(0, 6).map((x) => x.drawn ? `${x.name}: ${Math.round(100 * (1 - x.drawn / x.painted))} % of it` : `${x.name}: all of it`);
+    const more = all.length > 6 ? `; ${all.length - 6} more` : "";
+    const said = all.length ? `Too thin or small to draw in 3D, still in the slices: ${words.join("; ")}${more}` : "";
+    if (said === this.solidThinSaid) return;
+    this.solidThinSaid = said;
+    if (said) (globalThis as unknown as { __shell?: { setStatus?: (t: string) => void } }).__shell?.setStatus?.(said);
+  }
+  private solidThinSaid = "";
   /**
    * THE ORDER SEGMENTATIONS ARE DRAWN IN, where they overlap -- ONE RULE FOR THE SLICES AND FOR 3D (critic,
    * 2026-09-23, finding 5: the slices put the later one on top, the solid look the smaller one, and the
@@ -1492,6 +1521,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
       const pal: { c: number[]; a: number; m?: Finish }[] = [];
       const drawn: string[] = [];
       const mergeParts: string[] = [];
+      const names = new Map<number, string>();
       for (const s of w.slots) {
         const segs = (s.lastDisp?.segments as Segment[] | undefined) ?? [];
         const merged = mergedColours(mergedOf(s.lastDisp));
@@ -1509,6 +1539,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
           const a = typeof sg.opacity === "number" ? Math.max(0, Math.min(1, sg.opacity)) : 1;
           const c = merged.get(l) ?? sg.color ?? (p ? [p[l * 4], p[l * 4 + 1], p[l * 4 + 2]] : [0.8, 0.8, 0.8]);
           const m = finishOfSegment(sg.name);
+          names.set(next, sg.name ?? `Segment ${l}`);
           remap[l] = next; pal[next] = m ? { c, a, m } : { c, a }; next++;
         }
         inputs.push({ labels: s.baker.labelTexture(), remap });
@@ -1536,13 +1567,17 @@ export class SegmentationDisplayableManager implements DisplayableManager {
           clippable: false,                      // the crop box does not cut the anatomy (Ron, 2026-09-24: "no")
         });
         field.onlyVisibleLabels = true;           // the merge writes visible structures only
-        const bytes = 2 * w.dims[0] * w.dims[1] * w.dims[2];   // the merged labels and the smoothed copy
+        field.onChanged = () => scene.view?.redraw?.();   // which labels it draws with came back (solid-label-versions.ts)
+        field.onDrawnCounted = () => this.sayNotDrawn();
+        // The merged labels and the smoothed copy, and from v2 the labels that agree with it (critic 2026-11-06, finding 7).
+        const bytes = (solidLabelsVersion() >= 2 ? 3 : 2) * w.dims[0] * w.dims[1] * w.dims[2];
         g = { field, labels, sig: "", palSig: "", drawnKey: "", bytes };
         this.solidGroups.set(key, g);
         const gm = globalThis as unknown as { __gpuMB?: number };
         gm.__gpuMB = (gm.__gpuMB ?? 0) + Math.round(bytes / 1048576);
         publish = true;
       }
+      g.names = names;
       if (g.sig !== mergeSig) {
         mergeLabels(this.dev, inputs, w.dims as [number, number, number], g.labels);
         g.field.labelsChanged();                // new voxels: the smoothed copy is made again
@@ -3130,6 +3165,7 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
         opacityUnitDistance: VolumeRenderingDisplayableManager.colorizeUnit(nodeVoxel({ ijkToRAS: slot.image.ijkToRAS })),
       },
     );
+    slot.colorField.onChanged = () => scene.view?.redraw?.();   // which labels it draws with came back (solid-label-versions.ts)
     // COLOR AND OPACITY, then flush. The palette starts as all zeros and setSegmentColor writes only
     // RGB, so a segment left at alpha 0 has dens = pal.a * occupancy = 0 and every one of its voxels
     // is discarded -- the volume renders as context alone: dark, colorless, and unaffected by CT

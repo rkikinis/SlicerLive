@@ -1243,22 +1243,13 @@ button.sl-primary:hover { background: var(--sl-accent-hover); }
 .sl-r-control > input[type="range"] { width: 100%; min-width: 0; }
 .sl-modal-input { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 6px 8px; font: inherit; border-radius: 6px; border: 1px solid var(--sl-control-edge); background: var(--sl-fill-hover); color: inherit; }
 
-/* THE LOAD / SAVE GRAPH (load-panel.ts, 2026-09-22): three boxes, four arrows that are buttons. */
-.sl-io { width: 100%; display: block; }
-.sl-io-box { fill: var(--sl-bg); stroke: var(--sl-line-strong); stroke-width: 1; }
-.sl-io-scene { stroke: var(--sl-view-yellow); }
-.sl-io-db, .sl-io-files { stroke: var(--sl-view-green); }
-.sl-io-lbl { fill: var(--sl-fg); font: 600 13px var(--sl-font); }
-.sl-io-sub { fill: var(--sl-fg-muted); font: 11px var(--sl-font); }
-.sl-io-arrow { cursor: pointer; outline: none; }
-.sl-io-pill { fill: var(--sl-bg); stroke: var(--sl-line-strong); stroke-width: 1; transition: fill 90ms; }
-.sl-io-line { stroke: var(--sl-line-strong); stroke-width: 2; }
-.sl-io-word { fill: var(--sl-fg); font: 600 12px var(--sl-font); pointer-events: none; }
-.sl-io-arrow:hover .sl-io-pill, .sl-io-arrow:focus-visible .sl-io-pill { fill: var(--sl-fill-hover); stroke: rgba(255, 255, 255, .32); }
-.sl-io-arrow:active .sl-io-pill { fill: var(--sl-surface-3); }
-.sl-io-arrow.sl-io-on .sl-io-pill { fill: var(--sl-accent); stroke: var(--sl-accent); }
-.sl-io-arrow.sl-io-on .sl-io-word { fill: var(--sl-accent-fg); }
-.sl-io-arrow.sl-io-on .sl-io-line { stroke: var(--sl-accent); }
+/* LOAD OR SAVE, AND WHERE (load-panel.ts, 2026-11-01, in place of the 2026-09-22 graph): two choices, the chosen one
+   outlined, not yellow (Ron: a yellow Load "would lead me to click load"); the DICOM database wide, Files narrow. */
+.sl-io-dir, .sl-io-where { display: flex; gap: 6px; margin: 0 0 8px; }
+.sl-io-dir button { flex: 1; }
+.sl-io-where button { flex: 1; min-height: 44px; font-size: 14px; }
+.sl-io-where button.sl-io-wdb { flex: 2; font-weight: 600; }
+.sl-io-dir button[aria-pressed=true], .sl-io-where button[aria-pressed=true] { outline: 2px solid var(--sl-accent); outline-offset: -1px; font-weight: 600; }
 .sl-io-panes > [data-pane] { margin-top: 4px; }
 .sl-save-item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--sl-line-faint); }
 .sl-save-item .sl-save-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1338,9 +1329,6 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 .sl-3d-bar button.sl-hit.sl-hit, .sl-transport button.sl-hit.sl-hit, .sl-tool.sl-hit.sl-hit {
   background: var(--sl-accent-wash); box-shadow: inset 0 0 0 2px var(--sl-accent);
 }
-/* The four arrows of the Load / Save graph are `g[role=button]`, not buttons -- they are the front
-   door of that module and get the same beat on their pill. */
-.sl-io-arrow.sl-hit .sl-io-pill { fill: var(--sl-accent-hover); }
 
 /* The scene's identity at the top of the Scene module: what was saved, and which version. */
 .sl-scene-id { margin: 0 0 6px; padding: 4px 8px; border-left: 3px solid var(--sl-accent); background: var(--sl-accent-wash); border-radius: 4px; }
@@ -1441,3 +1429,7 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 /* Controls for development only (Settings › For developers; 2026-10-14): hidden unless that setting is on. */
 html:not(.sl-dev) .sl-dev-step { display: none !important; }
 
+/* Grow from seeds: which the brush paints, inside or outside (Ron, 2026-11-01) -- the one pressed is outlined, as a chosen
+   tool is; yellow stays the one thing to do in the section, Grow (critic 2026-11-01, nit b). */
+.sl-grow-pick { gap: 7px; }
+.sl-grow-pick button[aria-pressed=true] { outline: 2px solid var(--sl-accent); outline-offset: -1px; font-weight: 600; }

@@ -9,7 +9,8 @@
 // address (the default gateway's, from the system's own `route` and `arp`; a Wi-Fi name would need the location
 // permission). macOS shows that address only to an app it allows on the local network (System Settings › Privacy &
 // Security › Local Network; measured 2026-10-28: from a process without it, `arp` says "no entry"); without it this Mac
-// does not share, and says why -- never a weaker sign such as the router's address alone, which many networks share.
+// does not share, and says why. A router whose address many networks share (HSRP, VRRP; hospitals) cannot tell this
+// network from others, so such a network is allowed only until midnight, never for good (allowedOn; Ron, 2026-11-03).
 // Anywhere else nothing listens and nothing is announced; checked every 20 seconds and on every change.
 //
 // ROUTES (the page on this Mac only; the server refuses other hosts and origins):
@@ -28,12 +29,36 @@ import { registeredDatabases } from "./db-serve.ts";
 
 export const SHARING_SECTION = "Sharing";
 export const SHARING_PORT = 8443;
-interface Shared { ids: string[]; networks: string[] }
+/** `temporary`: a network whose router's address many networks share, allowed until a time (the next midnight). */
+interface Shared { ids: string[]; networks: string[]; temporary?: { id: string; until: number } }
+const parseTemporary = (v: string | undefined): Shared["temporary"] => {
+  const m = /^([0-9a-f]{16})@(\d+)$/.exec((v ?? "").trim());
+  return m ? { id: m[1], until: Number(m[2]) } : undefined;
+};
 
 async function readShared(galleryRoot?: string): Promise<Shared> {
   const sec = parseIni(await readSettings(resolveSettingsPath(galleryRoot))).get(SHARING_SECTION);
   const list = (k: string) => (sec?.get(k) ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-  return { ids: list("databases"), networks: list("networks") };
+  return { ids: list("databases"), networks: list("networks"), temporary: parseTemporary(sec?.get("temporary")) };
+}
+
+/**
+ * WHETHER THIS MAC SHARES ON THIS NETWORK (Ron, 2026-11-03: "option 1"). A network known by its own
+ * router's address: when it was allowed. A network whose router uses an address many networks share (HSRP, VRRP):
+ * never for good, only until the midnight after Touch ID allowed it, because
+ * another network with the same router address would pass as this one. The pairing (six digits, Touch ID, the pinned
+ * certificate) is the lock on either; this is the second one.
+ */
+export function allowedOn(s: Pick<Shared, "networks" | "temporary">, net: Network | undefined, now = Date.now()): boolean {
+  if (!net) return false;
+  if (net.sharedRouter) return s.temporary?.id === net.id && now < s.temporary.until && s.temporary.until - now <= 24 * 3600_000;
+  return s.networks.includes(net.id);
+}
+/** The next midnight, this Mac's time. */
+export function nextMidnight(now = Date.now()): number {
+  const d = new Date(now);
+  d.setHours(24, 0, 0, 0);
+  return d.getTime();
 }
 /**
  * A DATABASE THAT LEAVES THE LIST LEAVES THE SHARED LIST TOO (critic 2026-10-29, Databases section, finding 1): the shared
@@ -50,10 +75,11 @@ async function changeShared(galleryRoot: string | undefined, f: (s: Shared) => v
   return await withSettingsLock(file, async () => {
     const ini = parseIni(await readSettings(file));
     const sec = ini.get(SHARING_SECTION) ?? new Map<string, string>();
-    const s: Shared = { ids: (sec.get("databases") ?? "").split(",").filter(Boolean), networks: (sec.get("networks") ?? "").split(",").filter(Boolean) };
+    const s: Shared = { ids: (sec.get("databases") ?? "").split(",").filter(Boolean), networks: (sec.get("networks") ?? "").split(",").filter(Boolean), temporary: parseTemporary(sec.get("temporary")) };
     f(s);
     sec.set("databases", [...new Set(s.ids)].join(","));
     sec.set("networks", [...new Set(s.networks)].join(","));
+    if (s.temporary) sec.set("temporary", `${s.temporary.id}@${s.temporary.until}`); else sec.delete("temporary");
     ini.set(SHARING_SECTION, sec);
     await writeSettings(file, formatIni(ini));
     return s;
@@ -67,7 +93,7 @@ let contacted = "";
  *  routers of VRRP (00:00:5e:00:01/02:xx) and HSRP (00:00:0c:07:ac:xx, 00:00:0c:9f:fx), common in hospitals and hotels
  *  (the critic 2026-10-28, finding 6). */
 const SHARED_ROUTER = /^(00:00:5e:00:0[12]|00:00:0c:07:ac|00:00:0c:9f:f)/;
-export interface Network { id: string; iface: string; address: string }
+export interface Network { id: string; iface: string; address: string; /** its router's address is one many networks share */ sharedRouter?: boolean }
 /** This network: by its router's hardware address and its own address (a digest), the interface it is reached on, and
  *  this Mac's address there (where sharing listens; finding 6: it listened on every connection). Undefined when there
  *  is no router, macOS does not show it to Albula, or it cannot be told from others -- `networkWhy` says which. */
@@ -88,9 +114,12 @@ export async function currentNetwork(): Promise<Network | undefined> {
   if (!mac && contacted !== gw) { contacted = gw; await fetch(`http://${gw}/`, { signal: AbortSignal.timeout(1500) }).then((r) => r.body?.cancel()).catch(() => {}); mac = await macOf(); }   // once per router (R2-12)
   if (!mac) { networkWhy = "Albula cannot recognize this network. If macOS asked whether SlicerAlbula may find devices on the local network, the answer has to be Allow (System Settings › Privacy & Security › Local Network)"; return undefined; }
   const norm = mac.toLowerCase().split(":").map((p) => p.padStart(2, "0")).join(":");
-  if (SHARED_ROUTER.test(norm)) { networkWhy = "this network's router uses an address that many other networks use too, so Albula cannot tell it apart and does not share on it"; return undefined; }
   networkWhy = "";
-  return { id: (await sha256Hex(`albula-network|${norm}|${gw}`)).slice(0, 16), iface, address };
+  // A SHARED ROUTER ADDRESS: known, but allowed only until midnight (allowedOn). The id is made as for any network; this
+  // Mac's own address is left out of it, because on a large network a new address
+  // would make a new id and pause sharing mid-day (the critic 2026-11-03, finding 2).
+  const sharedRouter = SHARED_ROUTER.test(norm);
+  return { id: (await sha256Hex(`albula-network|${norm}|${gw}`)).slice(0, 16), iface, address, ...(sharedRouter ? { sharedRouter } : {}) };
 }
 
 // ---- the person here ------------------------------------------------------------------------------------------------
@@ -127,14 +156,14 @@ async function tickOnce(): Promise<void> {
   // A DAMAGED LIST OF MACS STOPS SHARING, said on the page (R2-7).
   let listProblem = "";
   if (ids.length) { try { await readClients(shareDir()); } catch (e) { listProblem = (e as Error).message; } }
-  const want = ids.length > 0 && !!helperPath() && !!network && s.networks.includes(network.id) && !listProblem;
+  const want = ids.length > 0 && !!helperPath() && allowedOn(s, network) && !listProblem;
   if (listProblem) lastError = `sharing stopped: ${listProblem}`;
   // A NEW ADDRESS OR CONNECTION: stop, and start again on the new one (finding 6).
   if (running && want && (running.address !== network!.address || running.iface !== network!.iface)) await stopListening();
   if (running && want && running.ad?.ended()) running.ad = advertise(computerName(), SHARING_PORT, { v: "3" }, running.iface);   // Bonjour restarted (R2-12)
   if (running && !want) {
     await stopListening();
-    log(network && s.networks.includes(network.id) ? "stopped" : "paused (not on a network that was allowed)");
+    log(allowedOn(s, network) ? "stopped" : network?.sharedRouter && s.temporary?.id === network.id ? "paused (allowed until midnight, now past)" : "paused (not on a network that was allowed)");
   } else if (running) running.opts.ids = ids;   // read per request by db-share.ts
   else if (want) {
     try {
@@ -200,13 +229,14 @@ export async function handleSharingRequest(req: Request, galleryRoot?: string): 
   galleryRootOf ??= galleryRoot;
   const state = async () => {
     const s = await readShared(galleryRoot), net = network ?? (s.ids.length ? await currentNetwork() : undefined);
-    const allowedHere = !!net && s.networks.includes(net.id);
+    const allowedHere = allowedOn(s, net);
+    const until = allowedHere && net?.sharedRouter ? s.temporary!.until : undefined;
     let macs: { id: string; name: string; pairedAt: string; confirmedAt?: string }[] = [], macsError: string | undefined;
     try { macs = (await readClients(shareDir())).map((c) => ({ id: c.tokenHash.slice(0, 12), name: c.name, pairedAt: c.pairedAt, confirmedAt: c.confirmedAt })); }
     catch (e) { macsError = (e as Error).message; }
     return {
       available: !!helperPath(), ...(helperPath() ? await canConfirmOwner().catch(() => ({ touchID: false, owner: false })) : { touchID: false, owner: false }),
-      databases: s.ids, network: { known: !!net, allowed: allowedHere, count: s.networks.length, ...(net || !s.ids.length ? {} : { why: networkWhy }) }, listening: !!running,
+      databases: s.ids, network: { known: !!net, allowed: allowedHere, count: s.networks.length, ...(until ? { until } : {}), ...(net?.sharedRouter && !allowedHere ? { why: "this network's router uses an address many other networks use too, so it is allowed only until midnight; to share here again, switch Shared off and on (Touch ID)" } : {}), ...(net || !s.ids.length ? {} : { why: networkWhy }) }, listening: !!running,
       error: lastError || macsError || undefined, pairing: running?.handler.status() ?? { open: false },
       name: computerName(), host: localHostName(), macs,
     };
@@ -223,7 +253,13 @@ export async function handleSharingRequest(req: Request, galleryRoot?: string): 
       if (!net) return json({ error: networkWhy || "this Mac is not on a network just now" }, 400);
       // The first time on this network: the person here allows it (Touch ID, or the login password); one question at a time.
       const allowed = await (allowing = allowing.then(async () => {
-        if ((await readShared(galleryRoot)).networks.includes(net.id)) return true;
+        if (allowedOn(await readShared(galleryRoot), net)) return true;
+        if (net.sharedRouter) {
+          // Never kept for good (allowedOn): until midnight, asked again the next day.
+          const ok = await askPerson("share your databases on this network until midnight with the Macs you allow (its router's address is one many networks use, so it is not remembered)");
+          if (ok) await changeShared(galleryRoot, (x) => { x.temporary = { id: net.id, until: nextMidnight() }; });
+          return ok;
+        }
         const ok = await askPerson("share your databases on this network with the Macs you allow");
         if (ok) await changeShared(galleryRoot, (x) => x.networks.push(net.id));
         return ok;
@@ -236,7 +272,7 @@ export async function handleSharingRequest(req: Request, galleryRoot?: string): 
   }
   if (url.pathname === "/_db/_sharing/forget-networks" && req.method === "POST") {
     // Every network allowed so far forgotten: the next switch-on asks again (finding 10: a hotel allowed by mistake stayed).
-    await changeShared(galleryRoot, (x) => { x.networks = []; });
+    await changeShared(galleryRoot, (x) => { x.networks = []; x.temporary = undefined; });
     await tick();
     return json(await state());
   }

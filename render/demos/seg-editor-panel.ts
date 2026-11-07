@@ -28,10 +28,13 @@ import { layout as layoutOf } from "../../logic/layouts.ts";
 import { allStructures, CLINICAL_REGIONS, type ClinicalRegion, bodyPartOfScan, regionFromBodyPart, regionFromStructures, type Task, TASK_WORDS, taskStructures, type TaskStructure, TUMOR } from "../../logic/anatomy/task-sets.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
+import { startWork } from "../working.ts";
+import { currentFrames } from "../../logic/sequences.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { LocalBlobStore } from "../../logic/ingest.ts";
 import { invalidatePaintCache } from "../../logic/segmentation-editor.ts";
 import { setPaintLimits, showLabelmap, strokeTallyOf, writeLabelmap } from "../../logic/segment-tools.ts";
+import { forgetStrokes, setGrowing } from "../../logic/grow-strokes.ts";
 import { segToSourceOf } from "../../logic/paint-brush.ts";
 import type { OverwriteMode } from "../../logic/segment-effects.ts";
 import { fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
@@ -105,7 +108,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   live.subscribe((c) => {
     const id = (c as { id?: string }).id;
     if (!id || (c as { type?: string }).type !== "segmentation") return;
-    const n = live.nodes.get(id); if (!n?.zarr) { lastZarr.delete(id); return; }
+    const n = live.nodes.get(id); if (!n?.zarr) { lastZarr.delete(id); forgetStrokes(id); setGrowing(id, undefined); return; }
     const now = JSON.stringify(n.zarr), before = lastZarr.get(id);
     lastZarr.set(id, now);
     if (before === undefined || before === now || restoring || quiet.has(id)) return;
@@ -222,15 +225,31 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   };
 
   function picker(): string {
-    const vols = [...live.nodes.values()].filter((n) => n.type === "image" && !(n as Obj).hidden && !(n as Obj).labelmap);
-    const segs = [...live.nodes.values()].filter((n) => n.type === "segmentation" && !(n as Obj).hidden);
+    // A SEQUENCE OFFERS THE FRAME ON SCREEN (as AI Segmentations does): its frames are all hidden, so a multi-echo or
+    // cardiac series listed nothing and the picker had only "Choose a segmentation…" (Ron, 2026-11-01, the Prisma
+    // T1MEMPRAGE with its four echoes: "Not working").
+    const current = currentFrames(live);
+    const vols = [...live.nodes.values()].filter((n) => n.type === "image" && !(n as Obj).labelmap && (current.has(String(n.id)) || (!(n as Obj).hidden && !(n as Obj).sequence)));
+    // WHAT IS BEING EDITED IS ALWAYS LISTED, AND SO IS EVERY SEGMENTATION ON SCREEN (critic 2026-11-06, findings 4 and 6): a
+    // member of a sequence is `hidden` like a frame, so the frame's AI result was missing, and stepping away from a frame
+    // left the select showing "+ New segmentation" while the tools changed the segmentation of the frame left behind.
+    const segs = [...live.nodes.values()].filter((n) => n.type === "segmentation" && (!(n as Obj).hidden || current.has(String(n.id)) || n.id === segId));
+    const sourceOf = (s: { refs?: unknown }) => ((s.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
+    const option = (s: { id?: unknown; name?: unknown }) =>
+      `<option value="${escapeHtml(String(s.id))}"${s.id === segId ? " selected" : ""}>${escapeHtml(String(s.name ?? s.id))} · ${segsOf(String(s.id)).length} — ${originWords(s as Obj)}</option>`;
+    const onScreen = new Set(vols.map((v) => v.id));
     const groups = vols.map((v) => {
-      const mine = segs.filter((s) => ((s.refs as Record<string, string[]> | undefined)?.source ?? [])[0] === v.id);
-      return `<optgroup label="${escapeHtml(String(v.name ?? v.id))}">${mine.map((s) =>
-        `<option value="${escapeHtml(String(s.id))}"${s.id === segId ? " selected" : ""}>${escapeHtml(String(s.name ?? s.id))} · ${segsOf(String(s.id)).length} — ${originWords(s as Obj)}</option>`).join("")}
+      const mine = segs.filter((s) => sourceOf(s) === v.id);
+      return `<optgroup label="${escapeHtml(String(current.get(String(v.id)) ?? v.name ?? v.id))}">${mine.map(option).join("")}
         <option value="new:${escapeHtml(String(v.id))}">+ New segmentation on ${escapeHtml(String(v.name ?? v.id))}</option></optgroup>`;
     }).join("");
-    return `<select class="sl-seg-pick" title="Which segmentation the tools change. Every segmentation in the scene is listed; the others are left as they are.">${segId ? "" : `<option value="" selected>Choose a segmentation…</option>`}${groups}</select>`;
+    // Made on a frame that is not on screen, or on a scan no longer in the list: the tools read that scan, so it says so.
+    const elsewhere = segs.filter((s) => !onScreen.has(sourceOf(s) as string));
+    const away = elsewhere.length ? `<optgroup label="On a scan not on screen">${elsewhere.map((s) => {
+      const src = live.nodes.get(sourceOf(s) as string);
+      return option({ ...(s as object), name: `${String(s.name ?? s.id)}, on ${String(src?.name ?? "a scan no longer loaded")}` } as typeof s);
+    }).join("")}</optgroup>` : "";
+    return `<select class="sl-seg-pick" title="Which segmentation the tools change. Every segmentation on screen is listed; the others are left as they are.">${segId ? "" : `<option value="" selected>Choose a segmentation…</option>`}${groups}${away}</select>`;
   }
 
   // WHERE AN OUTLINE GOES (Ron, 2026-10-03: "I do not want to overwrite the existing segementation. It should offer to
@@ -242,7 +261,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   const intoOf = (id: string): Into => clickInto.get(id) ?? (!id || !madeByTool.has(id) ? "newseg" : defaultTarget(segsOf(id)) ?? "tumor");
   /** "Into:" — a new segmentation (with a Tumor structure), or, in the chosen one, Tumor, a structure, or a new structure. */
   function clickOptions(): string {
-    const segs = segsOf(segId);
+    const segs = segsOf(segId).filter((x) => !isOutside(x.labelValue));   // not the gray (critic 2026-11-01, finding 6)
     const cur = intoOf(segId);
     const opt = (v: string | number, label: string) => `<option value="${v}"${cur === v ? " selected" : ""}>${label}</option>`;
     return opt("newseg", "Into: a new segmentation") + (segId ? (defaultTarget(segs) === null ? opt("tumor", "Into: Tumor (new, in this one)") : "") +
@@ -341,6 +360,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   const brush = async (t: "paint" | "erase" | "draw" | "") => {
     const id = t ? await ensureSeg() : segId; if (t && !id) return;
     if (activeEffect() === "clickoutline") g().__clickOutlineEnd();
+    if (t) syncPaintLimits();   // Paint's own limits back (Grow sets none for its strokes)
     g().__setSegTool(id, t, { diameterMm: brushVox * sp(), sphere: !!g().__segTool?.().sphere, segment: active });
     if (t) status(t === "draw" ? "Draw: click around the region in a slice view; double-click to fill" : t === "paint" ? "Paint: drag in a slice view; Option-drag erases" : "Erase: drag in a slice view");
   };
@@ -350,7 +370,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   /** Per scan: a range typed here (else the Threshold's, else none), and the adaptive tolerance typed here. */
   const paintRange = new Map<string, [number, number]>(), adaptTol = new Map<string, number>();
   let adaptive = false;
-  const brushOn = () => chosen === "paint" || chosen === "erase";
+  const brushOn = () => chosen === "paint" || chosen === "erase" || chosen === "grow";
   // THE LIMIT READS THE SCAN IN THE VIEW PAINTED IN (2026-10-31, three scans side by side: edema is painted on the FLAIR,
   // the enhancing rim on the T1 post-contrast). Each scan keeps its own range; the row shows the one of the view the
   // brush was last over (live-views onViewScan), named when it is not the segmentation's own.
@@ -391,6 +411,9 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     const inUse = new Set<string>([...(own ? [own] : []), ...[...live.nodes.values()].filter((x) => x.type === "sliceComposite").flatMap((x) => ((x.refs as Record<string, string[]> | undefined)?.background ?? []))]);
     for (const id of [...brushScans.keys()]) if (!inUse.has(id)) brushScans.delete(id);
     keepScans(inUse);
+    // GROW'S STROKES ARE SEEDS: no brightness limit while Grow is chosen. This is the one place limits are set, so every
+    // redraw keeps it (critic 2026-11-01, finding 2: Grow's own setting lasted until the next redraw).
+    if (chosen === "grow") { setPaintLimits(segId, { ...ctx.over() }); return; }
     setPaintLimits(segId, { ...ctx.over(), ...limitOf(own ? brushScans.get(own) : null), ownImage: own, byImage: Object.fromEntries([...brushScans].map(([id, s]) => [id, limitOf(s)])) });
   }
   /** The brush one step bigger or smaller (Shift+wheel over a slice, + and -): a voxel at a time below 10, a tenth above. */
@@ -426,12 +449,12 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     const onWhich = s && s.id !== ctx.source()?.id ? `On the ${escapeHtml(scanWord(s.id))}: o` : "O";
     const from = r?.from === "threshold" ? "Threshold's range" : r?.from === "whole" ? "the whole scan" : "";
     const limit = !s ? `<div class="sl-row"><span class="sl-hint">Reading the scan…</span></div>` : adaptive
-      ? `<div class="sl-row sl-pb-limit"><span>${onWhich}nly voxels within ±</span><input type="number" class="sl-pb-tol" value="${fmtV(s, tolFor(s))}" title="How different from the voxel under the brush's center a voxel may be and still be painted"><span>${u} of the one under the brush's center, joined to it</span></div>`
+      ? `<div class="sl-row sl-pb-limit" title="The brush paints only what looks like the spot under its center: as bright, give or take this much, and connected to that spot. So a stroke stops where the brightness changes, at an edge"><span>${s.id !== ctx.source()?.id ? `On the ${escapeHtml(scanWord(s.id))}: p` : "P"}aints only what is as bright as the brush's center, give or take</span><input type="number" class="sl-pb-tol" value="${fmtV(s, tolFor(s))}" title="How much darker or brighter than the brush's center a voxel may be and still be painted"><span>${u}</span></div>`
       : `<div class="sl-row sl-pb-limit"><span>${onWhich}nly voxels from</span><input type="number" class="sl-pb-lo" value="${fmtV(s, r!.lo)}" title="The darkest voxel the brush paints"><span>to</span><input type="number" class="sl-pb-hi" value="${fmtV(s, r!.hi)}" title="The brightest voxel the brush paints"><span>${u}</span><span class="sl-hint">${from}</span>${r!.from !== "whole" ? `<button class="sl-pb-any" title="Paint whatever is under the brush, bright or dark">Any</button>` : ""}</div>`;
     el.innerHTML = `<div class="sl-row"><label>Brush</label><input class="sl-brush-vox" type="range" min="1" max="60" step="1" value="${brushVox}"><span class="sl-brush-v">${brushVox} voxels</span><label><input type="checkbox" class="sl-brush-sphere"${tool.sphere ? " checked" : ""}> Sphere</label></div>
       <div class="sl-row"><span class="sl-hint sl-brush-mm">≈ ${lengthText(brushVox * v, 1, v)} on this ${lengthText(v, 2, v)} grid</span></div>
       ${limit}
-      ${s ? `<div class="sl-row"><label class="sl-switch" title="On: the brush paints only voxels like the one under its center, so it stops at an edge. Off: it paints the voxels between the two numbers."><input type="checkbox" role="switch" class="sl-pb-adapt" aria-label="Adaptive brush"${adaptive ? " checked" : ""}><i aria-hidden="true"></i></label><span>Adaptive: stops at edges</span></div>` : ""}`;
+      ${s ? `<div class="sl-row" title="On: a stroke stops at an edge -- the brush paints only what is as bright as the spot under its center and connected to it. Off: the brush paints every voxel between the two numbers above"><label class="sl-switch"><input type="checkbox" role="switch" class="sl-pb-adapt" aria-label="Stop at edges"${adaptive ? " checked" : ""}><i aria-hidden="true"></i></label><span>Stop at edges</span></div>` : ""}`;
     const sync = () => { const cur = g().__segTool?.(); if (cur?.activeEffect) g().__setSegTool(segId, cur.activeEffect, { diameterMm: brushVox * v, sphere: (el.querySelector(".sl-brush-sphere") as HTMLInputElement).checked, segment: active }); };
     el.querySelector(".sl-brush-vox")!.addEventListener("input", (e) => { brushVox = Number((e.target as HTMLInputElement).value); (el.querySelector(".sl-brush-v") as HTMLElement).textContent = `${brushVox} voxels`; (el.querySelector(".sl-brush-mm") as HTMLElement).textContent = `≈ ${lengthText(brushVox * v, 1, v)} on this ${lengthText(v, 2, v)} grid`; sync(); });
     el.querySelector(".sl-brush-sphere")!.addEventListener("change", sync);
@@ -444,6 +467,31 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     el.querySelector(".sl-pb-tol")?.addEventListener("change", () => { const t = Math.abs(num(".sl-pb-tol")); if (Number.isFinite(t)) adaptTol.set(s.id, t); syncPaintLimits(); });
     el.querySelector(".sl-pb-adapt")?.addEventListener("change", (e) => { adaptive = (e.target as HTMLInputElement).checked; syncPaintLimits(); render(); });
   };
+  // Grow from seeds' structure and its rejection class, Outside (the Grow tool below).
+  let growInside: number | undefined;
+  const outsideOf = () => segsOf(segId).find((x) => (x as { rejection?: boolean }).rejection === true)?.labelValue;
+  const isOutside = (lv: number | undefined) => lv !== undefined && lv === outsideOf();
+  /** Outside in this segmentation: made gray on first use; shown again if hidden, so that its strokes can be seen. */
+  function ensureOutside(): number {
+    let lv = outsideOf();
+    if (lv === undefined) {
+      // One patch of the segment list, NOT through __setSegmentProp, whose name change marks the segmentation edited: a
+      // segment that is never saved must not make it unsaved (critic 2026-11-01, finding 7).
+      const segs = segsOf(segId);
+      lv = segs.reduce((m, x) => Math.max(m, x.labelValue), 0) + 1;
+      live.write({ op: "patch", id: segId, path: "#/segments", value: [...segs, { labelValue: lv, name: "Outside", color: [0.55, 0.55, 0.55], visible: true, rejection: true }] });
+    } else if (segsOf(segId).find((x) => x.labelValue === lv)?.visible === false) g().__setSegmentProp(segId, lv, "visible", true);
+    return lv;
+  }
+  /** Grow's brush on the chosen structure, plain: strokes are seeds, no brightness limit; the "over" rule stays. */
+  function growBrush(keepStatus = false) {
+    if (!segId || !live.nodes.has(segId)) return;
+    setGrowing(segId, growInside);   // which structure the gray strokes belong to (logic/grow-strokes.ts)
+    syncPaintLimits();   // while Grow is chosen: none
+    // A flat brush always: Grow's panel has no Sphere switch, so Paint's must not carry over unseen (critic nit c).
+    g().__setSegTool(segId, "paint", { diameterMm: brushVox * sp(), sphere: false, segment: active });
+    if (!keepStatus) status(isOutside(active) ? "Paint outside: drag in a slice view, close around the structure, where it is not" : "Paint inside: drag in a slice view, inside the structure, on several slices");
+  }
   const L = (keys: string, does: string, tip: string): CheatLine => ({ keys, does, tip });
   const brushCheats = (erase: boolean) => (c: SegToolContext): CheatLine[] => { const n = c.structure().name; return [
     L("Drag", erase ? `erases ${n}` : `paints ${n}`, erase ? `Hold the mouse button down and move over a slice: the brush takes ${n} away. Other structures stay.` : `Hold the mouse button down and move over a slice: the brush paints ${n}, the structure chosen at the top.`),
@@ -485,11 +533,51 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
         L("Shift-click", "takes a part away", "Hold Shift and click on a part that should not be in the outline."),
         L("Esc", "ends", "Ends outlining; the outline stays. A right-click does the same."),
       ] },
-    { id: "grow", label: "Grow", icon: "❋", order: 60, tip: "Fill each structure out to its edges from a few painted strokes",
+    // GROW FROM SEEDS, ALL IN ITS OWN PANEL (Ron, 2026-11-01, after trying it on the ventricles with directions: "I could
+    // not have figured out the workflow without your guidance ... forget paint for this workflow. grow presents paint
+    // inside the target structure, paint outside the target structure and brush size"). The brush is on while Grow is
+    // chosen; the two buttons say which it paints. Outside is the rejection class (logic/grow-from-seeds.ts isRejection):
+    // one per segmentation, made on first use; what it wins beyond its strokes is left empty, its strokes stay for the next
+    // press, and it is never saved. A press grows from all the strokes again, not from the last result. The strokes are seeds,
+    // so no brightness limit applies to them (Paint's own limits come back when Paint is chosen).
+    { id: "grow", label: "Grow", icon: "❋", order: 60, tip: "Fill a structure out to its edges from a few strokes inside it and a few outside it",
+      chosen: () => { if (!isOutside(active)) growInside = active; growBrush(); },
       mount: (el) => {
-        el.innerHTML = `<div class="sl-row sl-actions"><button class="sl-eff-seeds sl-primary" title="Paint strokes inside the structure, and with a second segment in what surrounds it, then press. Every segment shown takes part, and everything around the strokes becomes one of them; hide the segments that should stay as they are (the eye). Undo puts the strokes back.">Grow from the strokes</button></div>`;
-        onEffect(el.querySelector(".sl-eff-seeds")!, "growFromSeeds", () => ({}));
-      } },
+        if (active !== undefined && !isOutside(active) && segsOf(segId).some((x) => x.labelValue === active)) growInside = active;
+        const inSeg = segsOf(segId).find((x) => x.labelValue === growInside);
+        const inName = inSeg ? escapeHtml(inSeg.name ?? `Segment ${inSeg.labelValue}`) : "";
+        const onOut = isOutside(active), v = sp();
+        el.innerHTML = `<div class="sl-row sl-grow-pick"><button class="sl-grow-in" aria-pressed="${!onOut}"${inSeg ? "" : " disabled"} title="${inSeg ? `Drag in a slice view to paint strokes inside ${inName}` : "Choose the structure at the top first"}">Paint inside ${inName || "the structure"}</button><button class="sl-grow-out" aria-pressed="${onOut}" title="Drag in a slice view to paint gray strokes where ${inName || "the structure"} is NOT, close around it. The gray strokes stay for the next Grow, and the gray is never saved">Paint outside</button></div>
+          <div class="sl-row"><label>Brush</label><input class="sl-brush-vox" type="range" min="1" max="60" step="1" value="${brushVox}"><span class="sl-brush-v">${brushVox} voxels</span></div>
+          <div class="sl-row"><span class="sl-hint sl-brush-mm">≈ ${lengthText(brushVox * v, 1, v)} on this ${lengthText(v, 2, v)} grid</span></div>
+          <div class="sl-row sl-actions"><button class="sl-eff-seeds sl-primary" title="${inName || "The structure"} grows out from its strokes to where the brightness changes, and stops at the gray. After more strokes, press again: it grows from all the strokes, not from the last result. Only the space around the strokes changes">Grow ${inName || "from the strokes"}</button></div>`;
+        el.querySelector(".sl-brush-vox")!.addEventListener("input", (e) => {
+          brushVox = Number((e.target as HTMLInputElement).value);
+          (el.querySelector(".sl-brush-v") as HTMLElement).textContent = `${brushVox} voxels`;
+          (el.querySelector(".sl-brush-mm") as HTMLElement).textContent = `≈ ${lengthText(brushVox * v, 1, v)} on this ${lengthText(v, 2, v)} grid`;
+          growBrush();
+        });
+        el.querySelector(".sl-grow-in")!.addEventListener("click", () => { if (growInside === undefined) return; active = growInside; pending = null; growBrush(); render(); });
+        el.querySelector(".sl-grow-out")!.addEventListener("click", () => { if (!segId) return; active = ensureOutside(); pending = null; growBrush(); render(); });
+        // Only the structure on the button grows (logic/grow-from-seeds.ts growInPlace); after it, that structure is the
+        // chosen one again, so the clean-up tools act on it and not on the empty gray (critic 2026-11-01, finding 6).
+        el.querySelector<HTMLButtonElement>(".sl-eff-seeds")!.addEventListener("click", (ev) => {
+          const b = ev.currentTarget as HTMLButtonElement;
+          if (growInside === undefined) { status("Choose the structure at the top first, and paint inside it"); return; }
+          const work = startWork({ title: `Growing ${segsOf(segId).find((x) => x.labelValue === growInside)?.name ?? "the structure"}` });
+          work.unstoppable();   // a grow on the card cannot be stopped halfway
+          void runAction(b, async () => { try { active = growInside!; await effect("growFromSeeds", { segment: growInside }); growBrush(true); } finally { work.done(); } },
+            { busyLabel: "Working…", doneLabel: "Done ✓", failedLabel: "Failed" }).catch(() => {});
+        });
+      },
+      cheats: (c) => [
+        L("Drag", `paints ${c.structure().name}`, "Hold the mouse button down and move over a slice. Paint inside and Paint outside above say which."),
+        L("Option-drag", "erases strokes", `Hold the Option key while you drag: the brush takes ${c.structure().name} away.`),
+        L("Shift + wheel", "brush bigger or smaller", "Hold Shift and turn the scroll wheel over a slice. The + and − keys do the same."),
+        L("Grow", "fills out to the edges", "Strokes inside on several slices, top to bottom, and gray strokes close around it; then press Grow. Undo takes back the last step."),
+        L("Grow again", "fixes what went wrong", "Paint inside where it fell short, or gray where it spilled over, and press Grow again: it grows from all the strokes, not from the last result. A structure opened from a file has no strokes on record, so all of it counts as strokes."),
+      ],
+      left: () => { if (activeEffect() === "paint") void brush(""); } },
     { id: "more", label: "More", icon: "⋯", order: 90, tip: "Islands, smoothing, margin, logical operations and statistics",
       mount: (el) => {
         el.innerHTML = `
@@ -512,7 +600,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
         onEffect($(".sl-eff-sub"), "logical", () => ({ logical: "subtract", other: num(".sl-other") }));
         onEffect($(".sl-eff-int"), "logical", () => ({ logical: "intersect", other: num(".sl-other") }));
         const sb = $<HTMLButtonElement>(".sl-eff-stats");
-        sb.addEventListener("click", () => void runAction(sb, async () => { const stt = await g().__segmentStats(segId); $(".sl-seg-stats").innerHTML = stt.map((x) => `<div class="sl-hint">${escapeHtml(segsOf(segId).find((s) => s.labelValue === x.labelValue)?.name ?? `Segment ${x.labelValue}`)}: ${x.voxels.toLocaleString()} voxels, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); }, { busyLabel: "Counting…", doneLabel: "Done ✓" }).catch(() => {}));
+        sb.addEventListener("click", () => void runAction(sb, async () => { const stt = (await g().__segmentStats(segId)).filter((x) => !isOutside(x.labelValue)); $(".sl-seg-stats").innerHTML = stt.map((x) => `<div class="sl-hint">${escapeHtml(segsOf(segId).find((s) => s.labelValue === x.labelValue)?.name ?? `Segment ${x.labelValue}`)}: ${x.voxels.toLocaleString()} voxels, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); }, { busyLabel: "Counting…", doneLabel: "Done ✓" }).catch(() => {}));
       } },
   ];
   for (const t of builtIn) registerSegTool(t);
@@ -524,7 +612,7 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
   /** The "over" choices: the three rules, then each other structure by name (ITK-SNAP's "Paint over" one label; Ron,
    *  2026-10-31: "Yes, now"), so that Necrosis painted over Tumor stays inside the tumor. */
   function overOptions(): string {
-    const others = segsOf(segId).filter((x) => x.labelValue !== active);
+    const others = segsOf(segId).filter((x) => x.labelValue !== active && !isOutside(x.labelValue));   // not the gray (critic 2026-11-01, finding 6)
     const nm = (x: Seg) => escapeHtml(x.name ?? `Segment ${x.labelValue}`);
     return OVER.map(([v, w, t]) => `<option value="${v}" title="${t}"${v === over ? " selected" : ""}>${w}</option>`).join("")
       + (others.length ? `<optgroup label="only one structure">${others.map((x) => `<option value="seg:${x.labelValue}" title="The tools write only where ${nm(x)} is; nowhere else"${over === "segment" && overSeg === x.labelValue ? " selected" : ""}>${nm(x)}</option>`).join("")}</optgroup>` : "");
@@ -861,8 +949,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       takes that structure away and leaves every other one as it is. Shift and the scroll wheel, or + and −, change the
       brush. The brush paints only where "over" allows (over one structure by name keeps it inside that structure), and
       only voxels between the two numbers, which start as the range last set in Threshold (Any: no limit). With
-      <b>Adaptive</b> on, it paints only the voxels like the one under its center and joined to it, so it stops at an
-      edge. The line under the views says what a stroke painted and what it left out, and why.</p>
+      <b>Stop at edges</b> on, it paints only what is as bright as the spot under its center and joined to it. The line
+      under the views says what a stroke painted and what it left out, and why.</p>
+      <p><b>Pointer</b>, the first button, turns every tool off: a drag turns the 3D view and moves through slices
+      without painting.</p>
       <p>Each tool lists its mouse and key actions under its controls; point at a line for more.</p>
       <p><b>Draw</b> outlines a region on one slice and fills it: click around the region, or drag to trace its edge;
       a double-click, Enter or a right-click fills it into the structure chosen above. Backspace takes the last point
@@ -874,6 +964,15 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       lines. With <b>Keep only the piece I click</b>, a click in any view keeps the connected piece under it, and a
       shift-click adds another; connections thinner than the size under Advanced are cut first. <b>Put into …</b> (Enter)
       replaces the structure's contents with what is shown, under the "over" choice at the top; Cancel (Esc) puts it back.</p>
+      <p><b>Scissors</b> cuts the chosen structure: drag a loop around a part, on a slice or in 3D, and it is cut away
+      through the slices (Shift as you let go: only that part is kept). A click keeps the piece under it, a shift-click
+      one more, an Option-click removes it.</p>
+      <p><b>Grow</b> fills a structure out to its edges from a few strokes. Press <b>Paint inside</b> and paint in the
+      structure on several slices, then <b>Paint outside</b> and paint gray strokes close around it, then press
+      <b>Grow</b>. Where it fell short, paint inside; where it spilled over, paint gray; press Grow again: it grows from
+      all the strokes, not from the last result. The gray is never saved. Only the structure on the button changes;
+      the others shown stop it. A voxel goes to the strokes it reaches with the least change of brightness along the way.
+      That is the rule of Slicer's Grow from seeds.</p>
       <p><b>Saving never changes the original.</b></p>
       <svg viewBox="0 0 420 150" width="100%" role="img" aria-label="How saving works">
         <g font-size="10" font-family="system-ui, sans-serif">
@@ -912,6 +1011,17 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     mount(el) { root = el; render(); },
   });
   live.subscribe((c) => { if ((c.type === "segmentation" || c.type === "image") && !quiet.has(String((c as { id?: string }).id ?? ""))) render(); });
+  // THE PICKER FOLLOWS THE FRAME ON SCREEN (critic 2026-11-06, finding 5), a moment after a step, so playing a sequence
+  // does not redraw the panel at every frame.
+  let framesSaid = "", framesTimer: number | undefined;
+  live.subscribe((c) => {
+    if (c.type !== "sequenceBrowser") return;
+    clearTimeout(framesTimer);
+    framesTimer = setTimeout(() => {
+      const now = [...currentFrames(live).keys()].join(" ");
+      if (now !== framesSaid) { framesSaid = now; render(); }
+    }, 250) as unknown as number;
+  });
   Object.assign(globalThis, { __segEditorRender: () => render() });
   // Esc ends Click to outline, as it ends placing a markup.
   addEventListener("keydown", (e) => { if (e.key === "Escape" && String(g().__segTool?.().activeEffect).toLowerCase() === "clickoutline") g().__clickOutlineEnd(); });

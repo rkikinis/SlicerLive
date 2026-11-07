@@ -7,6 +7,7 @@ import { fetchZarrVolumeNative } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
 import { writeNrrd } from "./writers/nrrd.ts";
 import { writeNifti } from "./writers/nifti.ts";
+import { isRejection } from "./grow-from-seeds.ts";
 import { COLOR_MAP_REFUSAL, isColorMap } from "../render/fields.ts";
 
 export type ExportFormat = "nrrd" | "nrrd-gz" | "nifti";
@@ -34,7 +35,11 @@ export async function exportVolume(live: LiveScene, nodeId: string, format: Expo
 export async function exportSegmentation(live: LiveScene, segId: string, format: "nrrd" | "nrrd-gz" = "nrrd"): Promise<ExportResult> {
   const seg = live.nodes.get(segId); if (!seg?.zarr) throw new Error("no segmentation " + segId);
   const vol = await nodeVolume(live, segId);
-  const segments = ((seg.segments as { labelValue: number; name: string; color: number[] }[] | undefined) ?? []);
+  const listed = (seg.segments as { labelValue: number; name: string; color: number[]; rejection?: boolean }[] | undefined) ?? [];
+  // Outside, Grow from seeds' rejection class, is never saved (logic/grow-from-seeds.ts isRejection).
+  const segments = listed.filter((s) => !isRejection(s));
+  const rejected = new Set(listed.filter(isRejection).map((s) => s.labelValue));
+  if (rejected.size) vol.data = (vol.data as Uint8Array).map((v) => rejected.has(v) ? 0 : v);   // the typed array's own map keeps its type
   const bytes = await writeNrrd(vol, { encoding: format === "nrrd-gz" ? "gzip" : "raw", segmentation: { segments } });
   return { bytes, filename: `${safe(vol.name ?? "Segmentation")}.seg.nrrd`, mime: "application/octet-stream" };
 }

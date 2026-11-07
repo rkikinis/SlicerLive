@@ -248,6 +248,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
   // when the app starts, not when this panel is first shown: a resident who goes straight to Diffusion has never opened
   // Load / Save (found in the browser pane, 2026-10-01). They show the panel first, which mounts it.
   let openDatabaseFromOutside: (() => void) | undefined, showLoadFromDisk: (() => void) | undefined;
+  /** Load or Save, and the DICOM database or Files: the panel's choice, set from outside too (a notice's button). */
+  let setIo: ((dir: "load" | "save", where: "db" | "files") => void) | undefined;
   (globalThis as unknown as { __openDicomDatabase?: () => void }).__openDicomDatabase = () => { void shell.showPanel("add-data").then(() => openDatabaseFromOutside?.()); };
   (globalThis as unknown as { __openLoadFromDisk?: () => void }).__openLoadFromDisk = () => { void shell.showPanel("add-data").then(() => showLoadFromDisk?.()); };
   /** DICOM files that arrived (a dropped folder): viewed, and added to the database when "Also add to" is ticked. Set by the panel. */
@@ -394,13 +396,16 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // Adjust the colors, make the two Load and two Save clickable (remember, I am fine motor
     // challenged) with proper visual feedback and pop up the appropriate additional stuff in a
     // section below." Name: "Load/Save" (Q1); opens with no arrow chosen (Q2); Save the scene in
-    // the database pane (Q3). The id stays "add-data" -- __openScene mounts it by that name.
+    // the database pane (Q3). The id stays "add-data" -- __openScene mounts it by that name. Since 2026-11-01 the graph
+    // is a Load / Save choice and the DICOM database or Files, Load and the database each time it is shown (mount below).
     title: "Load / Save",
+    onShow: () => setIo?.("load", "db"),
     groups: ["Data"],
     order: 1,
     tip: "Bring things into the scene, or keep them: the DICOM database or files, both ways",
-    help: `<p>Brings data into the session. Drag files onto the views from anywhere in the
-      application, or use the buttons here.</p>
+    help: `<p>Brings data into the session and keeps it. Drag files onto the views from anywhere in the
+      application, or use the buttons here: choose <b>Load</b> or <b>Save</b>, then the <b>DICOM database</b> or
+      <b>Files</b>; what each does is shown under them. It opens on Load from the DICOM database.</p>
       <p><b>What arrives where.</b> A volume file (NRRD, NIfTI) and a DICOM series both land in the
       <b>scene</b> — they show up under Data. A volume file is gone when the application restarts.</p>
       <p><b>DICOM from disk is also kept.</b> With <i>Also add to</i> ticked (it is, unless you untick it),
@@ -409,8 +414,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       already in the database is copied twice. Untick it to look without keeping.</p>
       <p><b>Databases</b> (its own section) lists every database in the databases folder and any added from elsewhere
       or opened from another Mac, with what each holds. A click on one makes it the one Albula opens; its <i>In use</i>
-      switch says whether Albula uses it, its <i>Shared</i> switch whether your other Macs may open it; its ⋯ describes
-      it, shows it in Finder or moves it to the Trash. <i>New database…</i> makes one, <i>Add from elsewhere…</i>
+      switch says whether Albula uses it, its <i>Shared</i> switch whether your other Macs may open it; its <i>Details</i>
+      say where it came from and which scanner makers' own fields (private fields) its scans hold that Albula does not
+      read, and describe it, show it in Finder or move it to the Trash. <i>New database…</i> makes one, <i>Add from elsewhere…</i>
       brings one in; the public brain tumor test cases (a download, its size said first) are offered there.</p>
       <p><b>Transfer between databases…</b> copies patients or studies from one of your databases into another:
       from a project into the one you work in, or what you made back to where the scans came from. Every image is read
@@ -422,36 +428,34 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       series and press <b>Delete…</b>, then press it again once it says what it is about to destroy.
       That removes the files, the index rows and the derivation edge, backs the index up first and
       audits afterwards. It is not the same as removing something from the scene, which only unloads
-      it. Ron asked how — and until 2026-09-07 there was no way at all.</p>`,
+      it.</p>`,
     acknowledgements: [
       "dcmjs — DICOM parsing and writing in JavaScript (dcmjs-org)",
       "ctkDICOMDatabase — the SQLite index this reads, from the Common Toolkit / 3D Slicer",
     ],
     mount(el) {
     el.innerHTML = `<h2>Load / Save</h2>`;
-    // THE GRAPH IS THE FACE. Three boxes, four arrows; the arrows are the buttons -- big targets,
-    // hover fills, pressed goes dark, the chosen one is yellow while its pane is open. The boxes'
-    // explanations are their tooltips. Everything that used to be Load Data or Save is in a pane.
-    const graphSec = shell.section(el, "Where things go", { open: true, band: "yellow" });
+    // LOAD OR SAVE, AND WHERE (Ron, 2026-11-01, on the graph that stood here: "I always click on the big green Dicom data
+    // base button, which is non functional but much more visually prominent than the load button ... How about just the
+    // DICOM button with load/save toggle and load as default?"; on the mockup, mockups/load-save-toggle-2026-11-01.html:
+    // "yes include Files"; "this presentation would lead me to click load. Just make data base the default option. The
+    // text: open a patient's scan is a tooltip. Files are available but not the default. Most people will drag and drop
+    // anyway"). Two choices, shown by an outline: Load or Save, and the DICOM database (wide, the default) or Files. The
+    // pane for the pair is open under them; Load and the database each time Load / Save is shown. The yellow is the
+    // pane's own button, the one that acts.
+    const graphSec = shell.section(el, "Load or save", { open: true, band: "yellow" });
     graphSec.innerHTML = `
-      <svg class="sl-io" viewBox="0 0 376 240" xmlns="http://www.w3.org/2000/svg">
-        <rect class="sl-io-box sl-io-scene" x="98" y="8" width="180" height="52" rx="8"><title>The scene: what is on screen now. It is gone when the application closes; what you want to keep goes below.</title></rect>
-        <text class="sl-io-lbl" x="188" y="30" text-anchor="middle">Scene</text><text class="sl-io-sub" x="188" y="48" text-anchor="middle">what is on screen now</text>
-        <g class="sl-io-arrow" data-pane="load-db" tabindex="0" role="button"><title>Load from the local DICOM database: the usual way. A study comes back with its segmentations and its scenes.</title>
-          <line class="sl-io-line" x1="72" y1="176" x2="150" y2="64"/><rect class="sl-io-pill" x="66" y="104" width="64" height="26" rx="13"/><text class="sl-io-word" x="98" y="121" text-anchor="middle">Load</text></g>
-        <g class="sl-io-arrow" data-pane="save-db" tabindex="0" role="button"><title>Save to the local DICOM database: kept, and it all comes back together.</title>
-          <line class="sl-io-line" x1="168" y1="64" x2="100" y2="176"/><rect class="sl-io-pill" x="118" y="140" width="64" height="26" rx="13"/><text class="sl-io-word" x="150" y="157" text-anchor="middle">Save</text></g>
-        <g class="sl-io-arrow" data-pane="load-files" tabindex="0" role="button"><title>Load a file from disk, one thing at a time: NRRD, NIfTI, DICOM files or a folder.</title>
-          <line class="sl-io-line" x1="304" y1="176" x2="226" y2="64"/><rect class="sl-io-pill" x="246" y="104" width="64" height="26" rx="13"/><text class="sl-io-word" x="278" y="121" text-anchor="middle">Load</text></g>
-        <g class="sl-io-arrow" data-pane="save-files" tabindex="0" role="button"><title>Save as a file, one thing at a time: a volume as NRRD or NIfTI, a segmentation's surfaces as STL or OBJ. The file goes to your Downloads folder.</title>
-          <line class="sl-io-line" x1="208" y1="64" x2="276" y2="176"/><rect class="sl-io-pill" x="194" y="140" width="64" height="26" rx="13"/><text class="sl-io-word" x="226" y="157" text-anchor="middle">Save</text></g>
-        <rect class="sl-io-box sl-io-db" x="8" y="180" width="176" height="52" rx="8"><title>The DICOM database: local, kept. Images, segmentations and scenes stay here between sessions and come back together.</title></rect>
-        <text class="sl-io-lbl" x="96" y="202" text-anchor="middle">DICOM database</text><text class="sl-io-sub" x="96" y="220" text-anchor="middle">local, kept</text>
-        <rect class="sl-io-box sl-io-files" x="192" y="180" width="176" height="52" rx="8"><title>Files on disk: one thing at a time, in the formats other programs read.</title></rect>
-        <text class="sl-io-lbl" x="280" y="202" text-anchor="middle">Files</text><text class="sl-io-sub" x="280" y="220" text-anchor="middle">NRRD · NIfTI · STL · OBJ</text>
-      </svg>`;
+      <div class="sl-io-dir" role="group" aria-label="Load or save"><button data-dir="load">Load</button><button data-dir="save">Save</button></div>
+      <div class="sl-io-where" role="group" aria-label="Where"><button class="sl-io-wdb" data-where="db">DICOM database</button><button data-where="files">Files</button></div>`;
+    const ioTips: Record<string, string> = {
+      "load db": "Open a patient's scans, with their segmentations and scenes, from the DICOM database",
+      "load files": "Open files from disk: NRRD, NIfTI, DICOM files or a folder. Dropping files on the views does the same",
+      "save db": "Keep what is on screen in the DICOM database: it all comes back together",
+      "save files": "Save one thing as a file in Downloads: a volume as NRRD or NIfTI, a segmentation as STL or OBJ",
+    };
+    const io = { dir: "load" as "load" | "save", where: "db" as "db" | "files" };
     // THE PANES. The two load panes are the old Load Data blocks; the two save panes are drawn by
-    // save-panel.ts. One at a time, under the graph.
+    // save-panel.ts. One at a time, under the Load or save section.
     const panes = document.createElement("div");
     panes.className = "sl-io-panes";
     panes.innerHTML = `
@@ -475,7 +479,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       </div>
       </div>
       <div class="sl-load-db" hidden>
-      <div class="sl-row">
+      <div class="sl-row" style="flex-wrap:wrap">
         <button class="sl-primary" data-act="dicom-db" title="Browse the indexed DICOM database and load a series. This is the usual way in when working on a study.">DICOM database…</button>
         <button data-act="transfer" title="Copy patients or studies from one of your databases into another — from a project into the one you work in, or what you made back to where the scans came from. Opens a window; nothing changes until you press its yellow button.">Transfer between databases…</button>
         <span class="sl-scene-slot"></span>
@@ -487,7 +491,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       <input type="file" multiple data-dicom hidden>`;
     el.appendChild(panes);
     // THE DATABASES, a section of its own, open, in place of the Databases window (Ron, 2026-10-29: "Q1: a section",
-    // "2 gone"; databases-window.ts mountDatabases). After the panes, so a pane the graph opens stays right under it.
+    // "2 gone"; databases-window.ts mountDatabases). After the panes, so the pane chosen stays right under its section.
     // Filled below, once the panel's own database code is set up. Green: a list of what exists (MODULE-DESIGN-RULES.md).
     const dbSecBody = shell.section(el, "Databases", { open: true, band: "green" });
     const adv = shell.section(el, "Advanced", { open: false, band: "none" });
@@ -507,10 +511,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       shell.section(holder, title, { open: true, band: "yellow" });
     }
     const g2 = globalThis as unknown as { __renderSavePane?: (shell: AppShell, live: LiveScene, root: HTMLElement, mode: "db" | "files", onStatus?: (s: string) => void) => void };
-    let chosenPane: string | null = null;
-    const showPane = (name: string | null) => {
-      chosenPane = name;
-      for (const a of el.querySelectorAll<SVGGElement>(".sl-io-arrow")) a.classList.toggle("sl-io-on", a.dataset.pane === name);
+    let paneShown = "";
+    const showPane = (name: string) => {
+      // PRESSING WHAT IS ALREADY CHOSEN CHANGES NOTHING (critic 2026-11-06, finding 14: a format chosen in the Save pane
+      // went back to NRRD). onShow, leaving the module and coming back, still starts afresh: paneShown is cleared there.
+      if (name === paneShown) return;
+      paneShown = name;
       for (const p of panes.querySelectorAll<HTMLElement>("[data-pane]")) {
         const on = p.dataset.pane === name;
         p.hidden = !on;
@@ -520,12 +526,25 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }
       }
     };
-    for (const a of el.querySelectorAll<SVGGElement>(".sl-io-arrow")) {
-      const act = () => showPane(a.classList.contains("sl-io-on") ? null : a.dataset.pane ?? null);
-      a.addEventListener("click", act);
-      a.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); act(); } });
-    }
-    void chosenPane;
+    const showIo = () => {
+      for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-dir]")) b.setAttribute("aria-pressed", String(b.dataset.dir === io.dir));
+      for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-where]")) {
+        b.setAttribute("aria-pressed", String(b.dataset.where === io.where));
+        b.title = ioTips[`${io.dir} ${b.dataset.where}`];
+      }
+      (graphSec.querySelector('[data-dir="load"]') as HTMLElement).title = io.where === "db" ? ioTips["load db"] : ioTips["load files"];
+      (graphSec.querySelector('[data-dir="save"]') as HTMLElement).title = io.where === "db" ? ioTips["save db"] : ioTips["save files"];
+      showPane(`${io.dir}-${io.where}`);
+    };
+    for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-dir]")) b.addEventListener("click", () => { io.dir = b.dataset.dir as "load" | "save"; showIo(); });
+    // THE BIG BUTTON ACTS: with Load chosen, the DICOM database opens the database window too, as its pane's yellow
+    // button does (Ron clicked the big box of the graph, which did nothing).
+    for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-where]")) b.addEventListener("click", () => {
+      io.where = b.dataset.where as "db" | "files"; showIo();
+      if (io.dir === "load" && io.where === "db") (panes.querySelector('[data-act="dicom-db"]') as HTMLButtonElement | null)?.click();
+    });
+    setIo = (dir, where) => { io.dir = dir; io.where = where; paneShown = ""; showIo(); };
+    showIo();
     const input = el.querySelector("input[type=file]") as HTMLInputElement;
     const openBtn = el.querySelector('[data-act="open"]') as HTMLButtonElement;
     openBtn.addEventListener("click", async () => {
@@ -1690,9 +1709,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         if (surfacesTicked.length && !failures.length) {
           shell.notify({
             title: surfacesTicked.length === 1 ? "Stored surface models were not loaded" : `${surfacesTicked.length} sets of stored surface models were not loaded`,
-            body: "Surface models are not shown in Albula: the segmentation is loaded and its anatomy is drawn solid. To save a segmentation's surfaces (STL, OBJ or DICOM), use Save as files.",
+            body: "Surface models are not shown in Albula: the segmentation is loaded and its anatomy is drawn solid. To save a segmentation's surfaces (STL or OBJ), use Save as files.",
             actions: [
-              { label: "Open Save as files", primary: true, onClick: () => { void shell.showPanel("add-data").then(() => showPane("save-files")); } },
+              { label: "Open Save as files", primary: true, onClick: () => { void shell.showPanel("add-data").then(() => setIo?.("save", "files")); } },
               { label: "OK", onClick: () => {} },
             ],
           });
@@ -3204,8 +3223,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       hint.textContent = !registered.length
         ? "no database yet — make one in Databases below, or bring scans in with Load from files"
         : cur.exists
-        ? cur.path
-        : `${cur.path} (not reachable)`;
+        ? `Opens ${cur.path.split("/").pop()}`
+        : `${cur.path.split("/").pop()} is not reachable`;   // the folder's name, as Databases lists it; the path is in the tooltip and in Details (critic 2026-11-06, finding 16)
       hint.title = registered.map((d) => `${d.current ? "→ " : "  "}${d.id}: ${d.path}${d.exists ? "" : "  (missing)"}`).join("\n");
     };
     void loadRegistered().then(showCurrentDb);
@@ -3275,7 +3294,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // No remembered handle: open the picker immediately, before any await.
       picker({ id: "slicerlive-dicom-db" }).then(browseDatabase).catch(failed);
     };
-    (el.querySelector('[data-act="dicom-db"]') as HTMLButtonElement).addEventListener("click", () => openDatabase(false));
+    // A DOUBLE-CLICK OPENS ONE WINDOW (critic 2026-11-06, finding 13: two, one on top of the other): openDatabase waits on the
+    // server before it draws, so a second press in that moment does nothing.
+    let openingDb = false;
+    (el.querySelector('[data-act="dicom-db"]') as HTMLButtonElement).addEventListener("click", () => {
+      if (openingDb) return;
+      openingDb = true;
+      setTimeout(() => { openingDb = false; }, 1000);
+      openDatabase(false);
+    });
 
     // ---- "Also add to [database]" and the Databases window (Ron, 2026-10-01; desktop/db-import.ts) ----
     const addBox = el.querySelector(".sl-add-db") as HTMLInputElement, addWhich = el.querySelector(".sl-add-db-which") as HTMLSelectElement;
@@ -3415,7 +3442,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // business; choosing a database is a setting. `openDatabase(true)` stays for the browser build.
     (globalThis as unknown as { __pickDatabase?: () => void }).__pickDatabase = () => openDatabase(true);
     openDatabaseFromOutside = () => { void (servedDb ? Promise.resolve() : loadRegistered()).then(() => openDatabase(false)); };   // a fresh panel has not yet asked which database is current
-    showLoadFromDisk = () => showPane("load-files");
+    showLoadFromDisk = () => setIo?.("load", "files");
     dicomFilesArrived = async (files: File[]) => {
       status("scanning files…");
       showSeries(await indexFiles(files, indexProgress));

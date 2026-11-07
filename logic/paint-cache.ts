@@ -3,8 +3,11 @@
 // outline (logic/segmentation-editor.ts growIntoSegmentation), Click to outline -- can drop the stale copy without
 // importing the editor's tools. The one writer of this map is segment-tools.ts; the others only invalidate.
 import type { Vec3 } from "../render/mat4.ts";
+import type { StrokeRecord } from "./grow-strokes.ts";
 
-export interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; ijkToRAS: number[]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean; }
+export interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; ijkToRAS: number[]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean;
+  /** The strokes so far (logic/grow-strokes.ts), and the voxels of the strokes not yet written, per structure and direction. Dropped on each write. */
+  strokes: StrokeRecord; marks: Map<string, Uint8Array>; }
 export const paintCaches = new Map<string, PaintCache>();
 
 /** Drop the resident labelmap (call when the segmentation changes underneath, e.g. after a discrete effect). */

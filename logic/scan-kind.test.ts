@@ -1,6 +1,6 @@
 // What kind of scan (logic/scan-kind.ts), on UPENN-GBM-00020's four scans as their headers say them (read 2026-10-31).
 import { assertEquals } from "jsr:@std/assert@1";
-import { scanKind, scanKindV1 } from "./scan-kind.ts";
+import { scanKind, scanKindV1, scanKindV2 } from "./scan-kind.ts";
 
 Deno.test("UPENN-GBM-00020: the FLAIR carries the agent too and is still the FLAIR", () => {
   assertEquals(scanKind({ modality: "MR", agent: "OMNISCAN", repetitionTime: 1760, echoTime: 3.1, inversionTime: 950, description: "t1 axial stealth-post" }).kind, "T1 post-contrast");
@@ -43,4 +43,19 @@ Deno.test("version 2: the critic's cases of 2026-10-31 evening (qa/2026-10-31-ev
   assertEquals(scanKind({ modality: "MR", agent: "OMNISCAN", repetitionTime: 9420, echoTime: 141, inversionTime: 2500, description: "t2_Flair_axial" }).kind, "FLAIR");
   assertEquals(scanKind({ modality: "MR", repetitionTime: 5000, echoTime: 86, description: "ep2d_DTI_30dir" }).kind, "other");
   assertEquals(scanKind({ modality: "MR", description: "AX_T1_MPRAGE" }).kind, "T1");
+});
+
+Deno.test("version 3: the critic's cases of 2026-11-01 (qa/2026-11-01-grow-rejection-class.md, finding 8)", () => {
+  const t1 = { modality: "MR", repetitionTime: 2300, echoTime: 2.3 };
+  assertEquals(scanKind({ ...t1, description: "MPRAGE NO GAD" }).kind, "T1");
+  assertEquals(scanKind({ ...t1, agent: "", description: "MPRAGE NO GAD" }).kind, "T1");
+  assertEquals(scanKind({ modality: "MR", description: "MPRAGE NO GAD" }).kind, "T1");
+  assertEquals(scanKind({ modality: "MR", description: "T1 w/o contrast" }).kind, "T1");
+  assertEquals(scanKind({ ...t1, description: "T1 POST GAD NO FS" }).kind, "T1 post-contrast", "a 'no' that is not before a contrast word");
+  assertEquals(scanKind({ modality: "MR", description: "Sag T1 FLAIR" }).kind, "T1");
+  assertEquals(scanKind({ modality: "MR", description: "AX T2 FLAIR" }).kind, "FLAIR");
+  assertEquals(scanKind({ ...t1, description: "MPRAGE" }).how, "from the header: echo time 2.3 ms; no contrast agent in the header or the name");
+  assertEquals(scanKind({ ...t1, agent: "NONE", description: "MPRAGE" }).how, "from the header: echo time 2.3 ms; no contrast agent");
+  // version 2 kept as it was
+  assertEquals(scanKindV2({ ...t1, description: "MPRAGE NO GAD" }).kind, "T1 post-contrast");
 });

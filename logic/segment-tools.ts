@@ -11,7 +11,8 @@ import { canWrite, applyAutoThreshold, applyIslands, applyLogical, applyMargin, 
 import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
 import type { Vec3 } from "../render/mat4.ts";
 import { invertRowMajor } from "./transforms.ts";
-import { growDevice, growInPlace } from "./grow-from-seeds.ts";
+import { GROW_RULE_VERSION, growDevice, growInPlace, isRejection } from "./grow-from-seeds.ts";
+import { carryStrokes, chunkOfMark, growingOf, NO_STROKES, outsideStrokesFor, rememberStrokes, strokesAt, strokesOf, type StrokeChunk, withChunks, withGrown } from "./grow-strokes.ts";
 import { fillPolygon } from "./fill-polygon.ts";
 import { type BrushLimits, type BrushParams, type BrushTally, brushPreview, limitsFor, newTally, paintStamps, paintStepMm } from "./paint-brush.ts";
 import { markEdited } from "./segmentation-editor.ts";
@@ -40,17 +41,29 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
   const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
   const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
 
-  let out: Uint8Array, threshold: number | undefined, ms: number | undefined;
+  const zarrBefore = seg.zarr;
+  let out: Uint8Array, threshold: number | undefined, ms: number | undefined, grew: { record: ReturnType<typeof withGrown> } | undefined;
   if (effect === "growFromSeeds") {
     // EVERY SEGMENT'S STROKES COMPETE (logic/grow-from-seeds.ts), inside a box around them; outside it nothing changes.
-    // Undo puts the strokes back (Ron, 2026-10-01: "Do we have grow from seed in the editor? That would do the job.").
+    // Ron, 2026-10-01: "Do we have grow from seed in the editor? That would do the job."
     const srcId = ((seg.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
     const srcNode = srcId ? live.nodes.get(srcId) : undefined;
     if (!srcNode?.zarr) throw new Error("grow from seeds needs the scan the segmentation was drawn on");
     const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
     // ONLY THE SEGMENTS SHOWN TAKE PART, as in Slicer (critic, 2026-10-01, finding 7): logic/grow-from-seeds.ts growInPlace.
-    const hidden = new Set(((seg.segments as { labelValue: number; visible?: boolean }[] | undefined) ?? []).filter((x) => x.visible === false).map((x) => x.labelValue));
-    const r = await growInPlace(await growDevice(), labelmap, src.data as ArrayLike<number>, dims, hidden);
+    const segs = (seg.segments as { labelValue: number; visible?: boolean; rejection?: boolean }[] | undefined) ?? [];
+    const hidden = new Set(segs.filter((x) => x.visible === false).map((x) => x.labelValue));
+    // What Outside (the rejection class) wins is emptied: logic/grow-from-seeds.ts isRejection. Only the structure named
+    // on the button (`segment`) grows; the other shown segments stop it and stay as they are (critic 2026-11-01, finding 1).
+    const rejection = new Set(segs.filter(isRejection).map((x) => x.labelValue));
+    const target = params.segment !== undefined && !rejection.has(params.segment) ? params.segment : undefined;
+    // What is strokes and what is an earlier result: logic/grow-strokes.ts, by the state of the labels, so Undo is right too.
+    const record = strokesAt(segId, zarrBefore) ?? NO_STROKES;
+    const strokes = target !== undefined && record.grown.has(target) ? strokesOf(record, target) : undefined;
+    const roundOutside = target !== undefined ? outsideStrokesFor(record, rejection, target) : undefined;
+    const r = await growInPlace(await growDevice(), labelmap, src.data as ArrayLike<number>, dims, hidden, rejection, target, { strokes, roundOutside });
+    // A first press: all of the label was a seed, so all of it stays one for the next.
+    if (target !== undefined) grew = { record: withGrown(strokes || !r.seeds?.length ? record : withChunks(record, [{ label: target, erase: false, at: r.seeds }]), target) };
     out = r.out;
     ms = r.ms;
   } else if (effect === "threshold" || effect === "autoThreshold") {
@@ -74,6 +87,8 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
   const { desc, blobs } = await volumeToZarr(out, dims, "|u1");
   store.add(blobs);
   live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
+  if (grew) rememberStrokes(segId, desc, grew.record); else carryStrokes(segId, zarrBefore, desc);
+  if (effect === "growFromSeeds") live.write({ op: "patch", id: segId, path: "#/growRule", value: GROW_RULE_VERSION });   // which rule made this result (critic 2026-11-06, finding 10)
   markEdited(live, segId);
   invalidatePaintCache(segId);
   let voxels = 0; for (let i = 0; i < out.length; i++) if (out[i] === params.segment) voxels++;
@@ -104,9 +119,29 @@ async function paintCache(live: LiveScene, segId: string): Promise<PaintCache | 
   const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
   const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
   const ijk = seg.ijkToRAS as number[];
-  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], ijkToRAS: ijk, invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false };
+  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], ijkToRAS: ijk, invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false, strokes: strokesAt(segId, seg.zarr) ?? NO_STROKES, marks: new Map() };
   paintCaches.set(segId, c);
   return c;
+}
+
+/** The stroke's voxels until they are written (logic/grow-strokes.ts): one byte per voxel, dropped with the write. */
+function markOf(c: PaintCache, label: number, erase: boolean): Uint8Array {
+  const key = `${label} ${erase ? 1 : 0}`;
+  let mark = c.marks.get(key);
+  if (!mark) c.marks.set(key, mark = new Uint8Array(c.labelmap.length));
+  return mark;
+}
+/** Turn the marks into the record, and give the record to the state just written. */
+function recordStrokes(c: PaintCache, segId: string, zarr: unknown) {
+  const chunks: StrokeChunk[] = [];
+  for (const [key, mark] of c.marks) {
+    const [label, erase] = key.split(" ").map(Number);
+    const chunk = chunkOfMark(mark, label, erase === 1, growingOf(segId));
+    if (chunk) chunks.push(chunk);
+  }
+  c.marks.clear();
+  c.strokes = withChunks(c.strokes, chunks);
+  rememberStrokes(segId, zarr, c.strokes);
 }
 
 export type PaintParams = BrushParams;
@@ -126,7 +161,10 @@ export function paintStroke(live: LiveScene, segId: string, points: Vec3[], para
   const p = (pendingPaint.get(segId) ?? Promise.resolve()).then(async () => {
     const c = await paintCache(live, segId); if (!c) return;
     if (first || !strokeTally.has(segId)) strokeTally.set(segId, { ...newTally(), mode: params.mode });
-    paintStamps(c, points, params, limitsFor(paintLimits.get(segId) ?? {}, viewImage), strokeTally.get(segId)!);
+    const tally = strokeTally.get(segId)!;
+    tally.mark = markOf(c, params.segment, params.mode !== "add");
+    paintStamps(c, points, params, limitsFor(paintLimits.get(segId) ?? {}, viewImage), tally);
+    tally.mark = undefined;   // the tally outlives the stroke (the status line); the mark goes with the write
     c.dirty = true;
   });
   pendingPaint.set(segId, p.catch(() => {}));
@@ -155,7 +193,7 @@ const pendingPaint = new Map<string, Promise<void>>();
 export async function drawFill(live: LiveScene, segId: string, points: Vec3[], params: { segment: number; normal: Vec3 }): Promise<number> {
   const c = await paintCache(live, segId); if (!c) return 0;
   const lim = paintLimits.get(segId), ov = { segment: params.segment, overwrite: lim?.overwrite, visibleSegments: lim?.visibleSegments, overSegment: lim?.overSegment };
-  const n = fillPolygon(c.labelmap, c.dims, c.ijkToRAS, c.invIjk, points, params.normal, params.segment, (cur) => canWrite(cur, ov));
+  const n = fillPolygon(c.labelmap, c.dims, c.ijkToRAS, c.invIjk, points, params.normal, params.segment, (cur) => canWrite(cur, ov), markOf(c, params.segment, false));
   if (n) c.dirty = true;
   return n;
 }
@@ -174,6 +212,7 @@ export async function commitPaint(live: LiveScene, store: LocalBlobStore, segId:
       c.dirty = false;
       const { desc, blobs } = await volumeToZarr(c.labelmap, c.dims, "|u1");
       store.add(blobs);
+      recordStrokes(c, segId, desc);   // before the write: whoever the write wakes finds the record there
       live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
       markEdited(live, segId);
       await pendingPaint.get(segId);
@@ -197,6 +236,7 @@ export async function showLabelmap(live: LiveScene, store: LocalBlobStore, segId
   // Cancelled or replaced while it was being made: written now, it would cover what Cancel put back.
   if (!stillWanted() || !live.nodes.has(segId)) return null;
   store.add(blobs);
+  carryStrokes(segId, n.zarr, desc);
   live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
   invalidatePaintCache(segId);
   return [...blobs.keys()];
@@ -207,6 +247,7 @@ export async function writeLabelmap(live: LiveScene, store: LocalBlobStore, segI
   const n = live.nodes.get(segId); if (!n) throw new Error("no segmentation " + segId);
   const { desc, blobs } = await volumeToZarr(labels, n.dims as [number, number, number], "|u1");
   store.add(blobs);
+  carryStrokes(segId, n.zarr, desc);
   live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
   markEdited(live, segId);
   invalidatePaintCache(segId);

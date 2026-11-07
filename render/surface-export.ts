@@ -45,7 +45,8 @@ const pageWorker = () => new Worker(workerUrl("./surface-nets-worker.js"), { typ
  * a file of nothing is never what was meant. Labels outside 1..255 are not structures of a label map.
  */
 export function structuresToExport(segments: readonly ExportSegment[]): ExportSegment[] {
-  const all = segments.filter((s) => s.labelValue > 0 && s.labelValue < 256);
+  // Outside, Grow from seeds' rejection class, is never exported (logic/grow-from-seeds.ts; critic 2026-11-01, finding 3).
+  const all = segments.filter((s) => s.labelValue > 0 && s.labelValue < 256 && (s as { rejection?: boolean }).rejection !== true);
   const shown = all.filter((s) => s.visible !== false && ((s as { opacity?: number }).opacity ?? 1) > 0);   // opacity 0 is not shown (critic 2026-10-22, finding 6)
   return shown.length ? shown : all;
 }

@@ -41,6 +41,7 @@ export async function createSegmentation(live: LiveScene, store: LocalBlobStore,
     visible: true, opacity: 1, source: { mrmlClass: "vtkMRMLSegmentationNode" }, origin: { local: true },
   } as unknown as MrsonNode;
   live.write({ op: "put", id: segId, node });
+  joinSequence(live, segId);   // made on a frame, it joins the sequence at that frame, as the other makers do (critic 2026-11-06, finding 5)
   return { segId, segment: 1 };
 }
 
@@ -262,7 +263,8 @@ export function createSegmentationFromBuilt(
  * "Do we have grow from seed in the editor? That would do the job"; mockup diffusion-workflow-v4). Every segment of
  * `seedsId` competes (logic/grow-from-seeds.ts), and the grown `keep` segment becomes the label map of the result: made
  * on the first call, replaced on the next. The strokes stay as they are, so more strokes and another grow start again
- * from all of them -- which an in-place grow (applyEffect "growFromSeeds") cannot do, since it turns strokes into fill.
+ * from all of them. Here the strokes and the result are two segmentations; the in-place grow (applyEffect
+ * "growFromSeeds") keeps its strokes in logic/grow-strokes.ts.
  */
 export async function growIntoSegmentation(live: LiveScene, store: LocalBlobStore, seedsId: string, keep: number,
   o: { resultId?: string; name: string; color: [number, number, number] }): Promise<{ segId: string; voxels: number; ms: number }> {
@@ -273,7 +275,10 @@ export async function growIntoSegmentation(live: LiveScene, store: LocalBlobStor
   const dims = seeds.dims as [number, number, number];
   const lab = await fetchZarrVolumeNative(live.blobBase(), seeds.zarr as ZarrDesc);
   const src = await fetchZarrVolumeNative(live.blobBase(), srcNode.zarr as ZarrDesc);
-  const r = await growFromSeeds(await growDevice(), lab.data as ArrayLike<number>, src.data as ArrayLike<number>, dims);
+  // RULE 1 ON PURPOSE (critic 2026-11-06, finding 10): the change of rule on 2026-11-01 was measured on ventricles, for
+  // the editor, and moved this tumor outline with it unmeasured. It changes rule on purpose or not at all.
+  const rule = 1;
+  const r = await growFromSeeds(await growDevice(), lab.data as ArrayLike<number>, src.data as ArrayLike<number>, dims, { rule });
   const out = new Uint8Array(r.labels.length);
   let voxels = 0;
   for (let i = 0; i < out.length; i++) if (r.labels[i] === keep) { out[i] = 1; voxels++; }
@@ -281,11 +286,13 @@ export async function growIntoSegmentation(live: LiveScene, store: LocalBlobStor
     const { desc, blobs } = await volumeToZarr(out, dims, "|u1");
     store.add(blobs);
     live.write({ op: "patch", id: o.resultId, path: "#/zarr", value: desc });
+    live.write({ op: "patch", id: o.resultId, path: "#/growRule", value: rule });
     markEdited(live, o.resultId);
     invalidatePaintCache(o.resultId);
     return { segId: o.resultId, voxels, ms: r.ms };
   }
   const made = await createSegmentationFromLabelmap(live, store, srcId, out, [{ labelValue: 1, name: o.name, color: o.color }], { name: o.name });
+  live.write({ op: "patch", id: made.segId, path: "#/growRule", value: rule });
   markEdited(live, made.segId);
   return { segId: made.segId, voxels, ms: r.ms };
 }

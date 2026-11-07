@@ -16,8 +16,11 @@
  *  words split at underscores too ("3D_AX_T1_postcontrast" was "other"); an EMPTY agent field is unknown, not "no agent",
  *  so a name that says post-contrast decides (anonymizers blank the field); "No contrast" and the like are no agent; scans
  *  that are not an image of the anatomy -- susceptibility, localizers, perfusion, angiography, maps -- are "other", though
- *  taken after the injection (an SWI and a localizer came out "T1 post-contrast"). Version 1 stays as scanKindV1. */
-export const SCAN_KIND_VERSION = 2;
+ *  taken after the injection (an SWI and a localizer came out "T1 post-contrast"). Version 1 stays as scanKindV1.
+ *  3: 2026-11-01, after the critic (qa/2026-11-01-grow-rejection-class.md, finding 8): "no" before a contrast word is no
+ *  agent ("MPRAGE NO GAD" was post-contrast); a T1-weighted FLAIR by its name is T1, not FLAIR; an empty agent field is
+ *  said as "no contrast agent in the header or the name", not as the header's. Version 2 stays as scanKindV2. */
+export const SCAN_KIND_VERSION = 3;
 
 export type ScanKind = "T1 post-contrast" | "T1" | "T2" | "FLAIR" | "CT post-contrast" | "CT" | "other";
 
@@ -33,8 +36,42 @@ export interface ScanFacts {
   sequenceName?: string;
 }
 
-/** The kind, and how it was decided, in words a person reads (version 2). */
+/** The kind, and how it was decided, in words a person reads (version 3). */
 export function scanKind(f: ScanFacts): { kind: ScanKind; how: string } {
+  const mod = (f.modality ?? "").toUpperCase();
+  const agent = (f.agent ?? "").trim();
+  const noAgent = /^(none|no|n\/a|na|nil|-|0)$|^(no|without|w\/o)\b/i.test(agent);
+  const named = !!agent && !noAgent;
+  // The name's words, split at underscores, dashes and dots as well as spaces ("\b" does not split "AX_T1").
+  const words = ` ${`${f.description ?? ""} ${f.sequenceName ?? ""}`.toLowerCase().replace(/[_\-.,/()]+/g, " ")} `;
+  const says = (re: RegExp) => re.test(words);
+  // A contrast word with a "no" before it says no agent ("MPRAGE NO GAD", "T1 w o contrast"); a "no" elsewhere does not
+  // ("T1 POST GAD NO FS" stays post-contrast).
+  const namePost = says(/ (post|postcontrast|post contrast|gad|gado|gd|c\+|\+c|t1c|t1ce|t1gd|ce|contrast|enhanced) /) && !says(/ (pre|precontrast)( |$)/) && !says(/ (no|non|without|w o|wo) (contrast|gad|gado|gd|agent|enhancement) /);
+  const notAnatomy = says(/ (swi|swan|susc|suscept|loc|localizer|localiser|scout|survey|3 plane|tri plane|perf|perfusion|dsc|dce|pwi|asl|tof|mra|angio|adc|trace|fa|map|t2\*|t2star|hemo) /);
+  if (mod === "CT") return named || (!agent && namePost) ? { kind: "CT post-contrast", how: named ? `from the header: contrast agent ${agent}` : "from the series name" } : { kind: "CT", how: agent ? "from the header: no contrast agent" : "no contrast agent in the header or the name" };
+  if (mod && mod !== "MR") return { kind: "other", how: `modality ${mod}` };
+  if (says(/ (diff|dti|dwi|dsi|hardi|ep2d diff) /) || /diff|dti|dwi|dsi|hardi/i.test(f.sequenceName ?? "")) return { kind: "other", how: "a diffusion scan" };
+  if (notAnatomy) return { kind: "other", how: "the series name says it is not an image of the anatomy (susceptibility, localizer, perfusion, angiography or a map)" };
+  const post = named || (!agent && namePost);
+  const postHow = named ? `contrast agent ${agent}` : "the series name says post-contrast";
+  const tr = f.repetitionTime, te = f.echoTime, ti = f.inversionTime;
+  if (ti !== undefined && ti >= 1500 && te !== undefined && te >= 70) return { kind: "FLAIR", how: `from the header: inversion time ${ti} ms, echo time ${te} ms` };
+  if (te !== undefined && te >= 60 && tr !== undefined && tr >= 2000 && !(ti !== undefined && ti > 0)) return { kind: "T2", how: `from the header: repetition time ${tr} ms, echo time ${te} ms` };
+  if (te !== undefined && te < 30 && tr !== undefined && tr < 3000) {
+    // An empty agent field says nothing (critic 2026-11-01, finding 8): the words say so instead of "no contrast agent".
+    return post ? { kind: "T1 post-contrast", how: `from the header: echo time ${te} ms; ${postHow}` } : { kind: "T1", how: `from the header: echo time ${te} ms; ${agent ? "no contrast agent" : "no contrast agent in the header or the name"}` };
+  }
+  // A T1-weighted FLAIR (GE's "T1 FLAIR") is a T1 image of the anatomy, not the FLAIR (critic 2026-11-01, finding 8).
+  if (says(/ (t1 flair|t1flair|flair t1) /)) return post || namePost ? { kind: "T1 post-contrast", how: "from the series name (a T1-weighted FLAIR)" } : { kind: "T1", how: "from the series name (a T1-weighted FLAIR)" };
+  if (says(/ (flair|t2 flair|dark fluid) /)) return { kind: "FLAIR", how: "from the series name" };
+  if (says(/ t1\w* /) || says(/ (mprage|spgr|bravo|tfl|vibe|space t1) /)) return post || namePost ? { kind: "T1 post-contrast", how: "from the series name" } : { kind: "T1", how: "from the series name" };
+  if (says(/ t2\w* /)) return { kind: "T2", how: "from the series name" };
+  return { kind: "other", how: "neither the header nor the name says" };
+}
+
+/** Version 2 (2026-10-31 evening), kept so a recorded answer can be reproduced. */
+export function scanKindV2(f: ScanFacts): { kind: ScanKind; how: string } {
   const mod = (f.modality ?? "").toUpperCase();
   const agent = (f.agent ?? "").trim();
   const noAgent = /^(none|no|n\/a|na|nil|-|0)$|^(no|without|w\/o)\b/i.test(agent);

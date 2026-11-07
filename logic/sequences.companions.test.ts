@@ -3,6 +3,8 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import { LiveScene } from "../render/livescene.ts";
 import type { MrsonNode } from "../render/mrson.ts";
 import { companionItem, currentFrames, frameMate, joinSequence, selectFrame } from "./sequences.ts";
+import { createSegmentation } from "./segmentation-editor.ts";
+import { LocalBlobStore } from "./ingest.ts";
 
 function scene(): { live: LiveScene; browser: string; frames: string[] } {
   const live = new LiveScene("http://x/mrson/", []);
@@ -93,4 +95,15 @@ Deno.test("SequenceDisplayableManager: one member on screen per companion; the d
   selectFrame(live, "b", 0);
   assertEquals(vis(), "truefalsefalse");
   assertEquals(live.nodes.get("s0")!.visible3D, false);
+});
+
+Deno.test("a segmentation made empty on a frame joins the sequence at that frame, and is listed as current there (critic 2026-11-06, findings 5, 6)", async () => {
+  const { live, frames } = scene();
+  (live.nodes.get(frames[0]) as unknown as Record<string, unknown>).dims = [2, 2, 2];
+  (live.nodes.get(frames[0]) as unknown as Record<string, unknown>).ijkToRAS = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const { segId } = await createSegmentation(live, new LocalBlobStore(), frames[0]);
+  const n = live.nodes.get(segId)!;
+  assert(n.sequence, "it is in a companion sequence");
+  assertEquals(n.hidden, true);
+  assert(currentFrames(live).has(segId), "on its own frame it is current, so the picker lists it");
 });

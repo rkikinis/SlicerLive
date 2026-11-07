@@ -4295,7 +4295,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   let sideBySideWas: { cell: string; sliceToRAS: unknown; orientation: unknown; offset: unknown; fov: unknown; orientKey: Orientation; bg: unknown; fg: unknown; linked: unknown }[] | null = null;
   // A NEW SCENE ENDS IT (critic 2026-10-31 evening, finding 5): "One scan again" put the previous patient's scans and
   // planes back into the views, as nothing forgot them.
-  live.subscribe((ch) => { if (ch.kind === "reset") sideBySideWas = null; });
+  // Albula's Close scene and its scene opener delete the nodes one by one (op "del", seen here as "remove"); only Slicer's
+  // side sends "reset" (critic 2026-11-01, finding 5). So: when the last of the scans shown side by side has left the
+  // scene, the scene has changed, and it ends. One scan closed of three leaves it on (the rest go back as before).
+  let sideBySideScans = new Set<string>();
+  live.subscribe((ch) => {
+    if (!sideBySideWas) return;
+    if (ch.kind === "reset" || (ch.kind === "remove" && sideBySideScans.has(ch.id) && ![...sideBySideScans].some((x) => live.nodes.has(x)))) { sideBySideWas = null; sideBySideScans = new Set(); }
+  });
   const sideBySide = (images: string[] | null, orientation: Orientation = "axial"): boolean => {
     const compOf = (cell: string) => [...live.nodes.values()].find((n) => n.type === "sliceComposite" && n.layoutName === cell);
     const fitTo = (c: SliceCell, o: Orientation, center: Vec3, from: SliceCell) => {
@@ -4313,10 +4320,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         if (comp) { if (still(w.bg).length) live.write({ op: "patch", id: comp.id, path: "#/refs/background", value: still(w.bg) }); live.write({ op: "patch", id: comp.id, path: "#/refs/foreground", value: still(w.fg) }); live.write({ op: "patch", id: comp.id, path: "#/linkedControl", value: w.linked }); }
         if (c) { c.orientKey = w.orientKey; const m = w.sliceToRAS as number[]; if (m) fitTo(c, w.orientKey, [m[3], m[7], m[11]], c); }
       }
-      sideBySideWas = null; renderSlices(); refreshSlicesIn3D(); return true;
+      sideBySideWas = null; sideBySideScans = new Set(); renderSlices(); refreshSlicesIn3D(); return true;
     }
     const views = ["Red", "Yellow", "Green"].filter((n) => cells.has(n) && live.nodes.has(nativeSliceId(n)));
     if (!views.length || !images.length) return false;
+    sideBySideScans = new Set(images);
     sideBySideWas ??= views.map((cell) => {
       const n = live.nodes.get(nativeSliceId(cell))!, comp = compOf(cell), refs = (comp?.refs as Record<string, string[]> | undefined) ?? {};
       return { cell, sliceToRAS: n.sliceToRAS, orientation: n.orientation, offset: n.offset, fov: n.fieldOfView, orientKey: cells.get(cell)!.orientKey, bg: refs.background ?? [], fg: refs.foreground ?? [], linked: comp?.linkedControl ?? false };

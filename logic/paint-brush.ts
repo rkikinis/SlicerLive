@@ -47,7 +47,9 @@ export function limitsFor(l: BrushLimits, viewImage?: string): BrushLimits {
 /** What a stroke wrote, and what it left because of the limits (voxel indices, so a stroke counts each once). */
 /** heldDarker: those of heldBrightness below the range (the rest are above it, or unlike the center in Adaptive), so the
  *  note beside the brush can say "darker" or "brighter". */
-export interface BrushTally { written: number; heldBrightness: Set<number>; heldDarker: Set<number>; heldOver: Set<number>; mode?: "add" | "remove"; }
+export interface BrushTally { written: number; heldBrightness: Set<number>; heldDarker: Set<number>; heldOver: Set<number>; mode?: "add" | "remove";
+  /** One byte per voxel: set on every voxel the stroke touches, painted before or not, for logic/grow-strokes.ts. */
+  mark?: Uint8Array; }
 export const newTally = (): BrushTally => ({ written: 0, heldBrightness: new Set(), heldDarker: new Set(), heldOver: new Set() });
 
 /**
@@ -141,7 +143,7 @@ export function paintStamps(c: BrushGrid, points: Vec3[], params: BrushParams, l
       if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
       const at = k * nx * ny + j * nx + i, cur = c.labelmap[at];
       // Erase takes away only the structure chosen; Paint writes where "over" allows.
-      if (add ? cur === seg : cur !== seg) { if (dry && add) dry.push(at); continue; }
+      if (add ? cur === seg : cur !== seg) { if (dry && add) dry.push(at); else if (!dry && tally.mark) tally.mark[at] = 1; continue; }
       if (add && !canWrite(cur, ov)) { tally.heldOver.add(at); continue; }
       if (limited && add) {
         let ok: boolean;
@@ -151,6 +153,7 @@ export function paintStamps(c: BrushGrid, points: Vec3[], params: BrushParams, l
       }
       if (dry) { dry.push(at); continue; }
       c.labelmap[at] = add ? seg : 0;
+      if (tally.mark) tally.mark[at] = 1;
       tally.written++;
       tally.heldBrightness.delete(at); tally.heldDarker.delete(at); tally.heldOver.delete(at);
     }

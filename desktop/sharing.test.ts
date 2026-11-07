@@ -36,6 +36,28 @@ Deno.test("the critic, finding 1: the page's older copy of the settings cannot s
   assert(now.includes("zoom=2"), now);
 });
 
+Deno.test("a network whose router's address many networks share is allowed only until midnight, never for good (Ron, 2026-11-03)", async () => {
+  const { allowedOn, nextMidnight } = await import("./sharing.ts");
+  const own = { id: "a".repeat(16), iface: "en0", address: "192.168.1.5" };
+  const hsrp = { id: "b".repeat(16), iface: "en0", address: "10.0.0.40", sharedRouter: true };
+  const noon = new Date(2026, 10, 3, 12, 0).getTime(), midnight = nextMidnight(noon);
+  assertEquals(new Date(midnight).getDate(), 4);
+  assertEquals(new Date(midnight).getHours(), 0);
+  assertEquals(allowedOn({ networks: [own.id] }, own, noon), true);
+  assertEquals(allowedOn({ networks: [] }, own, noon), false);
+  assertEquals(allowedOn({ networks: [] }, undefined, noon), false);
+  // In the list of networks allowed for good, a shared router's network is still not let in.
+  assertEquals(allowedOn({ networks: [hsrp.id] }, hsrp, noon), false);
+  const today = { networks: [], temporary: { id: hsrp.id, until: midnight } };
+  assertEquals(allowedOn(today, hsrp, noon), true);
+  assertEquals(allowedOn(today, hsrp, midnight), false);
+  assertEquals(allowedOn(today, { ...hsrp, id: "c".repeat(16) }, noon), false);
+  // An end time more than a day ahead (a hand edit, a wrong clock) is not honored (the critic 2026-11-03, finding 6).
+  assertEquals(allowedOn({ networks: [], temporary: { id: hsrp.id, until: noon + 100 * 24 * 3600_000 } }, hsrp, noon), false);
+  // The until-midnight allowance does not open a network known by its own router.
+  assertEquals(allowedOn({ networks: [], temporary: { id: own.id, until: midnight } }, own, noon), false);
+});
+
 Deno.test("a database that is not on this Mac cannot be switched on; a Mac that is not allowed cannot be removed", async () => {
   assertEquals((await call("POST", "/_db/_sharing", { id: "nothing-here", on: true })).status, 404);
   assertEquals((await call("POST", "/_db/_sharing/forget", { id: "000000000000" })).status, 404);

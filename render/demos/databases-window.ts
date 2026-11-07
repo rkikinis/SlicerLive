@@ -34,7 +34,7 @@ export interface DbDescription { name: string; holds?: string; patientData?: boo
 export interface RegisteredDb { id: string; path: string; exists: boolean; current: boolean; description?: DbDescription; /** On another Mac (desktop/db-remote.ts), and why it cannot be opened just now. */ remote?: { host: string; why?: string } }
 
 /** Sharing on this Mac, as GET /_db/_sharing says (desktop/sharing.ts). */
-interface SharingState { available: boolean; touchID: boolean; databases: string[]; network: { known: boolean; allowed: boolean; count: number; why?: string }; listening: boolean; error?: string;
+interface SharingState { available: boolean; touchID: boolean; databases: string[]; network: { known: boolean; allowed: boolean; count: number; until?: number; why?: string }; listening: boolean; error?: string;
   pairing: { open: boolean; until?: number; closed?: string; waiting?: string }; name: string; macs: { id: string; name: string; pairedAt: string; confirmedAt?: string }[] }
 
 export async function listDatabases(): Promise<{ databases: RegisteredDb[]; features: string[] }> {
@@ -96,8 +96,9 @@ export interface DatabasesSection { refresh(): Promise<void>; startNew(): HTMLEl
  * answers of 2026-10-29: "Q1: a section", "Q2: List all, provide sliders to add them to the listing. In a remote access
  * situation list the ones that are available", "q: c", "2 gone", "3 second switch"; mockups/databases-2026-10-29.html).
  * It replaces the Databases window. Every database in the databases folder is a row: a switch says whether Albula uses
- * it, a second switch whether it is shared with the other Macs; one click on a row makes it the one Albula opens; its ⋯
- * holds Describe…, Show in Finder and Move to the Trash…. Databases elsewhere and on other Macs are rows too.
+ * it, a second switch whether it is shared with the other Macs; one click on a row makes it the one Albula opens; its
+ * Details (2026-11-01, in place of ⋯) holds where it came from, its private fields, Describe…, Show in Finder and Move to
+ * the Trash…. Databases elsewhere and on other Macs are rows too.
  */
 export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): DatabasesSection {
   const body = document.createElement("div");
@@ -123,21 +124,22 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     .sl-dbw-tag.sl-sh { background:var(--sl-ok-bg, rgba(143,199,154,.15)); color:var(--sl-ok, #8fc79a); border-color:var(--sl-ok-edge, rgba(143,199,154,.45)); }
     .sl-dbw-folder { display:flex; gap:6px; align-items:center; padding:2px 0 6px; border-bottom:1px solid var(--sl-line); }
     .sl-dbw-folder .sl-dbw-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .sl-dbw-heads { display:grid; grid-template-columns:40px minmax(0,1fr) 40px 28px; gap:6px; font-size:11px; color:var(--sl-fg-dim); padding:4px 2px 0; }
+    .sl-dbw-heads { display:grid; grid-template-columns:40px minmax(0,1fr) 40px 62px; gap:6px; font-size:11px; color:var(--sl-fg-dim); padding:4px 2px 0; }
     .sl-dbw-heads span:nth-child(3) { text-align:center; }
-    .sl-dbw-row { display:grid; grid-template-columns:40px minmax(0,1fr) 40px 28px; gap:6px; align-items:start; padding:6px 2px; border-bottom:1px solid var(--sl-line); border-radius:4px; }
+    .sl-dbw-row { display:grid; grid-template-columns:40px minmax(0,1fr) 40px 62px; gap:6px; align-items:start; padding:6px 2px; border-bottom:1px solid var(--sl-line); border-radius:4px; }
     .sl-dbw-row.sl-pick { cursor:pointer; }
     .sl-dbw-row.sl-pick:hover { background:rgba(255,255,255,.03); }
     .sl-dbw-row.sl-cur { background:var(--sl-accent-wash); outline:1px solid var(--sl-accent); }
     .sl-dbw-row.sl-off .sl-dbw-text { opacity:.55; }
-    .sl-dbw.sl-noshare .sl-dbw-heads, .sl-dbw.sl-noshare .sl-dbw-row { grid-template-columns:40px minmax(0,1fr) 28px; }
+    .sl-dbw.sl-noshare .sl-dbw-heads, .sl-dbw.sl-noshare .sl-dbw-row { grid-template-columns:40px minmax(0,1fr) 62px; }
+    .sl-dbw-detbtn { min-width:0; height:24px; padding:0 8px; margin:0; font-size:12px; }
+    .sl-dbw-detbtn[aria-expanded=true] { outline:2px solid var(--sl-accent); outline-offset:-1px; }
+    .sl-dbw-details { border-top:1px solid var(--sl-line); margin-top:4px; padding-top:4px; cursor:default; }
+    .sl-dbw-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
     .sl-dbw-row:focus-visible { outline:2px solid var(--sl-accent); outline-offset:1px; }
     .sl-dbw-row > .sl-dbw-sub { grid-column:2 / -1; }
     .sl-dbw-row > .sl-dbw-form, .sl-dbw-row > .sl-dbw-rm { grid-column:1 / -1; cursor:default; }
     .sl-dbw-holds2 { margin:2px 0 0; font-size:12px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-    .sl-dbw-more { width:28px; min-width:0; height:24px; padding:0; font-size:16px; line-height:1; }
-    .sl-dbw-menu { grid-column:2 / -1; display:flex; flex-direction:column; gap:2px; border:1px solid var(--sl-line-strong); border-radius:var(--sl-radius); padding:4px; }
-    .sl-dbw-menu button { text-align:left; }
     .sl-dbw-subhead { font-size:11px; color:var(--sl-fg-dim); font-weight:600; margin:10px 0 0; }
     .sl-dbw-adv > summary { cursor:pointer; color:var(--sl-fg-dim); font-size:12px; margin-top:10px; }
     .sl-dbw-sw { position:relative; display:inline-flex; cursor:pointer; margin-top:1px; }
@@ -277,6 +279,12 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       rb.addEventListener("click", () => nearbyForm(advActs));
       advActs.appendChild(rb);
     }
+    // AT MIDNIGHT THE ROW STOPS SAYING "shared until midnight" (the critic 2026-11-03, finding 3): one redraw just after
+    // the server's next check (every 5 s).
+    if (sharing?.network.until) {
+      const at = sharing.network.until, wait = Math.max(0, at - Date.now()) + 7_000;
+      setTimeout(() => { if (gen === drawing && body.isConnected) render(); }, wait);
+    }
     if (sharing?.available && (sharing.databases.length || sharing.macs.length)) {
       adv.appendChild(sharingBox());
       // THE BOX FOLLOWS PAIRING while it is open (the critic, round 2, R2-9): who asks, closed, the five minutes ending.
@@ -378,26 +386,41 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     return lab;
   };
 
-  /** The ⋯ of a row: its actions, opened under it. */
-  const moreMenu = (r: HTMLElement, items: [string, string, () => void][]): HTMLElement => {
-    const more = button("⋯", "More: " + items.map((x) => x[0].replace(/…$/, "")).join(", "));
-    more.className = "sl-dbw-more";
-    more.style.cssText = "width:28px;min-width:0;height:24px;padding:0;margin:0;font-size:16px;line-height:1;";   // over the panel's own button size
-    more.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const open = r.querySelector(".sl-dbw-menu");
-      if (open) { open.remove(); return; }
-      const m = document.createElement("div");
-      m.className = "sl-dbw-menu";
+  /** DETAILS (Ron, 2026-11-01, on the row's two lines of fine print and its ⋯: "Just a details button with the text and
+   *  the other three buttons"; mockups/load-save-toggle-2026-11-01.html). Under the row: where it came from, its private
+   *  fields, and what can be done with it. Built when opened (so a closed row asks the server nothing); open rows stay
+   *  open across redraws. */
+  const detailsOpen = new Set<string>();
+  const detailsButton = (r: HTMLElement, key: string, build: () => HTMLElement): HTMLElement => {
+    const b = button("Details", "Where this database came from, its scanner makers' own fields, and what can be done with it");
+    b.className = "sl-dbw-detbtn";
+    const show = (on: boolean) => {
+      b.setAttribute("aria-expanded", String(on));
+      r.querySelector(":scope > .sl-dbw-details")?.remove();
+      if (on) { detailsOpen.add(key); r.appendChild(build()); } else detailsOpen.delete(key);
+    };
+    b.addEventListener("click", (e) => { e.stopPropagation(); show(!detailsOpen.has(key)); });
+    if (detailsOpen.has(key)) queueMicrotask(() => show(true));   // after the row is put together
+    else b.setAttribute("aria-expanded", "false");
+    return b;
+  };
+  const detailsBox = (lines: string[], extra: HTMLElement[], items: [string, string, () => void][]): HTMLElement => {
+    const box = document.createElement("div");
+    box.className = "sl-dbw-details sl-dbw-sub";
+    box.innerHTML = lines.map((x) => `<div class="sl-dbw-meta">${esc(x)}</div>`).join("");
+    box.append(...extra);
+    if (items.length) {
+      const acts = document.createElement("div");
+      acts.className = "sl-dbw-acts";
       for (const [label, title, go] of items) {
         const b = button(label, title);
-        b.addEventListener("click", (ev) => { ev.stopPropagation(); m.remove(); go(); });
-        m.appendChild(b);
+        b.addEventListener("click", (ev) => { ev.stopPropagation(); go(); });
+        acts.appendChild(b);
       }
-      m.addEventListener("click", (ev) => ev.stopPropagation());
-      r.appendChild(m);
-    });
-    return more;
+      box.appendChild(acts);
+    }
+    box.addEventListener("click", (ev) => ev.stopPropagation());
+    return box;
   };
 
   /** Make a row choose the default by a click or by the keyboard (finding 9: a div no keyboard could reach). */
@@ -408,7 +431,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     r.addEventListener("click", (e) => {
       // The row's own controls, its private-fields line and its open forms are theirs (the row itself sits inside the
       // section's <details>); a drag that selected text is not a click.
-      const hit = (e.target as HTMLElement).closest("button, input, label, details, summary, .sl-dbw-form, .sl-dbw-rm, .sl-dbw-menu, .sl-dbw-pf");
+      const hit = (e.target as HTMLElement).closest("button, input, label, details, summary, .sl-dbw-form, .sl-dbw-rm, .sl-dbw-pf, .sl-dbw-details");
       if ((hit && r.contains(hit)) || String(globalThis.getSelection?.() ?? "")) return;
       void choose();
     });
@@ -431,7 +454,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     const shared = !d.remote && !!sharing?.databases.includes(d.id);
     const elsewhere = !d.remote && folder && !d.path.startsWith(folder.replace(/\/+$/, "") + "/");
     const tags = (d.remote ? `<span class="sl-dbw-tag" title="Kept on another Mac and opened from here">on ${esc(d.remote.host)}</span>` : "")
-      + (shared ? (sharing!.listening ? `<span class="sl-dbw-tag sl-sh" title="The Macs you allowed can open it, on this network">shared</span>` : `<span class="sl-dbw-tag">shared — paused</span>`) : "")
+      + (shared ? (sharing!.listening ? `<span class="sl-dbw-tag sl-sh" title="The Macs you allowed can open it, on this network${sharing!.network.until ? "; on this network only until midnight, because its router's address is one many networks use" : ""}">${sharing!.network.until ? "shared until midnight" : "shared"}</span>` : `<span class="sl-dbw-tag">shared — paused</span>`) : "")
       + (ds?.patientData === true ? `<span class="sl-dbw-tag sl-pt" title="Not released for public use: kept as patient data is kept">not public</span>`
         : ds?.patientData === false ? `<span class="sl-dbw-tag" title="De-identified and released for anyone to use">public data</span>` : "");
     // THE REASON ON THE FACE, not in a tooltip (the critic 2026-10-28, finding 10).
@@ -442,8 +465,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     text.innerHTML = `<div><span class="sl-dbw-name">${esc(name)}</span>${tags}${d.current ? ` <span class="sl-hint">· opens by default</span>` : ""}${usable ? "" : ` <span class="sl-dbw-err">· ${d.remote?.why ? esc(d.remote.why) : `not reachable ${d.remote ? `(${esc(d.remote.host)} asleep, not sharing, or on another network?)` : "(a disk not connected?)"}`}</span>`}</div>
       ${pausedWhy ? `<div class="sl-dbw-meta">Sharing paused: ${esc(pausedWhy)}</div>` : ""}
       ${ds?.holds ? `<p class="sl-dbw-holds2" title="${esc(ds.holds)}">${esc(ds.holds)}</p>` : ""}
-      ${meta.length ? `<div class="sl-dbw-meta">${esc(meta.join(" · "))}</div>` : ""}
-      ${elsewhere ? `<div class="sl-dbw-meta" title="Not in the databases folder">elsewhere: ${esc(d.path)}</div>` : ""}`;
+`;
     /** Off the list; the folder stays. A database switched off keeps its row: in the databases folder it is found there,
      *  and one elsewhere is remembered by the server (finding 4). */
     const switchOff = async () => {
@@ -497,10 +519,12 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     if (canCreate && usable && !d.remote) items.push([ds ? "Describe…" : "Add a description…", "What this database is called, what it holds, whether it is public data, the approval it was collected under (if any), whom to ask.", () => editForm(r, d)]);
     if (canReveal && !d.remote && usable) items.push(["Show in Finder", "Open its folder in Finder.", async () => { const { ok, j } = await post("/_db/_reveal", { id: d.id }); if (!ok) say(String(j.error ?? "Finder could not show it.")); }]);
     if (removable && !d.remote && usable) items.push(["Move to the Trash…", "Its folder and everything in it go to the Trash, after you confirm. Finder's Put Back brings it back until the Trash is emptied.", () => void removeForm(r, d)]);
-    r.append(inUse, text, ...(shareCell ? [shareCell] : []), items.length ? moreMenu(r, items) : document.createElement("span"));
-    // BELOW THE ROW: its private-fields line, whose list can be long (finding 11 of the private-fields critic).
-    if (privateFieldsOn && usable && !d.remote) { const pf = privateFieldsLine(d); pf.classList.add("sl-dbw-sub"); r.appendChild(pf); }
-    else if (privateFieldsOn && d.remote) r.insertAdjacentHTML("beforeend", `<div class="sl-dbw-meta sl-dbw-sub">Private fields: shown on the Mac that keeps this database.</div>`);
+    // IN DETAILS: where it came from, the folder when it is elsewhere, its private-fields line (whose list can be long:
+    // finding 11 of the private-fields critic), and Describe, Show in Finder, Move to the Trash.
+    const lines = [...meta, ...(elsewhere ? [`elsewhere: ${d.path}`] : []), ...(privateFieldsOn && d.remote ? ["Private fields: shown on the Mac that keeps this database."] : [])];
+    const pfOn = privateFieldsOn && usable && !d.remote;
+    const hasDetails = lines.length || pfOn || items.length;
+    r.append(inUse, text, ...(shareCell ? [shareCell] : []), hasDetails ? detailsButton(r, d.id, () => detailsBox(lines, pfOn ? [privateFieldsLine(d)] : [], items)) : document.createElement("span"));
     if (usable && !d.current) choosable(r, `Open “${name}” by default`, async () => {
       r.classList.remove("sl-pick");
       const { ok, j } = await post("/_db", { current: d.id }, "PUT");
@@ -517,7 +541,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     r.className = "sl-dbw-row sl-off";
     const text = document.createElement("div");
     text.className = "sl-dbw-text";
-    text.innerHTML = `<div><span class="sl-dbw-name">${esc(f.name)}</span> <span class="sl-hint">· not in use</span>${f.exists ? "" : ` <span class="sl-dbw-err">· not reachable (a disk not connected?)</span>`}</div>${f.holds ? `<p class="sl-dbw-holds2" title="${esc(f.holds)}">${esc(f.holds)}</p>` : ""}${f.elsewhere ? `<div class="sl-dbw-meta" title="Not in the databases folder">elsewhere: ${esc(f.path)}</div>` : ""}`;
+    text.innerHTML = `<div><span class="sl-dbw-name">${esc(f.name)}</span> <span class="sl-hint">· not in use</span>${f.exists ? "" : ` <span class="sl-dbw-err">· not reachable (a disk not connected?)</span>`}</div>${f.holds ? `<p class="sl-dbw-holds2" title="${esc(f.holds)}">${esc(f.holds)}</p>` : ""}`;
     const inUse = slide(false, `Albula uses “${f.name}”`, f.elsewhere ? "Off: Albula does not use it; it stays where it is. On: Albula uses it there (the DICOM browser, Load / Save, Transfer)." : "Off: it is in the databases folder and Albula does not use it. On: Albula uses it (the DICOM browser, Load / Save, Transfer).",
       async (on, cb) => {
         if (!on) return;
@@ -527,7 +551,8 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
         o.onChanged?.(String(j.id)); await render();
       }, !canFound || !f.exists);
     const items: [string, string, () => void][] = canReveal && f.exists ? [["Show in Finder", "Open its folder in Finder.", async () => { const { ok, j } = await post("/_db/_reveal", { path: f.path }); if (!ok) say(String(j.error ?? "Finder could not show it.")); }]] : [];
-    r.append(inUse, text, ...(sharing?.available ? [document.createElement("span")] : []), items.length ? moreMenu(r, items) : document.createElement("span"));
+    const lines = f.elsewhere ? [`elsewhere: ${f.path}`] : [];
+    r.append(inUse, text, ...(sharing?.available ? [document.createElement("span")] : []), items.length || lines.length ? detailsButton(r, `found:${f.path}`, () => detailsBox(lines, [], items)) : document.createElement("span"));
     return r;
   };
 
@@ -560,7 +585,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
         : `Private fields: none that Albula does not read, in ${series(j.checked)}.`;
       const unchecked = j.series - j.checked - j.cannot;
       const more = !j.series ? "" : [
-        j.checking ? `Checking the other series: ${j.checking.done} of ${j.checking.of}…` : unchecked > 0 ? `${series(unchecked)} not checked yet.` : "",
+        j.checking ? `Checking the other series: ${j.checking.done} of ${j.checking.of}…` : unchecked > 0 ? `${series(unchecked)} not looked at yet.` : "",
         j.notWhole ? `${series(j.notWhole)} could not be read in full.` : "",
         j.cannot ? `${series(j.cannot)} cannot be checked (no files, or not a DICOM identifier).` : "",
         j.extensionsFound ? "" : "What the extensions read was not found on this Mac: their fields show here as not read.",
@@ -571,13 +596,13 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
         last = key;
         box.innerHTML = `<span>${esc(head)}${more ? ` ${esc(more)}` : ""}</span>`;
         if (!j.checking && j.series - j.checked - j.cannot > 0) {
-          const check = button("Check them", "Look at the series not checked yet (a few files of each; seconds for a few hundred series).");
+          const check = button("Look at the series", "Look at the series not looked at yet");
           check.style.cssText = "margin-left:6px;padding:0 8px;font-size:12px;";
           check.addEventListener("click", () => { checkAsked = true; void fill(); });
           box.appendChild(check);
         }
         if (j.blocks.length) {
-          const show = button(open ? "Hide" : "Show", "Each maker's or program's private fields found in this database's series, whether Albula reads them, and which series hold them.");
+          const show = button(open ? "Hide the list" : "List the fields", "Which scanner maker's or program's private fields are in this database, whether Albula reads them, and in which series");
           show.style.cssText = "margin-left:6px;padding:0 8px;font-size:12px;";
           show.addEventListener("click", () => { open = !open; void fill(); });
           box.appendChild(show);
@@ -720,11 +745,14 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       r.appendChild(head);
       box.appendChild(r);
     }
-    if (sh.network.count) {
+    if (sh.network.count || sh.network.until) {
       const r = document.createElement("div");
       const head = document.createElement("div");
       head.className = "sl-dbw-acts";
-      head.innerHTML = `<span style="flex:1" class="sl-dbw-meta">Shared on ${sh.network.count} network${sh.network.count === 1 ? "" : "s"} you allowed${sh.network.allowed ? ", this one among them" : ""}.</span>`;
+      // TODAY'S NETWORK IS NOT ONE OF THE COUNTED (the critic 2026-11-03, finding 1): it is allowed until midnight only.
+      const kept = sh.network.count ? `Shared on ${sh.network.count} network${sh.network.count === 1 ? "" : "s"} you allowed${sh.network.allowed && !sh.network.until ? ", this one among them" : ""}.` : "";
+      const today = sh.network.until ? "This network is allowed until midnight only: its router's address is one many networks use." : "";
+      head.innerHTML = `<span style="flex:1" class="sl-dbw-meta">${[kept, today].filter(Boolean).join(" ")}</span>`;
       const fg = button("Forget them…", "Sharing pauses everywhere until you switch it on again on a network, which asks for Touch ID.");
       fg.addEventListener("click", () => askInPlace(r, "Forget every network allowed for sharing? Sharing pauses until you switch it on again on a network (Touch ID).", "Forget them", async () => {
         const { ok, j } = await post("/_db/_sharing/forget-networks", {});

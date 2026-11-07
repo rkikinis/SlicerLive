@@ -24,6 +24,7 @@ import { registerLoadPanel } from "./load-panel.ts";
 import { keepPageAwakeWhileHidden } from "./keep-awake.ts";
 import { registerSampleDataPanel } from "./sample-data-panel.ts";
 import { SAMPLE_DATA } from "../../logic/sample-data.ts";
+import { isRejection } from "../../logic/grow-from-seeds.ts";
 import { registerVolumesPanel } from "./volumes-panel.ts";
 import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
@@ -349,8 +350,14 @@ async function exportSegAsDicom(live: LiveSceneT, segId: string, onStatus: (m: s
     for (const v of zv.data as ArrayLike<number>) if (v > max) max = v;
     if (max > 255) throw new Error(`this segmentation uses label values up to ${max}; a DICOM SEG from this application holds at most 255 structures`);
   }
-  const labels = zv.data instanceof Uint8Array ? zv.data : Uint8Array.from(zv.data as ArrayLike<number>);
-  const segments = ((seg.segments as { labelValue: number; name?: string; structure?: string; color?: number[]; fileCodes?: SegmentCodes }[] | undefined) ?? [])
+  // Outside, Grow from seeds' rejection class, is never saved (logic/grow-from-seeds.ts isRejection): its segment is
+  // not listed and its strokes are emptied, so the writer finds no label it cannot name.
+  const listedSegs = (seg.segments as { labelValue: number; name?: string; structure?: string; color?: number[]; fileCodes?: SegmentCodes; rejection?: boolean }[] | undefined) ?? [];
+  const rejected = new Set(listedSegs.filter(isRejection).map((sg) => sg.labelValue));
+  const read = zv.data instanceof Uint8Array ? zv.data : Uint8Array.from(zv.data as ArrayLike<number>);
+  const labels = rejected.size ? read.map((v) => rejected.has(v) ? 0 : v) : read;
+  const segments = listedSegs
+    .filter((sg) => !isRejection(sg))
     .map((sg) => ({
       labelValue: sg.labelValue,
       name: sg.name ?? `Segment ${sg.labelValue}`,

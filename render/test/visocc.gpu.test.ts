@@ -6,6 +6,7 @@
 //
 //   deno test -A --no-check --unstable-webgpu render/test/visocc.gpu.test.ts
 import { assertEquals } from "jsr:@std/assert";
+import { EMPTY_CUTOFF } from "../solid-smooth.ts";
 import { ColorizeField } from "../colorize-field.ts";
 
 const hasGpu = !!(globalThis as { navigator?: { gpu?: unknown } }).navigator?.gpu;
@@ -47,7 +48,8 @@ fn visocc_clz0(wp : vec3<f32>) -> vec2<f32> {
 `.replace("fn visocc_clz0(", "fn visocc_old(");
 
 function appVisocc(): string {
-  const w = (ColorizeField.prototype as unknown as { samplingWGSL(s: number): string }).samplingWGSL.call({}, 0);
+  // The shader text reads the field's own "nothing here" cut-off (solid-label-versions.ts v3); any value will do here.
+  const w = (ColorizeField.prototype as unknown as { samplingWGSL(s: number): string }).samplingWGSL.call({ emptyCut: EMPTY_CUTOFF }, 0);
   const i = w.indexOf("fn visocc_clz0(");
   const j = w.indexOf("\n/**", i);
   return w.slice(i, j).replace("fn visocc_clz0(", "fn visocc_new(");

@@ -29,7 +29,8 @@ import {
 } from "./mat4.ts";
 import { toF16Array } from "./cine-field.ts";
 import type { Field } from "./fields.ts";
-import { BRICK, BRICK2, BRICK_MIXED, BRICK_THIN, EMPTY_CUTOFF, buildSmoothSolid, makeBrick2Texture, makeBrickTexture, makeSmoothSolidTexture, smoothPasses } from "./solid-smooth.ts";
+import { BRICK, BRICK2, BRICK_MIXED, BRICK_THIN, buildAgreeLabels, buildBricks, buildSmoothSolid, countDrawn, emptyCutoff, makeAgreeLabelsTexture, makeBrick2Texture, makeBrickTexture, makeSmoothSolidTexture, smoothPasses } from "./solid-smooth.ts";
+import { agreeKept, solidBlurPasses, solidLabelsVersion } from "./solid-label-versions.ts";
 
 /**
  * WHERE A STRUCTURE TOO THIN FOR THE BLUR IS INSIDE: its labels' trilinear occupancy at least this. It was one half,
@@ -164,6 +165,9 @@ export class ColorizeField implements Field {
     this.clippable = opts.clippable ?? true;
     this.context = opts.contextOpacity ?? 1;
     this.ctMod = opts.ctModulation ?? 0.55;
+    // HOW WIDE THE SOLID LOOK'S BLUR IS, from this field's voxels (solid-label-versions.ts v3: by their anisotropy).
+    this.blurPasses = solidBlurPasses(opts.ijkToRAS ? spacingFromIjkToRAS(opts.ijkToRAS) : (opts.spacing ?? [1, 1, 1]), smoothPasses, this.solidVersion);
+    this.emptyCut = emptyCutoff(this.blurPasses);
     this.smoothTex = makeSmoothSolidTexture(dev, [1, 1, 1]);
     this.brickTex = makeBrickTexture(dev, [1, 1, 1]);
     this.brick2Tex = makeBrick2Texture(dev, [1, 1, 1]);
@@ -204,6 +208,10 @@ export class ColorizeField implements Field {
       this.brickTex = makeBrickTexture(this.dev, this.dims as [number, number, number]);
       this.brick2Tex.destroy();
       this.brick2Tex = makeBrick2Texture(this.dev, this.dims as [number, number, number]);
+      // THE LABELS THE SOLID LOOK DRAWS WITH (solid-label-versions.ts): from v2 a copy that agrees with the smoothed
+      // copy, one more byte per voxel while the solid look is on; v1 draws the labels themselves.
+      this.agreeTex?.destroy();
+      this.agreeTex = this.solidVersion >= 2 ? makeAgreeLabelsTexture(this.dev, this.dims as [number, number, number]) : undefined;
       this.smoothReal = true;
       this.rebuildSmooth();
       return true;
@@ -215,6 +223,7 @@ export class ColorizeField implements Field {
       this.brickTex = makeBrickTexture(this.dev, [1, 1, 1]);
       this.brick2Tex.destroy();
       this.brick2Tex = makeBrick2Texture(this.dev, [1, 1, 1]);
+      this.agreeTex?.destroy(); this.agreeTex = undefined;
       this.smoothReal = false;
       return true;
     }
@@ -226,6 +235,14 @@ export class ColorizeField implements Field {
   /** The block map (solid-smooth.ts, BRICK_WGSL) the solid pass leaps with; one texel when off. */
   private brickTex!: GPUTexture;
   private brick2Tex!: GPUTexture;
+  /** The labels that agree with the smoothed copy (solid-label-versions.ts v2), while the solid look is on. */
+  private agreeTex?: GPUTexture;
+  /** Which version of the solid look's labels this field draws with (solid-label-versions.ts), fixed when it is made. */
+  readonly solidVersion = solidLabelsVersion();
+  /** The smoothed copy's five-tap passes along i, j, k (solid-label-versions.ts solidBlurPasses), and its "nothing
+   *  here" cut-off (solid-smooth.ts emptyCutoff), which the block map and this field's shader use. */
+  readonly blurPasses: [number, number, number];
+  private readonly emptyCut: number;
   private smoothReal = false;
   private smoothPending = false;
   /** Which labels were visible when the smoothed copy was last made (flushPalette). */
@@ -240,7 +257,53 @@ export class ColorizeField implements Field {
     queueMicrotask(() => {
       this.smoothPending = false;
       if (this.destroyed || !this.smoothReal) return;
-      buildSmoothSolid(this.dev, this.labTex, this.lutTex, this.dims as [number, number, number], this.smoothTex, smoothPasses, this.brickTex, this.brick2Tex);
+      if (!this.agreeTex) { buildSmoothSolid(this.dev, this.labTex, this.lutTex, this.dims as [number, number, number], this.smoothTex, this.blurPasses, this.brickTex, this.brick2Tex); return; }
+      buildSmoothSolid(this.dev, this.labTex, this.lutTex, this.dims as [number, number, number], this.smoothTex, this.blurPasses);
+      this.writeSolidLabels();
+    });
+  }
+  /** Which labels the solid look draws with now (solid-label-versions.ts): 2 or 3 agreeing, 1 as painted; and the share of
+   *  the visible painted voxels outside the smoothed copy, which decided it. */
+  solidLabels: { version: number; lost: number } = { version: 1, lost: 0 };
+  /** Per structure, its visible painted voxels and those drawn (solid-smooth.ts countDrawn), a moment after the last change; for the line that says what is left out. */
+  solidDrawn?: { painted: Uint32Array; drawn: Uint32Array };
+  onDrawnCounted?: () => void;
+  private drawnTimer: number | undefined;
+  /** Called when the field's drawing changed on its own (the labels' choice came back): the view should redraw. */
+  onChanged?: () => void;
+  private agreeGen = 0;
+  /** The last choice; until the first count, the labels as painted (v2), agreeing labels always (v3). */
+  private solidChoice: "agree" | "painted" = this.solidVersion >= 3 ? "agree" : "painted";
+  /**
+   * THE LABELS THE SOLID LOOK DRAWS WITH (solid-label-versions.ts v2, MAX_LOST): written at once with the last choice, so
+   * nothing is ever drawn empty and an edit does not flicker; the count that comes back with it decides, and only a
+   * changed decision writes again (once, on the first build of a field whose agreeing copy loses little).
+   */
+  private writeSolidLabels() {
+    const gen = ++this.agreeGen, dims = this.dims as [number, number, number];
+    const out = this.agreeTex, smooth = this.smoothTex, bricks = this.brickTex, bricks2 = this.brick2Tex;
+    if (!out) return;
+    const mode = this.solidChoice;
+    const counted = buildAgreeLabels(this.dev, smooth, this.labTex, this.lutTex, dims, out, mode);
+    buildBricks(this.dev, smooth, out, this.lutTex, dims, bricks, bricks2, this.emptyCut);
+    void counted.then((c) => {
+      if (gen !== this.agreeGen || this.destroyed || out !== this.agreeTex) return;
+      const want = agreeKept(c.painted, c.outside, this.solidVersion) ? "agree" : "painted";
+      this.solidLabels = { version: want === "agree" ? this.solidVersion : 1, lost: c.painted ? c.outside / c.painted : 0 };
+      clearTimeout(this.drawnTimer);
+      this.drawnTimer = setTimeout(() => {
+        if (this.destroyed || gen !== this.agreeGen || out !== this.agreeTex) return;
+        void countDrawn(this.dev, this.labTex, out, this.lutTex, dims).then((d) => {
+          if (this.destroyed || gen !== this.agreeGen) return;
+          this.solidDrawn = d;
+          this.onDrawnCounted?.();
+        });
+      }, 1000) as unknown as number;
+      if (want === mode) return;
+      this.solidChoice = want;
+      void buildAgreeLabels(this.dev, smooth, this.labTex, this.lutTex, dims, out, want);
+      buildBricks(this.dev, smooth, out, this.lutTex, dims, bricks, bricks2, this.emptyCut);
+      this.onChanged?.();
     });
   }
   private maxStepMm = 1;
@@ -320,6 +383,7 @@ export class ColorizeField implements Field {
     this.smoothTex.destroy();
     this.brickTex.destroy();
     this.brick2Tex.destroy();
+    this.agreeTex?.destroy();
   }
 
   // WHAT WAS LAST SENT TO THE CARD, so an unchanged lookup or palette is not sent again (critic 2026-10-16, general audit,
@@ -633,7 +697,7 @@ fn solid_thin_block_clz${s}(wp : vec3<f32>) -> bool {
  *  the blur, and a structure near (the smoothed copy above its "nothing here" cut-off), not the block's empty space.
  *  Measured, it saves little (49 -> 44-47 ms at 0.4 of a step): the blocks marked thin are mostly near structures. */
 fn solid_fine_clz${s}(wp : vec3<f32>) -> bool {
-  return solid_thin_block_clz${s}(wp) && smooth_clz${s}(wp) >= ${EMPTY_CUTOFF.toFixed(5)};
+  return solid_thin_block_clz${s}(wp) && smooth_clz${s}(wp) >= ${this.emptyCut.toFixed(5)};
 }
 /**
  * SOLID LOOK: which structure a point is in, 0 for none, given the one the ray is in now (cur).
@@ -654,8 +718,8 @@ fn solid_class_clz${s}(wp : vec3<f32>, cur : i32, rd : vec3<f32>) -> i32 {
   let d = u_material.clz${s}_dims.xyz;
   let coarse = max(u_material.clz${s}_clim.z, u_material.clz${s}_dims.w);
   // Under the cut-off is outside: half what a lone labeled voxel reaches under the blur
-  // (solid-smooth.ts EMPTY_CUTOFF), so no single voxel falls under it (critic, finding 12).
-  if (sm < ${EMPTY_CUTOFF.toFixed(5)}) { return 0; }
+  // (solid-smooth.ts emptyCutoff, this field's), so no single voxel falls under it (critic, finding 12).
+  if (sm < ${this.emptyCut.toFixed(5)}) { return 0; }
   if (sm >= 0.5) {
     let nl = vislab_clz${s}(wp);
     if (cur > 0) {
@@ -882,7 +946,7 @@ fn sample_field_clz${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
     return [
       { binding: base, resource: this.ctTex.createView() },
-      { binding: base + 1, resource: this.labTex.createView() },
+      { binding: base + 1, resource: (this.solid && this.agreeTex ? this.agreeTex : this.labTex).createView() },
       { binding: base + 2, resource: this.lutTex.createView() },
       { binding: base + 3, resource: this.smoothTex.createView() },
       { binding: base + 4, resource: this.brickTex.createView() },

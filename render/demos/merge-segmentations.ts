@@ -10,6 +10,7 @@
  * Merge writes one labelmap and one segment list, as a NEW segmentation derived from the inputs.
  * The inputs stay. The logic is in logic/segmentation-merge.ts; this is the window.
  */
+import { isRejection } from "../../logic/grow-from-seeds.ts";
 import { escapeHtml } from "./html.ts";
 import type { LiveScene } from "../livescene.ts";
 import type { LocalBlobStore } from "../../logic/ingest.ts";
@@ -208,9 +209,12 @@ export function openMergeWindow(o: MergeOptions): void {
       const v = await fetchZarrVolumeNative(o.live.blobBase(), node.zarr as ZarrDesc);
       if (!(v.data instanceof Uint8Array)) throw new Error(`"${r.name}" is not a byte labelmap (${v.dtype})`);
       const task = (node.origin as { task?: string } | undefined)?.task;
+      // Outside, Grow from seeds' rejection class, is never merged: its row left out, its strokes emptied
+      // (logic/grow-from-seeds.ts isRejection; critic 2026-11-01, finding 3).
+      const rejected = new Set(((node.segments as { labelValue: number; rejection?: boolean }[] | undefined) ?? []).filter(isRejection).map((s) => s.labelValue));
       out.push({
-        id, name: r.name, labelmap: v.data, ...(task ? { task } : {}),
-        segments: r.segments.map((s) => ({ labelValue: s.labelValue, name: s.name ?? `label ${s.labelValue}`, color: (s.color?.length === 3 ? s.color : [1, 1, 1]) as [number, number, number], ...(s.structure ? { structure: s.structure } : {}) })),
+        id, name: r.name, labelmap: rejected.size ? v.data.map((x) => rejected.has(x) ? 0 : x) : v.data, ...(task ? { task } : {}),
+        segments: r.segments.filter((s) => !rejected.has(s.labelValue)).map((s) => ({ labelValue: s.labelValue, name: s.name ?? `label ${s.labelValue}`, color: (s.color?.length === 3 ? s.color : [1, 1, 1]) as [number, number, number], ...(s.structure ? { structure: s.structure } : {}) })),
       });
     }
     return out;
