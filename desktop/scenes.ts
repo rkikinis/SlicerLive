@@ -219,7 +219,7 @@ export async function packageScene(dbDir: string, uid: string, dest: string): Pr
     `dicom/             every DICOM file the scene needs, one folder per series: ${reached.length - missing.length} series, ${files} files, ${(bytes / 1e6).toFixed(0)} MB`,
     `provenance.json    what SlicerAlbula knows about those series beyond DICOM: which was made from which, collection and license`,
     ``,
-    `To open it on another machine: drop this whole folder onto SlicerAlbula, or choose it with Load / Save › Load from files › Packaged scene…. One window asks which database to keep it in; the scans, the records and the scene arrive together and the scene opens. (3D Slicer: add the dicom/ folder with its DICOM module.)`,
+    `To open it on another machine: drop this whole folder onto SlicerAlbula, or choose it with Load / Save › From disk… › Folder…. One window asks which database to keep it in; the scans, the records and the scene arrive together and the scene opens. (3D Slicer: add the dicom/ folder with its DICOM module.)`,
     missing.length ? `\nNot included (not in the database this was packaged from): ${missing.join(", ")}` : ``,
   ].join("\n"));
   return { path: dir, series: reached.length - missing.length, files, bytes, missing };

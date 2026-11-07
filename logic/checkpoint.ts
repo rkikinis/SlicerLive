@@ -15,6 +15,8 @@
 // referenced by nothing; Save is still what puts a result into the archive as DICOM. The two are
 // deliberately different, because a checkpoint has to be safe enough to write without being asked.
 
+import { dbInUse } from "./db-in-use.ts";
+
 export interface CheckpointMeta {
   /** What produced it, e.g. "ts:total". */
   task: string;
@@ -42,7 +44,7 @@ async function currentDb(): Promise<string | null> {
   try {
     const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
     const list = (dbs?.databases ?? []) as { id: string; current?: boolean; exists?: boolean }[];
-    return (list.find((d) => d.current && d.exists) ?? list.find((d) => d.exists))?.id ?? null;
+    return dbInUse(list)?.id ?? null;
   } catch {
     return null;
   }

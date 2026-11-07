@@ -169,7 +169,7 @@ Facts DICOM has no standard place for, in SQLite (`desktop/db-index.ts`, `deskto
   README.txt           what this is and how to open it, for a person
 ```
 
-Opening one (drop it on Albula, or Load / Save › Load from files › Packaged scene…) puts its DICOM files into a database, its rows into
+Opening one (drop it on Albula, or Load / Save › From disk… › Folder…) puts its DICOM files into a database, its rows into
 the record store and its scene into the scene list, in one step (`desktop/package-open.ts`, `render/demos/package-window.ts`).
 
 ## What may be deleted

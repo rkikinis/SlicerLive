@@ -339,7 +339,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
         o.onChanged?.();
         // THE WAY TO USE THEM (critic, finding 11): "Open a patient…" opens the default database, which was another.
         if (!j.error) {
-          const use = button("Open these by default", "Makes the test cases the database Albula opens (Open a patient…, DICOM database…). Your other databases stay in this list.");
+          const use = button("Open these by default", "Makes the test cases the database Albula opens (From database…, From scenes…). Your other databases stay in this list.");
           use.addEventListener("click", async () => { await post("/_db", { current: j.db ?? t.db }, "PUT"); o.onChanged?.(); await render(); });
           box.appendChild(use);
         } else setTimeout(() => void render(), 4000);
@@ -715,7 +715,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     line.className = "sl-dbw-meta";
     line.textContent = !sh.listening ? "A new Mac can connect while this Mac shares on a network you allowed."
       : p.closed ? `New Macs cannot connect just now: ${p.closed}.`
-      : p.open ? `A new Mac may connect until ${new Date(p.until!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${p.waiting ? ` — ${p.waiting} is asking; compare the numbers, then Touch ID` : ": on it, Load / Save › Databases › More › Open a database on another Mac…, then Connect"}.`
+      : p.open ? `A new Mac may connect until ${new Date(p.until!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${p.waiting ? ` — ${p.waiting} is asking; compare the numbers, then Touch ID` : ": on it, Load / Save › Manage databases › More › Open a database on another Mac…, then Connect"}.`
       : "Only the Macs below can come in.";
     pairRow.appendChild(line);
     if (sh.listening && !p.open && !p.closed) {
@@ -723,7 +723,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       open.addEventListener("click", async () => {
         open.disabled = true; open.textContent = "Opening…";
         const { ok, j } = await post("/_db/_sharing/open-pairing", {});
-        say(ok ? "For five minutes, one Mac on this network may connect: on it, Load / Save › Databases › More › Open a database on another Mac…, then Connect." : String(j.error ?? "not opened"));
+        say(ok ? "For five minutes, one Mac on this network may connect: on it, Load / Save › Manage databases › More › Open a database on another Mac…, then Connect." : String(j.error ?? "not opened"));
         await render();
       });
       pairRow.appendChild(open);
@@ -823,7 +823,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       if (!looking || !f.isConnected) return;
       const j = await fetch("/_db/_nearby", { cache: "no-store" }).then((r) => r.json()).catch(() => ({ macs: [] })) as { macs: { name: string; host: string; port?: number }[] };
       if (!looking) return;
-      list.innerHTML = j.macs.length ? "" : `<p class="sl-dbw-meta">No Mac on this network shares a database just now. On the Mac that holds it: Load / Save › Databases, its Shared switch.</p>`;
+      list.innerHTML = j.macs.length ? "" : `<p class="sl-dbw-meta">No Mac on this network shares a database just now. On the Mac that holds it: Load / Save › Manage databases, its Shared switch.</p>`;
       for (const m of j.macs) {
         const r = document.createElement("div");
         r.className = "sl-dbw-acts";
@@ -889,7 +889,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       const { ok, j } = await post("/_db/_create", { ...readForm(f), ...(folder ? { token: folder.token } : {}) });
       make.disabled = false;
       if (!ok) { err.textContent = String(j.error ?? "the database was not made"); return; }
-      say(`“${readForm(f).name}” is made. To add scans to it: Load / Save, Load from Files, “Also add to” it, then DICOM folder….`);
+      say(`“${readForm(f).name}” is made. To add scans to it: Load / Save › From disk…, “Also add to” it, then Folder….`);
       o.onChanged?.(String(j.id));
       await render();
       if (j.warning) { const w = document.createElement("p"); w.className = "sl-dbw-err"; w.textContent = String(j.warning); body.prepend(w); }
@@ -907,7 +907,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     try {
       const c = await chooseFolder("Choose a folder that holds a DICOM database (its index is ctkDICOM.sql)");
       if (!c) return;
-      if (!c.hasDatabase) { note.textContent = `“${c.name}” holds no DICOM database. To add scans from it, use Load / Save › From disk › DICOM folder… instead.`; after.after(note); return; }
+      if (!c.hasDatabase) { note.textContent = `“${c.name}” holds no DICOM database. To add scans from it, use Load / Save › From disk… › Folder… instead: it reads the scans.`; after.after(note); return; }
       // MOVED (the default) OR COPIED INTO "SlicerAlbulaDatabases" first (Ron, 2026-10-13: "move or copy into the albula
       // databases folder. User decides, move is the default"); one already there is listed where it is.
       const { features } = await listDatabases();

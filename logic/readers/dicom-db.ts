@@ -122,7 +122,7 @@ export function directorySource(dir: FileSystemDirectoryHandle): DbSource {
     // The index is read by Albula's server (it has SQLite; the page no longer carries a copy). A folder picked in a
     // plain browser, with no server behind it, can therefore not be listed -- the app never had this path (WKWebView
     // has no folder picker); Steve's static pages did.
-    listSeries: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server: add it in Load / Save › Databases instead.")),
+    listSeries: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server: add it in Load / Save › Manage databases instead.")),
     seriesFiles: () => Promise.reject(new Error("Opening a database folder directly needs Albula's server.")),
     readFile: async (rel) => (await fileAt(dir, rel)).arrayBuffer(),
     readHead: async (rel, maxBytes) => {

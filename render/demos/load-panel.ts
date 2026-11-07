@@ -2,9 +2,10 @@
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
 import { fitList } from "./fit-list.ts";
+import { dbInUse } from "../../logic/db-in-use.ts";
 import { eyeSvg } from "./eye-icon.ts";
 import { addRowMenu, makeNameEditable, startEditing } from "./row-actions.ts";
-import { renameCurrentScene, sceneControl, unsavedMarkups } from "./scene-control.ts";
+import { openSceneFrom, renameCurrentScene, saveSceneFrom, sceneControl, unsavedMarkups, watchScenes } from "./scene-control.ts";
 import { escapeHtml } from "./html.ts";
 import type { AppShell } from "./app-shell.ts";
 import { runAction } from "./app-shell.ts";
@@ -30,7 +31,7 @@ import { volumeForSeg } from "../../logic/seg-placement.ts";
 import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../../logic/segmentation-editor.ts";
 import { keepScroll } from "./panel-scroll.ts";
 import { openFloatingWindow } from "./floating-window.ts";
-import { chooseFolder, dbName, listDatabases, mountDatabases, type DatabasesSection } from "./databases-window.ts";
+import { chooseFolder, dbName, listDatabases, mountDatabases, type DatabasesSection, type RegisteredDb } from "./databases-window.ts";
 import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { openPackageWindow } from "./package-window.ts";
@@ -252,6 +253,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
   let setIo: ((dir: "load" | "save", where: "db" | "files") => void) | undefined;
   (globalThis as unknown as { __openDicomDatabase?: () => void }).__openDicomDatabase = () => { void shell.showPanel("add-data").then(() => openDatabaseFromOutside?.()); };
   (globalThis as unknown as { __openLoadFromDisk?: () => void }).__openLoadFromDisk = () => { void shell.showPanel("add-data").then(() => showLoadFromDisk?.()); };
+  // The Scene menu's "Another database…": registered when the app starts, like the two above (critic 2026-11-07, finding 6:
+  // it did nothing until Load / Save had been shown once).
+  let openDbListFromOutside: (() => void) | undefined;
+  (globalThis as unknown as { __chooseDatabase?: () => void }).__chooseDatabase = () => { void shell.showPanel("add-data").then(() => openDbListFromOutside?.()); };
+  /** The database the browser window was opened on: a series read from it says so (slicer-app's __noteDataFrom). */
+  let browsingDbId: string | null = null;
   /** DICOM files that arrived (a dropped folder): viewed, and added to the database when "Also add to" is ticked. Set by the panel. */
   let dicomFilesArrived: ((files: File[]) => Promise<void>) | undefined;
   /** Re-read the databases after one was made or switched to elsewhere (the package window). Set by the panel. */
@@ -270,8 +277,8 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const scene = JSON.parse(await sceneFile.text()) as Record<string, unknown>;
         const provenance = provFile ? JSON.parse(await provFile.text()) as Record<string, unknown> : undefined;
         const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null) as { databases?: { id: string; current?: boolean; exists?: boolean }[] } | null;
-        const cur = (reg?.databases ?? []).find((d) => d.current && d.exists) ?? (reg?.databases ?? []).find((d) => d.exists);
-        if (!cur) { shell.notify({ title: "First the scans, then the scene", body: "There is no database here yet. Drop the whole <b>.albula</b> folder instead, or use Load / Save › Load from files › <b>Packaged scene…</b>: it makes a database, adds the scans and opens the scene in one step." }); return; }
+        const cur = dbInUse(reg?.databases);
+        if (!cur) { shell.notify({ title: "First the scans, then the scene", body: "There is no database here yet. Drop the whole <b>.albula</b> folder instead, or use Load / Save › From disk… › <b>Folder…</b> and choose that folder: it makes a database, adds the scans and opens the scene in one step." }); return; }
         const r = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scene, provenance }) })
           .then((x) => x.json()) as { uid?: string; v?: number; name?: string; edges?: number; attributes?: number; replaced?: boolean; kept?: boolean; error?: string; missing?: string[]; problems?: { where: string; what: string }[] };
         if (r.error) {
@@ -306,6 +313,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // A VOLUME READ FROM THE DICOM DATABASE SAYS SO on its origin: DICOM files opened from disk carry the same
     // series UID and are not in the database (critic, 2026-09-24, review-bugfixes finding 5).
     if (source === "dicom-db") (vol as { meta?: Record<string, unknown> }).meta = { ...((vol as { meta?: Record<string, unknown> }).meta ?? {}), inDatabase: true };
+    if (source === "dicom-db") (globalThis as unknown as { __noteDataFrom?: (id: string | null) => void }).__noteDataFrom?.(browsingDbId);
     const r = await span("volume · ingest: build the nodes", () => loadVolumeIntoScene(opts.live, opts.store, vol, { name: vol.name ?? "Volume" }));
     status(`loaded ${vol.name}: ${vol.dims.join("×")} voxels${took(startedAt)}`);
     const b = rasBounds(vol.dims, vol.ijkToRAS);
@@ -402,17 +410,21 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     onShow: () => setIo?.("load", "db"),
     groups: ["Data"],
     order: 1,
-    tip: "Bring things into the scene, or keep them: the DICOM database or files, both ways",
-    help: `<p>Brings data into the session and keeps it. Drag files onto the views from anywhere in the
-      application, or use the buttons here: choose <b>Load</b> or <b>Save</b>, then the <b>DICOM database</b> or
-      <b>Files</b>; what each does is shown under them. It opens on Load from the DICOM database.</p>
+    tip: "Open scans and scenes from a database, choose another database, and save what is on screen",
+    help: `<p>Brings data into the session and keeps it. At the top is the <b>database</b> Albula opens from and saves
+      into, by name; click it to choose another, on this Mac or on one of your other Macs. <b>Open</b>, three ways: <i>From database…</i>
+      lists every patient, study and series in it; <i>From scenes…</i> lists its saved scenes, one click each; <i>From
+      disk…</i> opens a <i>Folder…</i> (scans from a disc, a stick or an export, a packaged scene, a database) or <i>Files…</i>
+      (DICOM, NRRD, NIfTI); dropping files on the views from anywhere in the application does the same. The button whose list
+      is open is the yellow one. <b>Save</b>: <i>Save to</i> the database keeps everything on screen as a scene
+      (⌘S does the same); <i>As a file…</i> saves one thing in your Downloads folder.</p>
       <p><b>What arrives where.</b> A volume file (NRRD, NIfTI) and a DICOM series both land in the
       <b>scene</b> — they show up under Data. A volume file is gone when the application restarts.</p>
       <p><b>DICOM from disk is also kept.</b> With <i>Also add to</i> ticked (it is, unless you untick it),
-      DICOM scans loaded with <i>DICOM files…</i>, <i>DICOM folder…</i> or dropped as a folder are copied into
+      DICOM scans loaded with <i>Files…</i>, <i>Folder…</i> or dropped as a folder are copied into
       the database named there, so they are there next time, after the disc or USB stick is gone. Nothing
       already in the database is copied twice. Untick it to look without keeping.</p>
-      <p><b>Databases</b> (its own section) lists every database in the databases folder and any added from elsewhere
+      <p><b>Manage databases</b> (folded, at the bottom) lists every database in the databases folder and any added from elsewhere
       or opened from another Mac, with what each holds. A click on one makes it the one Albula opens; its <i>In use</i>
       switch says whether Albula uses it, its <i>Shared</i> switch whether your other Macs may open it; its <i>Details</i>
       say where it came from and which scanner makers' own fields (private fields) its scans hold that Albula does not
@@ -422,9 +434,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       from a project into the one you work in, or what you made back to where the scans came from. Every image is read
       back and compared before it counts as there. A move (under Advanced) removes from the first database only on a
       second press, after that check. Each database keeps a record of what came in and went out.</p>
-      <p><b>DICOM</b> is read as a series, not as a file: use <i>DICOM files…</i> or <i>DICOM folder…</i>,
-      which group the files into series first, or <i>DICOM database…</i> for what is already indexed.</p>
-      <p><b>Deleting from the database</b> is done in the <i>DICOM database…</i> window: tick the
+      <p><b>DICOM</b> is read as a series, not as a file: <i>Files…</i> and <i>Folder…</i> group the files into
+      series first; <i>From database…</i> opens what is already in the database.</p>
+      <p><b>Deleting from the database</b> is done in the <i>From database…</i> window: tick the
       series and press <b>Delete…</b>, then press it again once it says what it is about to destroy.
       That removes the files, the index rows and the derivation edge, backs the index up first and
       audits afterwards. It is not the same as removing something from the scene, which only unloads
@@ -435,128 +447,119 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     ],
     mount(el) {
     el.innerHTML = `<h2>Load / Save</h2>`;
-    // LOAD OR SAVE, AND WHERE (Ron, 2026-11-01, on the graph that stood here: "I always click on the big green Dicom data
-    // base button, which is non functional but much more visually prominent than the load button ... How about just the
-    // DICOM button with load/save toggle and load as default?"; on the mockup, mockups/load-save-toggle-2026-11-01.html:
-    // "yes include Files"; "this presentation would lead me to click load. Just make data base the default option. The
-    // text: open a patient's scan is a tooltip. Files are available but not the default. Most people will drag and drop
-    // anyway"). Two choices, shown by an outline: Load or Save, and the DICOM database (wide, the default) or Files. The
-    // pane for the pair is open under them; Load and the database each time Load / Save is shown. The yellow is the
-    // pane's own button, the one that acts.
-    const graphSec = shell.section(el, "Load or save", { open: true, band: "yellow" });
-    graphSec.innerHTML = `
-      <div class="sl-io-dir" role="group" aria-label="Load or save"><button data-dir="load">Load</button><button data-dir="save">Save</button></div>
-      <div class="sl-io-where" role="group" aria-label="Where"><button class="sl-io-wdb" data-where="db">DICOM database</button><button data-where="files">Files</button></div>`;
-    const ioTips: Record<string, string> = {
-      "load db": "Open a patient's scans, with their segmentations and scenes, from the DICOM database",
-      "load files": "Open files from disk: NRRD, NIfTI, DICOM files or a folder. Dropping files on the views does the same",
-      "save db": "Keep what is on screen in the DICOM database: it all comes back together",
-      "save files": "Save one thing as a file in Downloads: a volume as NRRD or NIfTI, a segmentation as STL or OBJ",
-    };
-    const io = { dir: "load" as "load" | "save", where: "db" as "db" | "files" };
-    // THE PANES. The two load panes are the old Load Data blocks; the two save panes are drawn by
-    // save-panel.ts. One at a time, under the Load or save section.
-    const panes = document.createElement("div");
-    panes.className = "sl-io-panes";
-    panes.innerHTML = `
-      <div data-pane="load-db" hidden></div>
-      <div data-pane="save-db" hidden></div>
-      <div data-pane="load-files" hidden></div>
-      <div data-pane="save-files" hidden></div>
-      <div class="sl-load-disk" hidden>
-      <!-- THE USUAL WAY FIRST (Ron, 2026-10-14, the module review's proposal 1: "yes"): scans arrive as a folder (a disc,
-           a stick, an export), so DICOM folder… is the yellow, at the bottom right; the rarer ways beside it. Dropping
-           files anywhere on the window works too (the section's note). -->
-      <div class="sl-row sl-add-row" title="DICOM scans loaded from disk are also copied into this database, so they are there next time, after the disc or stick is gone. Volume files (NRRD, NIfTI) are not DICOM and are not added.">
-        <label><input type="checkbox" class="sl-add-db" checked> Also add to</label>
-        <select class="sl-add-db-which" style="min-width:0;flex:1"></select>
+    // LOAD / SAVE BY TASK (Ron, 2026-11-07, on mockups/load-save-tasks-2026-11-07.html: "1: o s together 2: yes, that reduces
+    // the visual clutter 3: user decides at runtime ... 4 save and send. Select a database opens the list once I select, the
+    // list collapses by default"). Three tasks: open scans or scenes from the database in use, choose another database and do
+    // the same, (later) copy one from another Mac. So: the database by name at the top, a click lists them all and the list
+    // closes again on a choice; Open (scans, and this database's scenes, one click each) and Save both on the face; files from
+    // disk behind From disk…; the Databases section folded as Manage databases. The Load / Save switch of 2026-11-01 is gone,
+    // and with it the two buttons named DICOM database (critic 2026-11-06, finding 15).
+    const dbSec = shell.section(el, "Database", { open: true, band: "green" });
+    dbSec.innerHTML = `<button type="button" class="sl-dbpick" aria-haspopup="listbox" aria-expanded="false"><span class="sl-dbpick-name">…</span><span class="sl-dbpick-car">▾</span></button>`;
+    const openSec = shell.section(el, "Open", { open: true, band: "green" });
+    openSec.innerHTML = `
+      <div class="sl-row sl-open-row">
+        <button type="button" data-act="from-disk" aria-expanded="false" title="Scans or files from a folder, a disc or a USB stick. Dropping files on the views does the same.">From disk…</button>
+        <button type="button" data-act="from-scenes" aria-expanded="false" title="The scenes saved in this database: one click opens one">From scenes…</button>
+        <button type="button" data-act="dicom-db" title="Every patient, study and series in this database: choose what to open">From database…</button>
       </div>
-      <div class="sl-actions">
-        <button data-act="open" title="Open a single volume file already on disk: NRRD or NIfTI, gzipped or not. Not stored until you save it.">Volume file…</button>
-        <button data-act="dicom-files" title="Pick individual DICOM files — useful for one series, or when a folder holds more than you want.">DICOM files…</button>
-        <button data-act="package" title="A scene packaged on another machine (a folder ending in .albula): its scans go into a database and the scene opens, in one step. A whole database folder works too.">Packaged scene…</button>
-        <button class="sl-primary" data-act="dicom-dir" title="A folder of DICOM scans (from a disc, a USB stick, an export): the scans in it are listed to look at, and added to the database above when that is ticked.">DICOM folder…</button>
+      <!-- OPEN, THREE WAYS (Ron, 2026-11-07, on mockups/load-save-open-three-ways-2026-11-07.html: "1: yes 2two 3 as shown 4 as
+           shown. Also, if I click From scenes, then that one should turn solid yellow background. From disk and from database
+           should look the same in that state"). One box open at a time; the button whose box is open is the yellow one, the
+           other two plain; with no box open, From database… is. The box last opened by hand opens with the module. -->
+      <div class="sl-disk-box" hidden>
+        <div class="sl-row sl-add-row" title="DICOM scans loaded from disk are also copied into this database, so they are there next time, after the disc or stick is gone. Volume files (NRRD, NIfTI) are not DICOM and are not added.">
+          <label><input type="checkbox" class="sl-add-db" checked> Also add to</label>
+          <select class="sl-add-db-which" style="min-width:0;flex:1"></select>
+        </div>
+        <!-- TWO IN PLACE OF FOUR (same answer, 2): Files… was Volume file… and DICOM files…, Folder… was DICOM folder… and
+             Packaged scene…; Albula tells which by what was chosen. The usual way, a folder, last, at the right. -->
+        <div class="sl-actions">
+          <button data-act="files" title="One or more files: DICOM, NRRD or NIfTI. DICOM is grouped into series and added to the database when that is ticked; NRRD and NIfTI open as they are.">Files…</button>
+          <button data-act="folder" title="A folder of DICOM scans (a disc, a USB stick, an export), or a scene packaged on another Mac (a folder ending in .albula), or a database folder.">Folder…</button>
+        </div>
+        <div class="sl-series" hidden><h3>Series</h3><div class="sl-series-list"></div></div>
+        <input type="file" multiple data-any hidden>
       </div>
+      <div class="sl-scenes-box" hidden>
+        <input class="sl-scenes-search" type="search" placeholder="Search the scenes" hidden>
+        <div class="sl-scenes-list" role="list"></div>
+      </div>`;
+    const saveSec = shell.section(el, "Save", { open: true, band: "yellow" });
+    saveSec.innerHTML = `
+      <div class="sl-row sl-save-row">
+        <button type="button" data-act="as-file" aria-expanded="false" title="One volume as NRRD or NIfTI, a segmentation as STL or OBJ, into your Downloads folder">As a file…</button>
+        <button type="button" class="sl-primary" data-act="save-scene" title="Everything on screen, kept together in the database, to open again as one scene">Save</button>
       </div>
-      <div class="sl-load-db" hidden>
-      <div class="sl-row" style="flex-wrap:wrap">
-        <button class="sl-primary" data-act="dicom-db" title="Browse the indexed DICOM database and load a series. This is the usual way in when working on a study.">DICOM database…</button>
-        <button data-act="transfer" title="Copy patients or studies from one of your databases into another — from a project into the one you work in, or what you made back to where the scans came from. Opens a window; nothing changes until you press its yellow button.">Transfer between databases…</button>
-        <span class="sl-scene-slot"></span>
-      </div>
-      <div class="sl-row"><span class="sl-hint sl-db-hint">reopens the last database</span></div>
-      </div>
-      <div class="sl-series" hidden><h3>Series</h3><div class="sl-series-list"></div></div>
-      <input type="file" multiple accept=".nrrd,.nhdr,.nii,.nii.gz,.gz" hidden>
-      <input type="file" multiple data-dicom hidden>`;
-    el.appendChild(panes);
-    // THE DATABASES, a section of its own, open, in place of the Databases window (Ron, 2026-10-29: "Q1: a section",
-    // "2 gone"; databases-window.ts mountDatabases). After the panes, so the pane chosen stays right under its section.
-    // Filled below, once the panel's own database code is set up. Green: a list of what exists (MODULE-DESIGN-RULES.md).
-    const dbSecBody = shell.section(el, "Databases", { open: true, band: "green" });
+      <div class="sl-asfile-box" hidden></div>`;
+    // THE DATABASES SECTION OF 2026-10-29, WHOLE, FOLDED (gray: secondary): managing databases is not a daily task.
+    const manageBody = shell.section(el, "Manage databases", { open: false, band: "none" });
+    manageBody.innerHTML = `<div class="sl-row"><button data-act="transfer" title="Copy patients or studies from one of your databases into another — from a project into the one you work in, or what you made back to where the scans came from. Opens a window; nothing changes until you press its yellow button.">Transfer between databases…</button></div>`;
+    const dbSecBody = document.createElement("div");
+    manageBody.appendChild(dbSecBody);
     const adv = shell.section(el, "Advanced", { open: false, band: "none" });
     adv.innerHTML = `<div class="sl-row">
         <button data-act="terminology" title="Load a terminology: the names, codes and colors a lab or an extension uses for its structures. Slicer's .term.json or a color-table CSV. Once loaded, segmentations can be named in it (Segmentations → Advanced).">Terminology…</button>
       </div>`;
-    // The load panes: sections drawn from the old blocks, green (what exists comes in).
-    for (const [cls, pane, title, note] of [["sl-load-disk", "load-files", "Load from files", "or drop them on the views"], ["sl-load-db", "load-db", "Load from the DICOM database", ""]] as const) {
-      const block = panes.querySelector(`.${cls}`) as HTMLElement;
-      const holder = panes.querySelector(`[data-pane="${pane}"]`) as HTMLElement;
-      const body = shell.section(holder, title, { open: true, band: "green", note });
-      while (block.firstChild) body.appendChild(block.firstChild);
-      block.remove();
-    }
-    for (const [pane, title] of [["save-db", "Save to the DICOM database"], ["save-files", "Save as files"]] as const) {
-      const holder = panes.querySelector(`[data-pane="${pane}"]`) as HTMLElement;
-      shell.section(holder, title, { open: true, band: "yellow" });
-    }
-    const g2 = globalThis as unknown as { __renderSavePane?: (shell: AppShell, live: LiveScene, root: HTMLElement, mode: "db" | "files", onStatus?: (s: string) => void) => void };
-    let paneShown = "";
-    const showPane = (name: string) => {
-      // PRESSING WHAT IS ALREADY CHOSEN CHANGES NOTHING (critic 2026-11-06, finding 14: a format chosen in the Save pane
-      // went back to NRRD). onShow, leaving the module and coming back, still starts afresh: paneShown is cleared there.
-      if (name === paneShown) return;
-      paneShown = name;
-      for (const p of panes.querySelectorAll<HTMLElement>("[data-pane]")) {
-        const on = p.dataset.pane === name;
-        p.hidden = !on;
-        if (on && (name === "save-db" || name === "save-files")) {
-          const body = p.querySelector(".sl-section-body") as HTMLElement;
-          g2.__renderSavePane?.(shell, opts.live, body, name === "save-db" ? "db" : "files", (s) => status(s));
-        }
-      }
+    adv.insertAdjacentHTML("beforeend", `<div class="sl-row"><button type="button" data-act="each-to-db" aria-expanded="false" title="Put one volume or segmentation into the database by itself, without saving a scene">Save one item to the database…</button></div><div class="sl-eachdb-box" hidden></div>`);
+
+    const g2 = globalThis as unknown as { __renderSavePane?: (shell: AppShell, live: LiveScene, root: HTMLElement, mode: "db" | "files", onStatus?: (s: string) => void, opts?: { oneByOne?: boolean }) => void };
+    // A BUTTON THAT OPENS A BOX UNDER IT, and closes it on a second press: From disk…, As a file…, Save one item…. The box's
+    // content is drawn when it opens, so a format chosen in it stays until it closes (critic 2026-11-06, finding 14).
+    const toggler = (btn: HTMLButtonElement, box: HTMLElement, draw?: () => void) => (on: boolean) => {
+      if (on && box.hidden) draw?.();
+      box.hidden = !on;
+      btn.setAttribute("aria-expanded", String(on));
     };
-    const showIo = () => {
-      for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-dir]")) b.setAttribute("aria-pressed", String(b.dataset.dir === io.dir));
-      for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-where]")) {
-        b.setAttribute("aria-pressed", String(b.dataset.where === io.where));
-        b.title = ioTips[`${io.dir} ${b.dataset.where}`];
-      }
-      (graphSec.querySelector('[data-dir="load"]') as HTMLElement).title = io.where === "db" ? ioTips["load db"] : ioTips["load files"];
-      (graphSec.querySelector('[data-dir="save"]') as HTMLElement).title = io.where === "db" ? ioTips["save db"] : ioTips["save files"];
-      showPane(`${io.dir}-${io.where}`);
+    // OPEN'S BOXES: one at a time, and the yellow goes with the open one (Ron, 2026-11-07, above). Remembered per viewer in
+    // localStorage, a convenience only: without it the scenes open first.
+    type OpenBox = "disk" | "scenes" | null;
+    const OPEN_BOX_MEMORY = "albula-load-save-open-box";
+    const diskBtn = el.querySelector('[data-act="from-disk"]') as HTMLButtonElement, scenesBtn = el.querySelector('[data-act="from-scenes"]') as HTMLButtonElement;
+    const dbBtn = el.querySelector('[data-act="dicom-db"]') as HTMLButtonElement;
+    const diskBox = el.querySelector(".sl-disk-box") as HTMLElement, scenesBox = el.querySelector(".sl-scenes-box") as HTMLElement;
+    const rememberedBox = (): OpenBox => { try { const v = localStorage.getItem(OPEN_BOX_MEMORY); return v === "disk" ? "disk" : v === "none" ? null : "scenes"; } catch { return "scenes"; } };
+    const showOpen = (which: OpenBox, byHand = false) => {
+      diskBox.hidden = which !== "disk"; diskBtn.setAttribute("aria-expanded", String(which === "disk"));
+      scenesBox.hidden = which !== "scenes"; scenesBtn.setAttribute("aria-expanded", String(which === "scenes"));
+      diskBtn.classList.toggle("sl-primary", which === "disk");
+      scenesBtn.classList.toggle("sl-primary", which === "scenes");
+      dbBtn.classList.toggle("sl-primary", which === null);
+      if (byHand) try { localStorage.setItem(OPEN_BOX_MEMORY, which ?? "none"); } catch { /* private window */ }
     };
-    for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-dir]")) b.addEventListener("click", () => { io.dir = b.dataset.dir as "load" | "save"; showIo(); });
-    // THE BIG BUTTON ACTS: with Load chosen, the DICOM database opens the database window too, as its pane's yellow
-    // button does (Ron clicked the big box of the graph, which did nothing).
-    for (const b of graphSec.querySelectorAll<HTMLButtonElement>("[data-where]")) b.addEventListener("click", () => {
-      io.where = b.dataset.where as "db" | "files"; showIo();
-      if (io.dir === "load" && io.where === "db") (panes.querySelector('[data-act="dicom-db"]') as HTMLButtonElement | null)?.click();
+    const showDisk = (on: boolean) => { if (on) showOpen("disk"); else if (!diskBox.hidden) showOpen(null); };
+    diskBtn.addEventListener("click", () => showOpen(diskBox.hidden ? "disk" : null, true));
+    scenesBtn.addEventListener("click", () => showOpen(scenesBox.hidden ? "scenes" : null, true));
+    showOpen(rememberedBox());
+    const asFileBox = el.querySelector(".sl-asfile-box") as HTMLElement, eachBox = el.querySelector(".sl-eachdb-box") as HTMLElement;
+    const showAsFile = toggler(el.querySelector('[data-act="as-file"]') as HTMLButtonElement, asFileBox, () => g2.__renderSavePane?.(shell, opts.live, asFileBox, "files", (s) => status(s)));
+    const showEach = toggler(el.querySelector('[data-act="each-to-db"]') as HTMLButtonElement, eachBox, () => g2.__renderSavePane?.(shell, opts.live, eachBox, "db", (s) => status(s), { oneByOne: true }));
+    for (const [act, show, box] of [["as-file", showAsFile, asFileBox], ["each-to-db", showEach, eachBox]] as const) {
+      (el.querySelector(`[data-act="${act}"]`) as HTMLButtonElement).addEventListener("click", () => show((box as HTMLElement).hidden));
+    }
+    // Kept for the callers outside (⌘O and __openLoadFromDisk open From disk…; the export notice opens As a file…): the box they mean opens.
+    // onShow calls it with ("load", "db"): the boxes close and what the face names is read again (refreshFace, set below).
+    let refreshFace: (() => void) | undefined;
+    setIo = (dir, where) => {
+      if (dir === "load" && where === "files") showOpen("disk");
+      else if (dir === "load" && where === "db") showOpen(rememberedBox());
+      else showDisk(false);
+      showAsFile(dir === "save" && where === "files");
+      if (dir === "load" && where === "db") { showEach(false); refreshFace?.(); }
+    };
+    (el.querySelector('[data-act="save-scene"]') as HTMLButtonElement).addEventListener("click", (e) => void saveSceneFrom(e.currentTarget as HTMLButtonElement));
+    // FILES…: whatever was picked, sorted by name. Volume files (NRRD, NIfTI) and a scene file open as they are (loadFiles);
+    // everything else is taken for DICOM (DICOM files often have no extension), grouped into series and, with Also add to
+    // ticked, added to the database.
+    const anyInput = el.querySelector("input[data-any]") as HTMLInputElement;
+    const notDicom = (name: string) => /\.(nrrd|nhdr|nii|nii\.gz|mrson\.json)$/i.test(name) || /^provenance\.json$/i.test(name);
+    (el.querySelector('[data-act="files"]') as HTMLButtonElement).addEventListener("click", () => anyInput.click());
+    anyInput.addEventListener("change", async () => {
+      const files = Array.from(anyInput.files ?? []); anyInput.value = "";
+      const plain = files.filter((f) => notDicom(f.name)), dicom = files.filter((f) => !notDicom(f.name));
+      if (plain.length) await loadFiles(plain);
+      if (dicom.length) await dicomFilesArrived?.(dicom);
     });
-    setIo = (dir, where) => { io.dir = dir; io.where = where; paneShown = ""; showIo(); };
-    showIo();
-    const input = el.querySelector("input[type=file]") as HTMLInputElement;
-    const openBtn = el.querySelector('[data-act="open"]') as HTMLButtonElement;
-    openBtn.addEventListener("click", async () => {
-      const picker = (globalThis as unknown as { showOpenFilePicker?: (o: unknown) => Promise<FileSystemFileHandle[]> }).showOpenFilePicker;
-      if (picker) {
-        try {
-          const handles = await picker({ multiple: true, types: [{ description: "Volumes", accept: { "application/octet-stream": [".nrrd", ".nhdr", ".nii", ".gz"] } }] });
-          await loadFiles(await Promise.all(handles.map((h) => h.getFile())));
-        } catch (e) { if ((e as Error).name !== "AbortError") status((e as Error).message); }
-      } else input.click();
-    });
-    input.addEventListener("change", () => { if (input.files) void loadFiles(input.files); input.value = ""; });
 
     // ---- a terminology, into the scene as a node ----
     // Ron, 2026-09-12, on SlicerHeart and a lab's own terms: loading a terminology has to be a
@@ -587,7 +590,6 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 
     // ---- DICOM ----
     const seriesBox = el.querySelector(".sl-series") as HTMLElement, seriesList = el.querySelector(".sl-series-list") as HTMLElement;
-    const dicomInput = el.querySelector("[data-dicom]") as HTMLInputElement;
     const showSeries = (entries: SeriesEntry[]) => {
       seriesList.innerHTML = "";
       if (!entries.length) { seriesBox.hidden = false; seriesList.innerHTML = "<p>No DICOM image series found.</p>"; return; }
@@ -606,13 +608,21 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }
     };
     const indexProgress = (p: { scanned: number; dicom: number; note?: string }) => status(`scanning: ${p.dicom} DICOM / ${p.scanned} files${p.note ? " — " + p.note : ""}`);
-    (el.querySelector('[data-act="dicom-dir"]') as HTMLButtonElement).addEventListener("click", async () => {
-      // THE APPLICATION'S WAY: macOS's folder dialog through the server (the web view has no folder picker), then the
-      // server adds the folder to the database, or serves its files to look at when "Also add to" is unticked.
+    (el.querySelector('[data-act="folder"]') as HTMLButtonElement).addEventListener("click", async () => {
+      // THE APPLICATION'S WAY: macOS's folder dialog through the server (the web view has no folder picker). A packaged scene
+      // or a database folder goes to the package window, as Packaged scene… did; the server's own inspection decides (the
+      // package window asks the same), so a renamed package is still one. Any other folder is read for DICOM: the server
+      // adds it to the database, or serves its files to look at when "Also add to" is unticked.
       if ((await listDatabases()).features.includes("choose-folder")) {
         try {
-          const c = await chooseFolder("Choose the folder with the scans (a disc, a USB stick, an export)");
+          const c = await chooseFolder("Choose a folder: scans (a disc, a USB stick, an export), a packaged scene, or a database");
           if (!c) return;
+          const kind = c.hasDatabase ? "database" : await fetch("/_db/_package/inspect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: c.token }) })
+            .then((r) => r.ok ? r.json() : null).then((j) => (j as { kind?: string } | null)?.kind).catch(() => undefined);
+          if (kind === "package" || kind === "database") {
+            await openPackageWindow({ token: c.token, name: c.name }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) });
+            return;
+          }
           const target = addTarget();
           if (target) { await reportImport(target, () => addFolderToDatabase(target.id, c.token, target.name, status)); return; }
           showSeries(await indexFiles(await filesOfChosenFolder(c.token, status), indexProgress));
@@ -620,16 +630,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         return;
       }
       const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
-      if (!picker) { status("directory picker unavailable — use ‘DICOM files…’"); return; }
+      if (!picker) { status("This browser cannot choose a folder: use Files… and pick the files in it"); return; }
       try { const dir = await picker({ id: "slicerlive-dicom" }); status("scanning folder…"); showSeries(await indexDirectory(dir, indexProgress)); }
       catch (e) { if ((e as Error).name !== "AbortError") status((e as Error).message); }
-    });
-    (el.querySelector('[data-act="dicom-files"]') as HTMLButtonElement).addEventListener("click", () => dicomInput.click());
-    (el.querySelector('[data-act="package"]') as HTMLButtonElement).addEventListener("click", async () => {
-      try {
-        const c = await chooseFolder("Choose a packaged scene (a folder ending in .albula), or a database folder");
-        if (c) await openPackageWindow({ token: c.token, name: c.name }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) });
-      } catch (e) { status((e as Error).message); }
     });
 
     // ---- DICOM database (an existing ctkDICOM.sql) ----
@@ -1016,7 +1019,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (provenanceCache && performance.now() - provenanceCache.at < 60000) return provenanceCache.edges;   // a write drops it; see forgetProvenance
       const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null).catch(() => null);
       const list = (reg?.databases ?? []) as { id: string; current?: boolean; exists?: boolean }[];
-      const cur = list.find((d) => d.current && d.exists) ?? list.find((d) => d.exists);
+      const cur = dbInUse(list);
       if (!cur) return null;
       const r = await fetch(`/_db/${encodeURIComponent(cur.id)}/_provenance`, { cache: "no-store" }).catch(() => null);
       if (!r?.ok) return null;
@@ -1209,6 +1212,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           if (seq.frames.length > 1) {
             const tIngest = performance.now();
             const meta = { shortLabel: seriesLabelShort(entry), leftOut: seq.leftOut, inDatabase: true };
+            (globalThis as unknown as { __noteDataFrom?: (id: string | null) => void }).__noteDataFrom?.(browsingDbId);
             const r = await loadSequenceIntoScene(opts.live, opts.store, seq.frames, seq.labels, {
               name: label, meta, timing: seq.timing, onFrame: (i, n) => setBusy(`${label}: storing frame ${i + 1} of ${n}…`),
             });
@@ -1473,7 +1477,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       try {
         const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null);
         const list = (reg?.databases ?? []) as { id: string; current?: boolean; exists?: boolean }[];
-        const cur = list.find((d) => d.current && d.exists) ?? list.find((d) => d.exists);
+        const cur = dbInUse(list);
         dbId = cur?.id ?? null;
         const r = cur
           ? await fetch(`/_db/${encodeURIComponent(cur.id)}/_provenance`, { cache: "no-store" })
@@ -1705,13 +1709,13 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const tractsNote = tractsTicked.length && !shown.claimed ? `${tractsTicked.length === 1 ? "the fiber tracts were" : `${tractsTicked.length} sets of fiber tracts were`} not loaded: their diffusion scan is not in this database` : "";
         // STORED SURFACE MODELS WERE TICKED: said once, plainly, with where surfaces are made now (Ron, 2026-10-21,
         // option B: surface models are not shown in Albula; a segmentation's surfaces are saved from Save › Files).
-        // A button, not only a sentence (the first-time user does not read): it opens Load / Save on Save as files.
+        // A button, not only a sentence (the first-time user does not read): it opens Load / Save's As a file… box.
         if (surfacesTicked.length && !failures.length) {
           shell.notify({
             title: surfacesTicked.length === 1 ? "Stored surface models were not loaded" : `${surfacesTicked.length} sets of stored surface models were not loaded`,
-            body: "Surface models are not shown in Albula: the segmentation is loaded and its anatomy is drawn solid. To save a segmentation's surfaces (STL or OBJ), use Save as files.",
+            body: "Surface models are not shown in Albula: the segmentation is loaded and its anatomy is drawn solid. To save a segmentation's surfaces (STL or OBJ), use Load / Save › As a file….",
             actions: [
-              { label: "Open Save as files", primary: true, onClick: () => { void shell.showPanel("add-data").then(() => setIo?.("save", "files")); } },
+              { label: "Open As a file…", primary: true, onClick: () => { void shell.showPanel("add-data").then(() => setIo?.("save", "files")); } },
               { label: "OK", onClick: () => {} },
             ],
           });
@@ -1775,7 +1779,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const j = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null);
         const list = (j?.databases ?? []) as { id: string; current?: boolean; exists?: boolean }[];
         if (!(j?.features ?? []).includes("delete-series")) return null;
-        return (list.find((d) => d.current && d.exists) ?? list.find((d) => d.exists))?.id ?? null;
+        return dbInUse(list)?.id ?? null;
       };
       delBtn.addEventListener("click", () => void (async () => {
         const list = [...selected];
@@ -2967,6 +2971,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         return true;
       },
       __refreshDicomDb: async (): Promise<number | null> => {
+        refreshFace?.();                             // a database chosen in Settings, a save: Load / Save's face follows (critic 2026-11-07, finding 3)
         forgetProvenance();                          // a save has just written an edge, probably
         if (!lastSource) { if (!servedDb) await loadRegistered(); if (servedDb) lastSource = httpSource(servedDb); }
         if (!lastSource) return null;
@@ -3170,12 +3175,12 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         await loadRegistered();   // the database open now, not the one listed when this window started
         // THE DEFAULT, OR NOTHING: a default that cannot be reached (a disk unplugged, a Mac asleep) is not silently replaced
         // by another database while the line still names it (the critic, 2026-10-26, remote database, finding 5).
-        const def = registered.find((d) => d.current);
-        const cur = def ? (def.exists ? def : undefined) : registered.find((d) => d.exists);
+        const cur = dbInUse(registered);
         if (!cur) return { ok: false, error: "no database" };
         const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`, { cache: "no-store" });
         if (!res.ok) return { ok: false, error: `no such scene (HTTP ${res.status})` };
-        return await (globalThis as unknown as { __loadSceneDoc: (d: Record<string, unknown>) => Promise<unknown> }).__loadSceneDoc(await res.json());
+        const loaded = await (globalThis as unknown as { __loadSceneDoc: (d: Record<string, unknown>) => Promise<Record<string, unknown>> }).__loadSceneDoc(await res.json());
+        return { ...loaded, db: cur.id };   // which database the scene is in: its next save goes there (critic 2026-11-07, finding 1)
       },
     });
     void recallDatabaseDir().then((d) => { rememberedDir = d; });
@@ -3195,7 +3200,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // directory handle in IndexedDB that no one can inspect.
     let servedDb: string | null = null;
     let servedLabel = "";
-    let registered: { id: string; path: string; exists: boolean; current: boolean }[] = [];
+    let registered: RegisteredDb[] = [];
     const loadRegistered = async () => {
       try {
         const res = await fetch("/_db", { cache: "no-store" });
@@ -3203,8 +3208,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         registered = (await res.json()).databases ?? [];
         // THE DEFAULT, OR NOTHING: a default that cannot be reached (a disk unplugged, a Mac asleep) is not silently replaced
         // by another database while the line still names it (the critic, 2026-10-26, remote database, finding 5).
-        const def = registered.find((d) => d.current);
-        const cur = def ? (def.exists ? def : undefined) : registered.find((d) => d.exists);
+        const cur = dbInUse(registered);
         if (cur) {
           servedDb = new URL(`/_db/${encodeURIComponent(cur.id)}/`, location.href).href;
           servedLabel = cur.path;   // the full path, per Ron
@@ -3215,19 +3219,175 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         }
       } catch { /* no native side: a browser build has no /_db */ }
     };
-    // The line naming the open database, said again whenever the registered list is read (after Change… too).
-    const showCurrentDb = () => {
-      const hint = el.querySelector(".sl-db-hint") as HTMLElement | null;
-      if (!hint) return;
-      const cur = registered.find((d) => d.current) ?? registered[0];
-      hint.textContent = !registered.length
-        ? "no database yet — make one in Databases below, or bring scans in with Load from files"
-        : cur.exists
-        ? `Opens ${cur.path.split("/").pop()}`
-        : `${cur.path.split("/").pop()} is not reachable`;   // the folder's name, as Databases lists it; the path is in the tooltip and in Details (critic 2026-11-06, finding 16)
-      hint.title = registered.map((d) => `${d.current ? "→ " : "  "}${d.id}: ${d.path}${d.exists ? "" : "  (missing)"}`).join("\n");
+    // THE DATABASE BY NAME AT THE TOP (Ron, 2026-11-07): the one Albula opens from and saves into. A click lists every
+    // database, on this Mac and on your other Macs; the list closes on a choice, and is closed until clicked ("Select a
+    // database opens the list once I select, the list collapses by default"). The path is the tooltip, never on the face.
+    const pickBtn = el.querySelector(".sl-dbpick") as HTMLButtonElement;
+    // What the chooser names: the default, even when it cannot be reached (it says so). What is opened from and saved into:
+    // the one rule, the default or nothing (logic/db-in-use.ts; critic 2026-11-07, findings 1-3).
+    const named = () => registered.find((d) => d.current) ?? dbInUse(registered);
+    const nameOfId = (id: string) => { const d = registered.find((x) => x.id === id); return d ? dbName(d) : id; };
+    type G3 = { __dataDb?: () => string | null; __currentScene?: () => { uid: string; v: number; name: string } | null };
+    const g3 = globalThis as unknown as G3;
+
+    // THIS DATABASE'S SCENES, ON THE FACE, newest first, one click to open (the Scene menu lists the same; it is the quick
+    // way from any module). A search above the list once there are more than a few; the list fits its space (fitList).
+    type SceneRow = { uid: string; name: string; v: number; producedAt?: string; series?: number };
+    const scenesList = el.querySelector(".sl-scenes-list") as HTMLElement, scenesSearch = el.querySelector(".sl-scenes-search") as HTMLInputElement;
+    const scenesNote = document.createElement("div");
+    scenesNote.className = "sl-hint sl-scenes-empty";
+    scenesList.before(scenesNote);   // above the list: nothing important under a list
+    let sceneRows: SceneRow[] = [];
+    let scenesRead = 0;
+    const sceneWhen = (iso?: string) => {
+      if (!iso) return ""; const d = new Date(iso); if (isNaN(d.getTime())) return "";
+      return d.toDateString() === new Date().toDateString() ? `today ${d.toTimeString().slice(0, 5)}` : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     };
+    const paintScenes = () => {
+      const cur = dbInUse(registered);
+      const q = scenesSearch.value.trim().toLowerCase();
+      // The date counts in the search too, as in the Scene menu ("oct 29").
+      const shown = q ? sceneRows.filter((r) => `${r.name} ${sceneWhen(r.producedAt)}`.toLowerCase().includes(q)) : sceneRows;
+      scenesSearch.hidden = sceneRows.length <= 5;
+      scenesSearch.placeholder = `Search the ${sceneRows.length} scenes`;
+      const open = g3.__currentScene?.()?.uid;
+      scenesList.innerHTML = shown.map((r) => `<button type="button" role="listitem" class="sl-scene-row${open === r.uid ? " sl-scene-cur" : ""}" data-uid="${esc(r.uid)}" title="Open “${esc(r.name)}”: its scans, and everything as it was on screen"><span>${esc(r.name)}</span><small>${sceneWhen(r.producedAt)}</small></button>`).join("");
+      // AN EMPTY LIST IS NO BOX (finding 16): the note says why, the list and its grip go.
+      scenesNote.textContent = shown.length ? "" : sceneRows.length ? "No scene matches" : cur ? `No scene saved in ${dbName(cur)} yet` : "";
+      scenesNote.hidden = !scenesNote.textContent;
+      scenesList.hidden = !shown.length;
+      const grip = scenesList.nextElementSibling as HTMLElement | null;
+      if (grip?.classList.contains("sl-fit-grip")) grip.hidden = !shown.length;
+      // A ROW SAYS "Opening…" IN ITS DATE'S PLACE, and the list is drawn again afterwards, opened or not (finding 14: the
+      // button's own feedback wrote over the row's two parts; a row that failed stayed broken).
+      for (const b of scenesList.querySelectorAll<HTMLButtonElement>(".sl-scene-row")) b.addEventListener("click", () => {
+        if (b.disabled) return;
+        b.disabled = true;
+        const small = b.querySelector("small"); if (small) small.textContent = "Opening…";
+        void openSceneFrom(null, b.dataset.uid!).finally(() => void loadScenes());
+      });
+    };
+    const loadScenes = async () => {
+      const at = ++scenesRead, cur = dbInUse(registered);
+      const j = cur ? await fetch(`/_db/${encodeURIComponent(cur.id)}/_scenes`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { scenes?: SceneRow[] } | null : null;
+      if (at !== scenesRead) return;   // a later read (another database chosen meanwhile) wins
+      sceneRows = (j?.scenes ?? []).slice().sort((a, b) => (b.producedAt ?? "").localeCompare(a.producedAt ?? ""));
+      paintScenes();
+    };
+    scenesSearch.addEventListener("input", paintScenes);
+    fitList(scenesList, "load-save-scenes");
+
+    // THE SAVE BUTTON NAMES WHERE THE NEXT SAVE GOES: the database the scans on screen came from (slicer-app's __dataDb),
+    // else the one in use. Off with nothing loaded or nowhere to save. Its kept label is changed with it, or runAction puts
+    // the old name back after a press (finding 4).
+    const saveBtn = el.querySelector('[data-act="save-scene"]') as HTMLButtonElement;
+    const anyLoaded = () => [...opts.live.nodes.values()].some((n) => ["image", "segmentation", "sequence", "markup", "model", "transform"].includes(n.type as string));
+    const paintSave = () => {
+      if (saveBtn.dataset.slBusy === "1") return;
+      const from = g3.__dataDb?.() ?? null;
+      const target = from && from !== "mixed" ? registered.find((d) => d.id === from) : from ? undefined : dbInUse(registered);
+      const label = target ? `Save to ${dbName(target)}` : "Save";
+      saveBtn.textContent = label;
+      saveBtn.dataset.slLabel = label;
+      saveBtn.disabled = !anyLoaded() || (!target && from !== "mixed");
+      const inUse = dbInUse(registered);
+      saveBtn.title = from === "mixed"
+        ? "The scans on screen come from two databases: a scene holds the scans of one"
+        : !anyLoaded() ? "Nothing to save yet: open scans or a scene first"
+        : !target ? "No database can be reached to save into"
+        : `Everything on screen, kept together as one scene in ${dbName(target)}${inUse && target.id !== inUse.id ? `, where its scans are (the database at the top is ${dbName(inUse)})` : ""}`;
+    };
+    opts.live.subscribe(() => paintSave());
+
+    // A save, an open, a rename change the list and the Save button: read again when the open scene, its save number or its
+    // name changes (finding 8), and whenever the module is shown (refreshFace, below).
+    let sceneKey = "";
+    watchScenes(() => {
+      if (!el.isConnected) return;
+      paintSave();
+      const s = g3.__currentScene?.(), k = s ? `${s.uid}:${s.v}:${s.name}` : "";
+      if (k !== sceneKey) { sceneKey = k; void loadScenes(); }
+    });
+
+    // Said again whenever the registered list is read: the chooser's name, the Save button, the scenes.
+    const showCurrentDb = () => {
+      const cur = named();
+      (pickBtn.querySelector(".sl-dbpick-name") as HTMLElement).textContent = !cur ? "No database yet" : cur.exists ? dbName(cur) : `${dbName(cur)} — not reachable`;
+      pickBtn.title = !cur
+        ? "Make one under Manage databases, or bring scans in with From disk…"
+        : `${cur.remote ? `On ${cur.remote.host}` : cur.path}\nClick to choose another database`;
+      paintSave();
+      void loadScenes();
+    };
+    // EVERY TIME THE MODULE IS SHOWN, and after a switch made elsewhere (Settings, another window): what the face names is
+    // read again (finding 3: a database chosen in Settings left the old name, scenes and Save label here).
+    refreshFace = () => { void loadRegistered().then(() => { showCurrentDb(); void fillAddWhich(); }); };
     void loadRegistered().then(showCurrentDb);
+
+    let dbPop: HTMLElement | null = null;
+    const closeDbPop = () => {
+      dbPop?.remove(); dbPop = null;
+      pickBtn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("pointerdown", outsideDb, true); document.removeEventListener("keydown", keyDb, true);
+      document.removeEventListener("scroll", onScrollDb, true); removeEventListener("resize", closeDbPop);
+    };
+    const outsideDb = (e: Event) => { if (dbPop && !dbPop.contains(e.target as Node) && !pickBtn.contains(e.target as Node)) closeDbPop(); };
+    const keyDb = (e: KeyboardEvent) => { if (e.key === "Escape" && dbPop) { e.stopPropagation(); closeDbPop(); } };
+    // The column scrolling the button away from under the list closes it, as a resize does (finding 15); the list's own
+    // scroll does not, nor a scroll that leaves the button where it was (a module coming into view scrolls its column).
+    let pickTop = 0;
+    const onScrollDb = (e: Event) => { if (dbPop && !dbPop.contains(e.target as Node) && Math.abs(pickBtn.getBoundingClientRect().top - pickTop) > 2) closeDbPop(); };
+    const openManage = () => {
+      const sec = manageBody.closest("details");
+      if (sec) sec.open = true;
+      manageBody.scrollIntoView({ block: "start", behavior: "smooth" });
+    };
+    const chooseDb = async (id: string) => {
+      closeDbPop();
+      const d = registered.find((x) => x.id === id);
+      if (d?.current) return;
+      const ok = await fetch("/_db", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ current: id }) })
+        .then(async (r) => ({ ok: r.ok, j: await r.json().catch(() => ({})) as { error?: string } })).catch((e) => ({ ok: false, j: { error: (e as Error).message } }));
+      if (!ok.ok) { shell.notify({ title: "The database was not changed", body: esc(ok.j.error ?? "") }); return; }
+      addChosenByHand = false;   // "Also add to" follows the database at the top again (finding 5)
+      await afterDatabasesChanged();
+      const from = g3.__dataDb?.();
+      status(from && from !== "mixed" && from !== id
+        ? `Opens ${d ? dbName(d) : id} now. The scene on screen is still saved in ${nameOfId(from)}, where its scans are.`
+        : `Opens ${d ? dbName(d) : id} now`);
+    };
+    // The list, in the page's top layer under the button, like the Scene menu (a list inside the column was cut off by it).
+    const openDbPop = async () => {
+      if (dbPop) return;
+      const { databases } = await listDatabases();
+      if (dbPop) return;
+      const pop = dbPop = document.createElement("div");
+      pop.className = "sl-scene-pop sl-db-pop";
+      pop.setAttribute("role", "listbox");
+      const r = pickBtn.getBoundingClientRect();
+      pickTop = r.top;
+      pop.style.left = `${Math.max(4, r.left)}px`;
+      pop.style.width = `${Math.max(r.width, 300)}px`;
+      pop.style.top = `${r.bottom + 4}px`;
+      pop.style.maxHeight = `${Math.max(160, innerHeight - r.bottom - 12)}px`;
+      const row = (d: RegisteredDb) => {
+        const note = !d.exists ? (d.remote?.why ?? "not reachable") : d.description?.patientData === false ? "public data" : d.description?.patientData ? "not public" : "";
+        return `<button type="button" role="option" aria-selected="${d.current}" class="sl-scene-row${d.current ? " sl-scene-cur" : ""}" data-id="${esc(d.id)}" ${d.exists ? "" : "disabled"} title="${esc(d.description?.holds ?? (d.remote ? `On ${d.remote.host}` : d.path))}"><span>${esc(dbName(d))}</span><small>${esc(note)}</small></button>`;
+      };
+      const local = databases.filter((d) => !d.remote);
+      const hosts = [...new Set(databases.filter((d) => d.remote).map((d) => d.remote!.host))];
+      pop.innerHTML = `<div class="sl-scene-sec">On this Mac</div>${local.map(row).join("") || `<div class="sl-scene-empty">None yet</div>`}`
+        + hosts.map((h) => `<div class="sl-scene-sep"></div><div class="sl-scene-sec">On ${esc(h)}</div>${databases.filter((d) => d.remote?.host === h).map(row).join("")}`).join("")
+        + `<div class="sl-scene-sep"></div><button type="button" class="sl-scene-mi sl-db-manage"><span>Manage databases…</span><span class="sl-scene-k">new, add, in use, shared</span></button>`;
+      document.body.appendChild(pop);
+      pickBtn.setAttribute("aria-expanded", "true");
+      for (const b of pop.querySelectorAll<HTMLButtonElement>(".sl-scene-row")) b.addEventListener("click", () => void chooseDb(b.dataset.id!));
+      pop.querySelector(".sl-db-manage")!.addEventListener("click", () => { closeDbPop(); openManage(); });
+      document.addEventListener("pointerdown", outsideDb, true); document.addEventListener("keydown", keyDb, true);
+      document.addEventListener("scroll", onScrollDb, true); addEventListener("resize", closeDbPop);
+    };
+    pickBtn.addEventListener("click", () => { if (dbPop) closeDbPop(); else void openDbPop(); });
+    openDbListFromOutside = () => void openDbPop();
 
     const failed = (e: unknown) => {
       const err = e as Error;
@@ -3269,7 +3429,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       // listed"): Change… writes the new current database to the server and reopens, but `servedDb` was read once when
       // the panel mounted, so the old one opened again. A served database is re-read here; the folder picker below stays
       // synchronous, since it needs the click's activation.
-      if (!pick && servedDb) { loadRegistered().then(() => { showCurrentDb(); return browseSource(httpSource(servedDb!), servedLabel || "DICOM database"); }).catch(failed); return; }
+      if (!pick && servedDb) { loadRegistered().then(() => { showCurrentDb(); browsingDbId = dbInUse(registered)?.id ?? null; return browseSource(httpSource(servedDb!), servedLabel || "DICOM database"); }).catch(failed); return; }
 
       const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
       if (!picker) {
@@ -3307,6 +3467,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // ---- "Also add to [database]" and the Databases window (Ron, 2026-10-01; desktop/db-import.ts) ----
     const addBox = el.querySelector(".sl-add-db") as HTMLInputElement, addWhich = el.querySelector(".sl-add-db-which") as HTMLSelectElement;
     const noPatientData = new Set<string>();
+    let addChosenByHand = false;
     let dbSection: DatabasesSection | undefined;
     /** After a database was made, chosen, added or removed: the panel's list, and the Databases section unless the
      *  change came from it (it draws itself again). */
@@ -3319,7 +3480,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     afterDatabasesChangedOutside = afterDatabasesChanged;
     const fillAddWhich = async (select?: string) => {
       const { databases, features } = await listDatabases();
-      const keep = select ?? addWhich.value;
+      const keep = addWhich.value;
       addWhich.innerHTML = "";
       const usable = databases.filter((d) => d.exists);
       for (const d of usable) {
@@ -3332,16 +3493,19 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const n = document.createElement("option"); n.value = "_new"; n.textContent = "New database…"; addWhich.appendChild(n);
       }
       const all = document.createElement("option"); all.value = "_all"; all.textContent = "All databases…"; addWhich.appendChild(all);
-      // The default target is never a database that says it holds public data, unless all of them do -- then the one
-      // Albula opens (scans from a disc are usually not public).
-      const allowed = usable.filter((d) => d.description?.patientData !== false);
-      addWhich.value = usable.some((d) => d.id === keep) ? keep : ((allowed.find((d) => d.current) ?? allowed[0]) ?? usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
+      // THE DATABASE AT THE TOP, unless the person chose another one here (critic 2026-11-07, finding 5: Ron's answer, "every
+      // other line then acts on that database"). One that says it holds public data is still asked about before scans from a
+      // disc go in (okForTarget). A database just made is chosen.
+      const inUseDb = dbInUse(databases);
+      addWhich.value = select && usable.some((d) => d.id === select) ? select
+        : !addChosenByHand && inUseDb ? inUseDb.id
+        : usable.some((d) => d.id === keep) ? keep : (usable.find((d) => d.current) ?? usable[0])?.id ?? "_new";
       (el.querySelector(".sl-add-row") as HTMLElement).hidden = !features.includes("import");
     };
     dbSection = mountDatabases(dbSecBody, { notify: shell.notify, onChanged: (id) => void afterDatabasesChanged(id, true) });
     // "New database…" and "All databases…" in the Also add to menu: to the Databases section, opened and in sight.
     addWhich.addEventListener("change", () => {
-      if (addWhich.value !== "_new" && addWhich.value !== "_all") return;
+      if (addWhich.value !== "_new" && addWhich.value !== "_all") { addChosenByHand = addWhich.value !== dbInUse(registered)?.id; return; }
       const startWithNew = addWhich.value === "_new";
       void fillAddWhich();   // back to a real database
       const sec = dbSecBody.closest("details");
@@ -3391,7 +3555,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     (globalThis as unknown as { __scenesWindow?: () => Promise<void> }).__scenesWindow = showScenesWindow;
     async function showScenesWindow() {
       const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null) as { databases?: { id: string; current?: boolean; exists?: boolean; path?: string }[] } | null;
-      const cur = (reg?.databases ?? []).find((d) => d.current && d.exists) ?? (reg?.databases ?? []).find((d) => d.exists);
+      const cur = dbInUse(reg?.databases);
       if (!cur) { shell.notify({ title: "No scenes here", body: "No DICOM database is served by this window." }); return; }
       const scenes = (await fetch(`/_db/${encodeURIComponent(cur.id)}/_scenes`, { cache: "no-store" }).then((x) => x.ok ? x.json() : { scenes: [] }).catch(() => ({ scenes: [] })) as { scenes: { uid: string; study: string; studies?: string[]; name: string; producer: string; producedAt: string; v: number; bytes: number; series?: number }[] }).scenes;
       // The study's patient and description, from the open database when there is one.
@@ -3426,6 +3590,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
             const gg = globalThis as unknown as { __currentScene?: () => { uid: string } | null; __setCurrentScene?: (c: null) => void };
             if (gg.__currentScene?.()?.uid === sc.uid) gg.__setCurrentScene?.(null);   // the open one: the next save is a new scene
             setTimeout(() => tr.remove(), 900);
+            void loadScenes();   // Load / Save's own list loses the row too (critic 2026-11-07, finding 8)
           }, { busyLabel: "Deleting…", doneLabel: "Deleted", failedLabel: "Not deleted" }).catch(() => {});
         });
         tdDel.appendChild(delBtn);
@@ -3449,7 +3614,6 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       const target = addTarget();
       if (target) await reportImport(target, () => addFilesToDatabase(target.id, files, target.name, status));
     };
-    dicomInput.addEventListener("change", async () => { const files = Array.from(dicomInput.files ?? []); dicomInput.value = ""; if (files.length) await dicomFilesArrived?.(files); });
   } });
 
   // DATA — what is currently in the scene, and nothing about how it got there.

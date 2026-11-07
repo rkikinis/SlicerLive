@@ -567,7 +567,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       const hasIndex = await Deno.stat(`${defaultPath}/ctkDICOM.sql`).then(() => true, () => false);
       if (hasIndex) {
         const desc = await readDescription(defaultPath).catch(() => null);
-        if (desc && desc.source !== DTI_SAMPLE.source) throw new Error(`there is already a database named “${DTI_SAMPLE.name}” that is not Albula's sample; rename it (Load / Save › Databases, its ⋯, Describe…) and press again`);
+        if (desc && desc.source !== DTI_SAMPLE.source) throw new Error(`there is already a database named “${DTI_SAMPLE.name}” that is not Albula's sample; rename it (Load / Save › Manage databases, its Details, Describe…) and press again`);
       } else {
         await createDatabase(defaultPath, { name: DTI_SAMPLE.name, holds: DTI_SAMPLE.holds, patientData: false, source: DTI_SAMPLE.source });
       }
@@ -893,7 +893,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     catch (e) { return Response.json({ error: (e as Error).message }, { status: 500 }); }
   }
 
-  // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (DICOM files…, a drop), waiting in the staging folder.
+  // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (Files…, a drop), waiting in the staging folder.
   // POST /_db/<id>/_import {token} | {upload: <job>} -- add a chosen folder, or the uploads, to this database.
   // DELETE /_db/<id>/_upload/<job> -- the uploads of a copy the person stopped, before any import: dropped.
   const upDrop = /^\/_db\/([^/]+)\/_upload\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(url.pathname);

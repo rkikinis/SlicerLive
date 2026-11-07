@@ -14,6 +14,7 @@
 import { runAction, type AppShell } from "./app-shell.ts";
 import { writeScene } from "../../logic/scene/write.ts";
 import { collectExtensionState } from "../../logic/scene/extensions.ts";
+import { dbInUse } from "../../logic/db-in-use.ts";
 import type { LiveScene } from "../livescene.ts";
 
 type Cur = { uid: string; v: number; name: string } | null;
@@ -21,6 +22,8 @@ type SaveResult = { uid?: string; v?: number; refused?: string[]; error?: string
 type G = {
   __saveScene?: (o?: { name?: string; asNew?: boolean; buttonSays?: boolean }) => Promise<SaveResult>;
   __currentScene?: () => Cur;
+  /** The database the scans on screen came from, or "mixed" (slicer-app.ts). */
+  __dataDb?: () => string | null;
   __setCurrentScene?: (c: Cur) => void;
   __openScene?: (uid: string) => Promise<{ ok: boolean; error?: string }>;
   __closeScene?: () => Promise<boolean>;
@@ -100,11 +103,13 @@ export function markSceneClean(settleMs = 2500): void { baseline = null; settleU
 export const sceneDirty = () => dirty;
 
 // ── the store ──
-async function currentDb(): Promise<string | null> {
-  const reg = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean }[] } | null;
-  const cur = (reg?.databases ?? []).find((d) => d.current && d.exists) ?? (reg?.databases ?? []).find((d) => d.exists);
-  return cur?.id ?? null;
+async function currentDbOf(): Promise<{ id: string; name: string; nameOf: (id: string) => string } | null> {
+  const reg = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean; description?: { name?: string } }[] } | null;
+  const cur = dbInUse(reg?.databases);
+  const nameOf = (id: string) => { const d = (reg?.databases ?? []).find((x) => x.id === id); return d?.description?.name ?? id; };
+  return cur ? { id: cur.id, name: cur.description?.name ?? cur.id, nameOf } : null;
 }
+async function currentDb(): Promise<string | null> { return (await currentDbOf())?.id ?? null; }
 async function listScenes(): Promise<Row[]> {
   const id = await currentDb(); if (!id) return [];
   const j = await fetch(`/_db/${encodeURIComponent(id)}/_scenes`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { scenes?: Row[] } | null;
@@ -152,6 +157,11 @@ async function doClose(): Promise<void> {
   repaintAll();
 }
 async function showAll(): Promise<void> { await g.__showScenesWindow?.(); }
+/** For Load / Save (2026-11-07): its own Save button and scene list do what this menu does, with the same feedback. */
+export const saveSceneFrom = (btn: HTMLButtonElement) => doSave(btn);
+export const openSceneFrom = (btn: HTMLButtonElement | null, uid: string) => doOpen(btn, uid);
+/** Called whenever the scene controls repaint (a save, an open, a change); the caller drops itself when it is gone. */
+export function watchScenes(fn: () => void): void { repaints.add(fn); }
 
 // ── one instance: the button and its menu ──
 export interface SceneControlOptions {
@@ -173,6 +183,11 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
   let filter = "";
   let rows: Row[] = [];
   let naming: "rename" | "saveas" | null = null;
+  // WHICH DATABASE THE LIST IS OF, BY NAME (Ron, 2026-11-07: "the current short cut to scenes does not tell me which db has
+  // been selected"; mockups/load-save-tasks-2026-11-07.html, answer 2: in the menu, not on the top bar).
+  let dbLabel = "";
+  // And where the open scene is saved, which can be another database than the one in use (critic 2026-11-07, finding 7).
+  let nameOfDb: (id: string) => string = (id) => id;
 
   const paintButton = () => {
     if (btn.dataset.slBusy === "1") return;                 // runAction owns the word while it runs
@@ -205,7 +220,9 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
       head = naming === "rename"
         ? `<input class="sl-scene-name-in" value="${esc(cur.name)}">`
         : `<div class="sl-scene-name" title="Click to rename">${esc(cur.name)} <span class="sl-scene-pen">✎</span></div>`;
-      head += `<div class="sl-scene-sub">${dirty ? "Changed since the last save" : `Saved — save ${cur.v}`}</div>`;
+      const home = g.__dataDb?.();
+      const where = home && home !== "mixed" ? ` in ${esc(nameOfDb(home))}` : "";
+      head += `<div class="sl-scene-sub">${dirty ? `Changed since the last save${where ? ` (saved${where})` : ""}` : `Saved${where} — save ${cur.v}`}</div>`;
     } else if (any) {
       head = `<div class="sl-scene-sub">Not saved yet — the name it will get:</div><input class="sl-scene-name-in" value="${esc(g.__proposedSceneName?.() ?? "Scene")}">`;
     } else {
@@ -217,10 +234,11 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
       <button class="sl-scene-mi sl-scene-save" ${any ? "" : "disabled"}><span>${saveLabel}</span><span class="sl-scene-k">${naming === "saveas" ? "↩" : keyLabel("S")}</span></button>
       ${cur && naming !== "saveas" ? `<button class="sl-scene-mi sl-scene-saveas"><span>Save as…</span><span class="sl-scene-k">a new scene; this one stays</span></button>` : ""}
       <div class="sl-scene-sep"></div>
-      <div class="sl-scene-sec">Open a scene · ${q ? `${shown.length} of ${rows.length}` : rows.length}</div>
+      <div class="sl-scene-sec" title="The database the scenes are saved in; Another database… below chooses another">Scenes in ${dbLabel ? esc(dbLabel) : "this database"} · ${q ? `${shown.length} of ${rows.length}` : rows.length}</div>
       <input class="sl-scene-search" placeholder="Search scenes" value="${esc(filter)}">
-      <div class="sl-scene-list">${shown.map((r) => `<button class="sl-scene-row${cur?.uid === r.uid ? " sl-scene-cur" : ""}" data-uid="${esc(r.uid)}" title="${esc(r.name)} — save ${r.v}${r.series ? `, ${r.series} series` : ""}"><span>${esc(r.name)}</span><small>${when(r.producedAt)}</small></button>`).join("") || `<div class="sl-scene-empty">${rows.length ? "No scene matches" : "No saved scenes in this database"}</div>`}</div>
+      <div class="sl-scene-list">${shown.map((r) => `<button class="sl-scene-row${cur?.uid === r.uid ? " sl-scene-cur" : ""}" data-uid="${esc(r.uid)}" title="${esc(r.name)} — save ${r.v}${r.series ? `, ${r.series} series` : ""}"><span>${esc(r.name)}</span><small>${when(r.producedAt)}</small></button>`).join("") || `<div class="sl-scene-empty">${rows.length ? "No scene matches" : `No saved scenes in ${dbLabel ? esc(dbLabel) : "this database"}`}</div>`}</div>
       <button class="sl-scene-mi sl-scene-all"><span>All scenes…</span><span class="sl-scene-k">delete, package</span></button>
+      <button class="sl-scene-mi sl-scene-otherdb" title="Load / Save, with the list of databases open"><span>Another database…</span><span class="sl-scene-k">Load / Save</span></button>
       <div class="sl-scene-sep"></div>
       <button class="sl-scene-mi sl-scene-close" ${any ? "" : "disabled"}><span>Close scene</span><span class="sl-scene-k">${keyLabel("W")}</span></button>`;
     const nameIn = pop.querySelector<HTMLInputElement>(".sl-scene-name-in");
@@ -235,6 +253,7 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
     });
     pop.querySelector(".sl-scene-saveas")?.addEventListener("click", () => { naming = "saveas"; paintMenu(); });
     pop.querySelector(".sl-scene-all")?.addEventListener("click", () => { close(); void showAll(); });
+    pop.querySelector(".sl-scene-otherdb")?.addEventListener("click", () => { close(); (globalThis as unknown as { __chooseDatabase?: () => void }).__chooseDatabase?.(); });
     pop.querySelector(".sl-scene-close")?.addEventListener("click", () => { close(); void doClose(); });
     for (const b of pop.querySelectorAll<HTMLButtonElement>(".sl-scene-row")) b.addEventListener("click", () => { const uid = b.dataset.uid!; close(); void doOpen(btn, uid); });
     const search = pop.querySelector<HTMLInputElement>(".sl-scene-search")!;
@@ -272,7 +291,7 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
     paintMenu();
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", onKey, true);
-    void listScenes().then((l) => { rows = l; paintMenu(); });   // read when it opens, so a scene saved a moment ago is in it
+    void Promise.all([listScenes(), currentDbOf()]).then(([l, db]) => { rows = l; dbLabel = db?.name ?? ""; if (db) nameOfDb = db.nameOf; paintMenu(); });   // read when it opens, so a scene saved a moment ago is in it
   });
   // An instance whose module panel was rebuilt is gone: it drops itself rather than keep painting a detached button.
   const repaint = () => {
@@ -296,7 +315,8 @@ export function initSceneControl(liveScene: LiveScene, shell: AppShell): void {
     const k = e.key.toLowerCase();
     if (k === "s") { e.preventDefault(); void doSave(null); }
     else if (k === "w") { e.preventDefault(); void doClose(); }
-    else if (k === "o") { e.preventDefault(); void shell.showPanel("add-data"); }
+    // ⌘O is Slicer's Add Data: files from disk. Load / Save with From disk… open (critic 2026-11-07, finding 13).
+    else if (k === "o") { e.preventDefault(); const open = (globalThis as unknown as { __openLoadFromDisk?: () => void }).__openLoadFromDisk; if (open) open(); else void shell.showPanel("add-data"); }
   });
 }
 /** Called by the application when the current scene changes (slicer-app.ts sceneChanged). */

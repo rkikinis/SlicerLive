@@ -29,7 +29,9 @@ const g = () => globalThis as unknown as Hooks;
  * under the two Save arrows -- `mode` "db": everything loaded, saved to the DICOM database, with
  * Save all; "files": a format per thing, downloaded. The standalone Save module is gone.
  */
-export function renderSavePane(shell: AppShell, live: LiveScene, root: HTMLElement, mode: "db" | "files", onStatus?: (s: string) => void): void {
+/** `oneByOne`: Load / Save › Advanced › "Save one item to the database…" (2026-11-07): the rows only, no Scene menu and no
+ *  Save all, since the scene and everything in it are Save's own yellow (critic 2026-11-07, finding 10). */
+export function renderSavePane(shell: AppShell, live: LiveScene, root: HTMLElement, mode: "db" | "files", onStatus?: (s: string) => void, opts: { oneByOne?: boolean } = {}): void {
   const status = (s: string) => { onStatus?.(s); shell.setStatus(s); };
   const render = () => {
     const nodes = g().__savableNodes?.() ?? [];
@@ -59,7 +61,8 @@ export function renderSavePane(shell: AppShell, live: LiveScene, root: HTMLEleme
       ? [["nrrd", ".seg.nrrd"], ["nrrd-gz", ".seg.nrrd (gz)"], ["stl", "STL (surfaces)"], ["obj", "OBJ (surfaces, named and colored)"]]
       : [["nrrd", "NRRD"], ["nrrd-gz", "NRRD (gz)"], ["nifti", "NIfTI"]];
     const why = (n: { id: string; type: string; name: string }) => {
-      if (already(n.id)) return n.type === "segmentation" ? "in the database, unchanged" : "already in the database";
+      // "a" database: it is in the one it came from, which need not be the one at the top of Load / Save (finding 10).
+      if (already(n.id)) return n.type === "segmentation" ? "in a database, unchanged" : "already in a database";
       if (n.type !== "segmentation") return "";
       const anc = g().__dicomAncestorOf?.(n.id);
       return anc ? "" : "needs its volume in the database first";
@@ -81,7 +84,7 @@ export function renderSavePane(shell: AppShell, live: LiveScene, root: HTMLEleme
             ? `<span class="sl-hint sl-save-why">${why(n)}</span>${n.type !== "segmentation" && already(n.id) ? "" : `<button class="sl-save-btn" data-fmt="${dbFor(n)}" title="Write it into the DICOM database, under its study, indexed there">Save</button>`}`
             : `<select class="sl-fmt" title="The file format. Files go to your Downloads folder. STL and OBJ hold the structures shown in Segmentations (all of them when none is shown) as surface models.">${fileFormats(n).map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</select><button class="sl-save-btn" title="Save it in the format chosen">Save</button>${n.type === "segmentation" ? closedRow(n.id, SURFACE_FORMATS.has(fileFormats(n)[0][0])) : ""}`}
         </div>`).join("") : `<p class="sl-hint">Nothing to save yet — load or create data.</p>`;
-    if (mode === "db") {
+    if (mode === "db" && !opts.oneByOne) {
       root.insertAdjacentHTML("beforeend", `<div class="sl-actions sl-save-foot">
         <span class="sl-scene-slot"></span>
         ${nodes.length ? `<button class="sl-primary sl-save-all" title="Save everything loaded into the DICOM database: the volumes first, then the segmentations that need them">Save all</button>` : ""}

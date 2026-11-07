@@ -6,6 +6,7 @@
 import { sizeClass, startWork } from "../working.ts";
 import { initSceneControl, keyLabel, markSceneClean, SHORTCUTS, sceneControl, sceneDirty, sceneIdentityChanged } from "./scene-control.ts";
 import { openFloatingWindow } from "./floating-window.ts";
+import { dbInUse } from "../../logic/db-in-use.ts";
 import { schemeAtStart, setPaletteVersion } from "../../logic/anatomy/palettes.ts";
 import { setShadingVersion, shadingVersion } from "../shading-versions.ts";
 import { initDevice } from "../device.ts";
@@ -149,8 +150,7 @@ async function exportVolumeAsDicom(live: LiveSceneT, imageId: string, onStatus: 
   }
 
   const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null);
-  const cur = (dbs?.databases ?? []).find((d: { current?: boolean; exists?: boolean }) => d.current && d.exists) ??
-    (dbs?.databases ?? []).find((d: { exists?: boolean }) => d.exists);
+  const cur = dbInUse<{ id: string; current?: boolean; exists?: boolean }>(dbs?.databases);
   if (!cur) throw new Error("no DICOM database is reachable from here, so there is nowhere to put it");
   // CAN THIS SERVER FINISH WHAT WE ARE ABOUT TO START? Asked BEFORE writing anything.
   //
@@ -555,8 +555,7 @@ async function saveDicomArtefact(
     // BESIDE ITS SOURCE (critic 2026-10-15, render-audit-fixes finding 2): a segmentation drawn on a scan from one database is
     // written into that database even when the window shows another, so the SEG and the images it references stay together.
     const cur = (art.intoDb ? (dbs?.databases ?? []).find((d: { id?: string; exists?: boolean }) => d.id === art.intoDb && d.exists) : undefined) ??
-      (dbs?.databases ?? []).find((d: { current?: boolean; exists?: boolean }) => d.current && d.exists) ??
-      (dbs?.databases ?? []).find((d: { exists?: boolean }) => d.exists);
+      dbInUse<{ id: string; current?: boolean; exists?: boolean }>(dbs?.databases);
     if (cur) {
       // THE INDEX RECORD TRAVELS WITH THE BYTES (server feature "write-index"), so the server writes
       // and indexes in one go and a page that dies after sending -- 2026-09-18, a whole-body
@@ -1731,6 +1730,20 @@ Object.assign(globalThis, {
      */
     const sceneChanged = () => { (globalThis as unknown as { __onSceneIdentity?: () => void }).__onSceneIdentity?.(); sceneIdentityChanged(); };
 
+    // WHICH DATABASE THE SCANS ON SCREEN CAME FROM (critic 2026-11-07, Load / Save by task, finding 1: a scene opened from Test
+    // Data, the database at the top switched to Martinos Prisma, Save wrote a new scene into Prisma naming Test Data's scans,
+    // and said "Saved"). A scene lists the scans of the database it is saved in, so the scene goes back where its scans are,
+    // and the Save button and the Scene menu name that database. "mixed": scans from two databases at once, which no scene
+    // can hold. Set when a scene opens or a series is read from a database; cleared when the scene closes or the last scan goes.
+    let dataDb_: string | null = null;
+    const noteDataFrom = (id: string | null) => {
+      const next = !id ? dataDb_ : !dataDb_ || dataDb_ === id ? id : "mixed";
+      if (next !== dataDb_) { dataDb_ = next; sceneChanged(); }
+    };
+    views.live.subscribe((c) => {
+      if (dataDb_ && c.kind === "remove" && ![...views.live.nodes.values()].some((n) => n.type === "image")) { dataDb_ = null; sceneChanged(); }
+    });
+
     // THE NAME A FIRST SAVE PROPOSES, shown in the Scene menu's edit field before the save (Ron, 2026-09-25: "propose a
     // name and enable direct editing"): the volume's short label, and the first segmentation's network when there is one.
     const proposedSceneName = (): string => {
@@ -1743,8 +1756,19 @@ Object.assign(globalThis, {
       return task ? `${base} — ${task}` : base;
     };
     const saveScene = async (o: { name?: string; asNew?: boolean; withoutRefused?: boolean; buttonSays?: boolean } = {}): Promise<{ uid?: string; v?: number; refused?: string[]; error?: string }> => {
-      const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean }[]; features?: string[] } | null;
-      const cur = (dbs?.databases ?? []).find((d) => d.current && d.exists) ?? (dbs?.databases ?? []).find((d) => d.exists);
+      const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean; description?: { name?: string } }[]; features?: string[] } | null;
+      const esc0 = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      // THE SCANS' OWN DATABASE FIRST, then the one in use (finding 1 above); never another one in its place (finding 2).
+      if (dataDb_ === "mixed") {
+        shell?.notify({ title: "The scans on screen come from two databases", body: "A scene lists the scans of one database. Close the scene and open one patient at a time, or copy the scans into one database first (Load / Save › Manage databases › Transfer between databases…)." });
+        return { error: "scans from two databases" };
+      }
+      const home = dataDb_ ? (dbs?.databases ?? []).find((d) => d.id === dataDb_) : undefined;
+      if (dataDb_ && !home?.exists) {
+        shell?.notify({ title: "The scene's database cannot be reached", body: `The scans on screen are in “${esc0(home?.description?.name ?? dataDb_)}”, which cannot be reached just now. Save again when it can be.` });
+        return { error: "database not reachable" };
+      }
+      const cur = home ?? dbInUse(dbs?.databases);
       if (!cur || !(dbs?.features ?? []).includes("scenes")) { shell?.notify({ title: "The scene cannot be saved here", body: "No DICOM database with a scene store is served by this window." }); return { error: "no store" }; }
       const defaultName = proposedSceneName();
       const name = o.name ?? (o.asNew || !currentScene_ ? defaultName : currentScene_.name);
@@ -1815,7 +1839,7 @@ Object.assign(globalThis, {
       // The scene this window held was deleted from the store: the save is a new scene (critic, finding 13).
       if (res.status === 400 && r.code === "gone" && !o.asNew) return await saveScene({ ...o, asNew: true, name });
       if (!res.ok || !r.uid) { shell?.notify({ title: "The scene was not saved", body: esc(r.error ?? `HTTP ${res.status}`) }); return { error: r.error }; }
-      currentScene_ = { uid: r.uid, v: r.v ?? 1, name }; sceneChanged();
+      currentScene_ = { uid: r.uid, v: r.v ?? 1, name }; dataDb_ = cur.id; sceneChanged();
       markSceneClean(800);   // HERE, not in one caller: a save from a notice's button is a save too (critic round 2, finding 3)
       const nodesN = Object.keys(w.doc.nodes as object).length;
       // THE RESULT LANDS WHERE THE PERSON IS. Saving the scene is done from Load / Save or from the
@@ -1840,14 +1864,14 @@ Object.assign(globalThis, {
     // LOADING a scene lives in the Load Data panel (it owns the open database); that panel mounts
     // when first shown, so the hook is not there until then. Show it once, then call.
     const loadScene = async (uid: string) => {
-      const g = globalThis as unknown as { __loadScene?: (uid: string) => Promise<{ ok: boolean; error?: string; v?: number; name?: string }> };
+      const g = globalThis as unknown as { __loadScene?: (uid: string) => Promise<{ ok: boolean; error?: string; v?: number; name?: string; db?: string }> };
       if (!g.__loadScene) { await shell?.showPanel("add-data"); await new Promise((r) => setTimeout(r, 50)); }
       if (!g.__loadScene) return { ok: false, error: "the Load Data panel did not mount" };
       const r = await g.__loadScene(uid);
       // The loaded scene is now the current one: the next save is its v + 1 under its name. A load
       // that failed is not (a save after it would replace the file with an empty scene; critic, finding 2).
       // Clean HERE, for every way in -- Load / Save's scene rows, All scenes, a notice's "Open it" (critic round 2, finding 3).
-      if (r.ok) { currentScene_ = { uid, v: r.v ?? 1, name: r.name ?? "Scene" }; sceneChanged(); markSceneClean(); }
+      if (r.ok) { currentScene_ = { uid, v: r.v ?? 1, name: r.name ?? "Scene" }; dataDb_ = r.db ?? dataDb_; sceneChanged(); markSceneClean(); }
       return r;
     };
     // CLOSE THE SCENE. Asks first when something loaded is not saved anywhere; then the data goes
@@ -1871,7 +1895,7 @@ Object.assign(globalThis, {
         if (!ok) return false;
       }
       const n = g.__closeSceneData();
-      currentScene_ = null; sceneChanged();
+      currentScene_ = null; dataDb_ = null; sceneChanged();
       shell?.setStatus(`Scene closed — ${n} thing${n === 1 ? "" : "s"} unloaded; the database is unchanged`);
       return true;
     };
@@ -1923,6 +1947,7 @@ Object.assign(globalThis, {
       };
       await g.__glassesStart?.(p.get("screen") ?? "");
     })();
+    Object.assign(globalThis, { __dataDb: () => dataDb_, __noteDataFrom: noteDataFrom });
     Object.assign(globalThis, { __saveScene: saveScene, __currentScene: () => currentScene_, __openScene: loadScene, __closeScene: closeScene, __proposedSceneName: proposedSceneName,
       // "All scenes…": the Scenes window lives in the Load / Save panel, which mounts when first shown.
       __showScenesWindow: async () => {

@@ -31,6 +31,14 @@ function scroller(el: HTMLElement): HTMLElement | null {
   return null;
 }
 
+/** The column's empty space under its last element, in px (0 when it is full or scrolls). */
+function freeBelow(col: HTMLElement): number {
+  const last = col.lastElementChild as HTMLElement | null;
+  if (!last) return 0;
+  const bottom = last.getBoundingClientRect().bottom - col.getBoundingClientRect().top + col.scrollTop;
+  return Math.max(0, col.clientHeight - bottom);
+}
+
 /**
  * The automatic height: everything the list holds, less what the column would have to scroll. Pure, for the test:
  * `natural` the list's full height, `overflow` how much taller the column's content is than the column with the list at
@@ -75,7 +83,11 @@ export function fitList(list: HTMLElement, key: string, opts: { min?: number; sc
     // scroll in progress at every change of a row (critic 2026-10-16, tonight's fixes, finding 6: the Scenes list changes
     // at every step of the heart). Written only when it changes.
     const natural = list.scrollHeight;
-    const overflow = col ? col.scrollHeight - col.clientHeight + Math.max(0, natural - list.clientHeight) : 0;
+    // THE COLUMN'S FREE SPACE COUNTS TOO (critic 2026-11-07, Load / Save, finding 12): scrollHeight is never below
+    // clientHeight, so a column with room to spare measured an overflow of 0, and a list that had once been shrunk (a box
+    // opened above it) could never grow back. Below the column's last element is room the list may take.
+    const overflowNow = col ? col.scrollHeight - col.clientHeight : 0;
+    const overflow = col ? (overflowNow > 0 ? overflowNow : -freeBelow(col)) + Math.max(0, natural - list.clientHeight) : 0;
     const want = `${autoHeight(natural, overflow, min)}px`;
     if (list.style.maxHeight !== want) list.style.maxHeight = want;
     putBack();

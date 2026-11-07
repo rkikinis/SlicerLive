@@ -66,7 +66,7 @@ export async function openPackageWindow(src: PackageSource, o: { notify: Notify;
     : f.kind === "database" ? `Add the database “${f.name}”` : `“${folder}”`;
   const { body, close } = frame(title);
   if (f.kind === "error") { body.innerHTML = `<p class="sl-pkw-err">${esc(String(r.j.error ?? "The package could not be read."))}</p>`; return; }
-  if (f.kind === "neither") { body.innerHTML = `<p>“${esc(f.name)}” is not a packaged scene (it has no <code>scene.mrson.json</code>) and holds no DICOM database.</p><p class="sl-hint">For a folder of scans use <b>DICOM folder…</b> instead.</p>`; return; }
+  if (f.kind === "neither") { body.innerHTML = `<p>“${esc(f.name)}” is not a packaged scene (it has no <code>scene.mrson.json</code>) and holds no DICOM database.</p><p class="sl-hint">For a folder of scans use <b>Folder…</b> under From disk… in Load / Save.</p>`; return; }
   if (f.kind === "database") { databaseForm(body, close, f, (src as { token: string }).token, o); return; }
   if (dropped) { f.files = dropped.dicom.length; f.bytes = dropped.dicom.reduce((n, x) => n + x.size, 0); }
   packageForm(body, close, f, src, o);
@@ -98,7 +98,7 @@ function packageForm(body: HTMLElement, close: () => void, f: Facts, src: Packag
     <div class="sl-pkw-row pk-new"><span>Name</span><input type="text" class="pk-name" maxlength="80" value="${esc(newName)}"></div>
     <div class="sl-pkw-row pk-new"><span></span><span class="sl-hint">in “SlicerAlbulaDatabases” in your home folder</span></div>
     <div class="sl-pkw-row pk-new"><span>Public data</span><label><input type="checkbox" class="pk-public" ${f.public ? "checked" : ""}> released for anyone to use${f.public ? " — from the package" : ""}</label></div>
-    ${dropped ? `<div class="sl-pkw-row"><span></span><span class="sl-hint">The scans are copied in. (Choosing the package with <b>Packaged scene…</b> in Load / Save can move them instead.)</span></div>`
+    ${dropped ? `<div class="sl-pkw-row"><span></span><span class="sl-hint">The scans are copied in. (Choosing the package with From disk… › <b>Folder…</b> in Load / Save can move them instead.)</span></div>`
       : `<div class="sl-pkw-row pk-how"><span>The scans</span><span><label><input type="radio" name="pk-how" value="move" checked> move them in</label> &nbsp; <label><input type="radio" name="pk-how" value="copy"> copy them</label></span></div>`}
     <div class="sl-pkw-err pk-err"></div>
     <div class="pk-progress" hidden><div class="pk-ptext sl-hint"></div><div class="sl-pkw-prog"><i></i></div></div>`}

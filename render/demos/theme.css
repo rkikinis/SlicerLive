@@ -1243,14 +1243,29 @@ button.sl-primary:hover { background: var(--sl-accent-hover); }
 .sl-r-control > input[type="range"] { width: 100%; min-width: 0; }
 .sl-modal-input { width: 100%; box-sizing: border-box; margin-top: 8px; padding: 6px 8px; font: inherit; border-radius: 6px; border: 1px solid var(--sl-control-edge); background: var(--sl-fill-hover); color: inherit; }
 
-/* LOAD OR SAVE, AND WHERE (load-panel.ts, 2026-11-01, in place of the 2026-09-22 graph): two choices, the chosen one
-   outlined, not yellow (Ron: a yellow Load "would lead me to click load"); the DICOM database wide, Files narrow. */
-.sl-io-dir, .sl-io-where { display: flex; gap: 6px; margin: 0 0 8px; }
-.sl-io-dir button { flex: 1; }
-.sl-io-where button { flex: 1; min-height: 44px; font-size: 14px; }
-.sl-io-where button.sl-io-wdb { flex: 2; font-weight: 600; }
-.sl-io-dir button[aria-pressed=true], .sl-io-where button[aria-pressed=true] { outline: 2px solid var(--sl-accent); outline-offset: -1px; font-weight: 600; }
-.sl-io-panes > [data-pane] { margin-top: 4px; }
+/* LOAD / SAVE BY TASK (load-panel.ts, 2026-11-07, in place of the Load / Save switch of 2026-11-01): the database by name,
+   a button as wide as the column whose click lists the databases; Open and Save rows with the yellow at the right; a
+   button that opens a box under it is outlined while the box is open, as a chosen option. */
+.sl-panel .sl-dbpick { display: flex; align-items: center; gap: 8px; width: 100%; box-sizing: border-box; padding: 8px 10px; min-height: 38px; line-height: 1.3; border-radius: 8px; border: 1px solid var(--sl-control-edge); background: var(--sl-fill-hover); color: var(--sl-fg); font: inherit; text-align: left; cursor: pointer; }
+.sl-panel .sl-dbpick:hover { border-color: var(--sl-fg-muted); }
+.sl-dbpick-name { flex: 1; min-width: 0; font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* As large as the name beside it: visible at arm's length (critic 2026-11-07, finding 16). */
+.sl-dbpick-car { color: var(--sl-fg); font-size: 15px; line-height: 1; }
+.sl-dbpick[aria-expanded=true] { outline: 2px solid var(--sl-accent); outline-offset: -1px; }
+.sl-open-row, .sl-save-row { justify-content: space-between; }
+.sl-save-row .sl-primary { margin-left: auto; min-width: 0; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* OPEN'S THREE (2026-11-07): From database… at the right whichever is yellow; the yellow is the button whose box is open, and
+   that fill is the only mark of it (Ron: the other two "should look the same"), so no outline in this row. */
+.sl-open-row [data-act="dicom-db"] { margin-left: auto; }
+.sl-panel button[aria-expanded=true]:not(.sl-dbpick):not(.sl-open-row button) { outline: 2px solid var(--sl-accent); outline-offset: -1px; }
+.sl-disk-box, .sl-asfile-box, .sl-eachdb-box { margin: 4px 0 8px; padding: 6px 8px; border-left: 2px solid var(--sl-control-edge); }
+.sl-scenes-search { width: 100%; box-sizing: border-box; margin: 6px 0 0; padding: 5px 8px; font: inherit; font-size: 13px; border-radius: 6px; border: 1px solid var(--sl-control-edge); background: var(--sl-fill-hover); color: inherit; }
+.sl-scenes-list { margin-top: 6px; border: 1px solid var(--sl-line-faint, var(--sl-control-edge)); border-radius: 6px; font-size: 13px; }
+.sl-scenes-list:empty { display: none; }
+.sl-panel .sl-scenes-list button.sl-scene-row { padding: 5px 8px 5px 22px; margin: 0; min-height: 0; border: 0; border-bottom: 1px solid var(--sl-line-faint, var(--sl-control-edge)); border-radius: 0; background: none; box-shadow: none; }
+.sl-panel .sl-scenes-list button.sl-scene-row:last-child { border-bottom: 0; }
+.sl-panel .sl-scenes-list button.sl-scene-row:hover { background: var(--sl-surface-3); }
+.sl-scenes-empty { padding: 6px 8px; }
 .sl-save-item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--sl-line-faint); }
 .sl-save-item .sl-save-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sl-save-why { white-space: nowrap; }
