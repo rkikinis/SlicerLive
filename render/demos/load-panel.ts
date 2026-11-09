@@ -1,6 +1,8 @@
 // "Data" panel (W1): open local volume files (NRRD / NIfTI, gzipped or not), drag-and-drop onto the views,
 // and Slicer's Sample Data catalog with SHA-256 verification. Everything goes through logic/ingest.ts, so a
 // loaded file is an ordinary `image` node in the LiveScene. Plain DOM in the app-shell style (theme.css tokens).
+import { mountScenesFace } from "./scenes-face.ts";
+import { decorate, iconHtml, iconsOn } from "./icon-set.ts";
 import { fitList } from "./fit-list.ts";
 import { dbInUse } from "../../logic/db-in-use.ts";
 import { eyeSvg } from "./eye-icon.ts";
@@ -16,7 +18,7 @@ import type { MrsonNode } from "../mrson.ts";
 import { loadVolumeIntoScene, LocalBlobStore, lastIngestPhases, percentileWindowLevel, removeVolumeFromScene, volumeToZarr } from "../../logic/ingest.ts";
 import { readVolume, sniff } from "../../logic/readers/registry.ts";
 import { fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
-import { indexDirectory, indexFiles, loadEntry, type SeriesEntry } from "../../logic/readers/dicom-local.ts";
+import { indexFiles, loadEntry, type SeriesEntry } from "../../logic/readers/dicom-local.ts";
 import { dicomLibraryForDebugging } from "../../logic/dicom-io.ts";
 import { checkScene } from "../../logic/scene/check.ts";
 import { applySceneState } from "./scene-restore.ts";
@@ -31,7 +33,7 @@ import { volumeForSeg } from "../../logic/seg-placement.ts";
 import { createSegmentationFromBuilt, createSegmentationFromLabelmap } from "../../logic/segmentation-editor.ts";
 import { keepScroll } from "./panel-scroll.ts";
 import { openFloatingWindow } from "./floating-window.ts";
-import { chooseFolder, dbName, listDatabases, mountDatabases, type DatabasesSection, type RegisteredDb } from "./databases-window.ts";
+import { dbName, listDatabases, mountDatabases, type DatabasesSection, type RegisteredDb } from "./databases-window.ts";
 import { openTransferWindow } from "./transfer-window.ts";
 import { addFilesToDatabase, addFolderToDatabase, describeImport, filesOfChosenFolder, type ImportResult } from "./add-to-database.ts";
 import { openPackageWindow } from "./package-window.ts";
@@ -263,6 +265,10 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
   let dicomFilesArrived: ((files: File[]) => Promise<void>) | undefined;
   /** Re-read the databases after one was made or switched to elsewhere (the package window). Set by the panel. */
   let afterDatabasesChangedOutside: ((id?: string) => Promise<void>) | undefined;
+  // Load / Save's switch of the database, for the Scenes module's own pull-down (one path for both), and the Scenes rows
+  // read again after any change of databases made here.
+  let chooseDbOutside: ((id: string) => Promise<string | undefined>) | undefined;
+  let scenesFaceRefresh: (() => void) | undefined;
   async function loadFiles(files: FileList | File[]): Promise<void> {
     const list = Array.from(files);
     // A SCENE FILE DROPPED IN -- `scene.mrson.json` out of a transport folder (SCENE-DESIGN §7), with
@@ -278,7 +284,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const provenance = provFile ? JSON.parse(await provFile.text()) as Record<string, unknown> : undefined;
         const reg = await fetch("/_db", { cache: "no-store" }).then((x) => x.ok ? x.json() : null) as { databases?: { id: string; current?: boolean; exists?: boolean }[] } | null;
         const cur = dbInUse(reg?.databases);
-        if (!cur) { shell.notify({ title: "First the scans, then the scene", body: "There is no database here yet. Drop the whole <b>.albula</b> folder instead, or use Load / Save › From disk… › <b>Folder…</b> and choose that folder: it makes a database, adds the scans and opens the scene in one step." }); return; }
+        if (!cur) { shell.notify({ title: "First the scans, then the scene", body: "There is no database here yet. Drop the whole <b>.albula</b> folder instead, or use Load / Save › From disk… › <b>Choose…</b> and choose that folder: it makes a database, adds the scans and opens the scene in one step." }); return; }
         const r = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/_import`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scene, provenance }) })
           .then((x) => x.json()) as { uid?: string; v?: number; name?: string; edges?: number; attributes?: number; replaced?: boolean; kept?: boolean; error?: string; missing?: string[]; problems?: { where: string; what: string }[] };
         if (r.error) {
@@ -414,14 +420,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     help: `<p>Brings data into the session and keeps it. At the top is the <b>database</b> Albula opens from and saves
       into, by name; click it to choose another, on this Mac or on one of your other Macs. <b>Open</b>, three ways: <i>From database…</i>
       lists every patient, study and series in it; <i>From scenes…</i> lists its saved scenes, one click each; <i>From
-      disk…</i> opens a <i>Folder…</i> (scans from a disc, a stick or an export, a packaged scene, a database) or <i>Files…</i>
-      (DICOM, NRRD, NIfTI); dropping files on the views from anywhere in the application does the same. The button whose list
+      disk…</i> holds <i>Choose…</i>: files or folders, in one window (scans from a disc, a stick or an export; NRRD or NIfTI
+      files; a packaged scene; a database), and Albula tells which each is; dropping files or folders on the views from anywhere
+      in the application does the same. The button whose list
       is open is the yellow one. <b>Save</b>: <i>Save to</i> the database keeps everything on screen as a scene
       (⌘S does the same); <i>As a file…</i> saves one thing in your Downloads folder.</p>
       <p><b>What arrives where.</b> A volume file (NRRD, NIfTI) and a DICOM series both land in the
       <b>scene</b> — they show up under Data. A volume file is gone when the application restarts.</p>
       <p><b>DICOM from disk is also kept.</b> With <i>Also add to</i> ticked (it is, unless you untick it),
-      DICOM scans loaded with <i>Files…</i>, <i>Folder…</i> or dropped as a folder are copied into
+      DICOM scans loaded with <i>Choose…</i> or dropped on the views are copied into
       the database named there, so they are there next time, after the disc or USB stick is gone. Nothing
       already in the database is copied twice. Untick it to look without keeping.</p>
       <p><b>Manage databases</b> (folded, at the bottom) lists every database in the databases folder and any added from elsewhere
@@ -434,7 +441,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       from a project into the one you work in, or what you made back to where the scans came from. Every image is read
       back and compared before it counts as there. A move (under Advanced) removes from the first database only on a
       second press, after that check. Each database keeps a record of what came in and went out.</p>
-      <p><b>DICOM</b> is read as a series, not as a file: <i>Files…</i> and <i>Folder…</i> group the files into
+      <p><b>DICOM</b> is read as a series, not as a file: <i>Choose…</i> groups the files into
       series first; <i>From database…</i> opens what is already in the database.</p>
       <p><b>Deleting from the database</b> is done in the <i>From database…</i> window: tick the
       series and press <b>Delete…</b>, then press it again once it says what it is about to destroy.
@@ -472,11 +479,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
           <label><input type="checkbox" class="sl-add-db" checked> Also add to</label>
           <select class="sl-add-db-which" style="min-width:0;flex:1"></select>
         </div>
-        <!-- TWO IN PLACE OF FOUR (same answer, 2): Files… was Volume file… and DICOM files…, Folder… was DICOM folder… and
-             Packaged scene…; Albula tells which by what was chosen. The usual way, a folder, last, at the right. -->
+        <!-- ONE IN PLACE OF FOUR (same answer, 2, then Ron the same day: "can we have one button for both?"): Choose… takes
+             files or folders in one macOS panel and Albula tells what each is: Volume file…, DICOM files…, DICOM folder… and
+             Packaged scene… before it. -->
         <div class="sl-actions">
-          <button data-act="files" title="One or more files: DICOM, NRRD or NIfTI. DICOM is grouped into series and added to the database when that is ticked; NRRD and NIfTI open as they are.">Files…</button>
-          <button data-act="folder" title="A folder of DICOM scans (a disc, a USB stick, an export), or a scene packaged on another Mac (a folder ending in .albula), or a database folder.">Folder…</button>
+          <button data-act="choose" title="Files or folders: DICOM scans (a disc, a USB stick, an export), NRRD or NIfTI files, a scene packaged on another Mac (a folder ending in .albula), a database folder. Albula tells which each is.">Choose…</button>
         </div>
         <div class="sl-series" hidden><h3>Series</h3><div class="sl-series-list"></div></div>
         <input type="file" multiple data-any hidden>
@@ -517,6 +524,18 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     const OPEN_BOX_MEMORY = "albula-load-save-open-box";
     const diskBtn = el.querySelector('[data-act="from-disk"]') as HTMLButtonElement, scenesBtn = el.querySelector('[data-act="from-scenes"]') as HTMLButtonElement;
     const dbBtn = el.querySelector('[data-act="dicom-db"]') as HTMLButtonElement;
+    // PICTURES (render/demos/icon-set.ts, v2; Ron, 2026-11-08): the picture is the place, the arrow the direction -- a folder
+    // with an arrow out (Files…), her scene picture (Scenes…), the cylinder with an arrow out (Database…); a folder with an
+    // arrow in (As a file…), the cylinder with an arrow in (Save to …); the database at the top, the cylinder. With pictures
+    // the names are short ("4 yes, the rest goes to tooltips": the three long ones did not fit beside their pictures).
+    if (iconsOn()) {
+      diskBtn.textContent = "Files…"; diskBtn.title = "From disk: files or folders on this Mac, a disc or a USB stick. Dropping them on the views does the same.";
+      scenesBtn.textContent = "Scenes…"; scenesBtn.title = "From scenes: the scenes saved in this database, one click each";
+      dbBtn.textContent = "Database…"; dbBtn.title = "From the database: every patient, study and series in it, to choose what to open";
+      decorate(diskBtn, "openFiles"); decorate(scenesBtn, "scene"); decorate(dbBtn, "openDatabase");
+      decorate(el.querySelector('[data-act="as-file"]') as HTMLButtonElement, "saveFile");
+      (el.querySelector(".sl-dbpick") as HTMLElement).insertAdjacentHTML("afterbegin", iconHtml("database"));
+    }
     const diskBox = el.querySelector(".sl-disk-box") as HTMLElement, scenesBox = el.querySelector(".sl-scenes-box") as HTMLElement;
     const rememberedBox = (): OpenBox => { try { const v = localStorage.getItem(OPEN_BOX_MEMORY); return v === "disk" ? "disk" : v === "none" ? null : "scenes"; } catch { return "scenes"; } };
     const showOpen = (which: OpenBox, byHand = false) => {
@@ -548,17 +567,19 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (dir === "load" && where === "db") { showEach(false); refreshFace?.(); }
     };
     (el.querySelector('[data-act="save-scene"]') as HTMLButtonElement).addEventListener("click", (e) => void saveSceneFrom(e.currentTarget as HTMLButtonElement));
-    // FILES…: whatever was picked, sorted by name. Volume files (NRRD, NIfTI) and a scene file open as they are (loadFiles);
-    // everything else is taken for DICOM (DICOM files often have no extension), grouped into series and, with Also add to
-    // ticked, added to the database.
+    // FILES CHOSEN: sorted by name. Volume files (NRRD, NIfTI) and a scene file open as they are (loadFiles); everything else
+    // is taken for DICOM (DICOM files often have no extension), grouped into series and, with Also add to ticked, added to
+    // the database.
     const anyInput = el.querySelector("input[data-any]") as HTMLInputElement;
     const notDicom = (name: string) => /\.(nrrd|nhdr|nii|nii\.gz|mrson\.json)$/i.test(name) || /^provenance\.json$/i.test(name);
-    (el.querySelector('[data-act="files"]') as HTMLButtonElement).addEventListener("click", () => anyInput.click());
-    anyInput.addEventListener("change", async () => {
-      const files = Array.from(anyInput.files ?? []); anyInput.value = "";
+    const openChosenFiles = async (files: File[]) => {
       const plain = files.filter((f) => notDicom(f.name)), dicom = files.filter((f) => !notDicom(f.name));
       if (plain.length) await loadFiles(plain);
       if (dicom.length) await dicomFilesArrived?.(dicom);
+    };
+    anyInput.addEventListener("change", async () => {
+      const files = Array.from(anyInput.files ?? []); anyInput.value = "";
+      await openChosenFiles(files);
     });
 
     // ---- a terminology, into the scene as a node ----
@@ -608,31 +629,40 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }
     };
     const indexProgress = (p: { scanned: number; dicom: number; note?: string }) => status(`scanning: ${p.dicom} DICOM / ${p.scanned} files${p.note ? " — " + p.note : ""}`);
-    (el.querySelector('[data-act="folder"]') as HTMLButtonElement).addEventListener("click", async () => {
-      // THE APPLICATION'S WAY: macOS's folder dialog through the server (the web view has no folder picker). A packaged scene
-      // or a database folder goes to the package window, as Packaged scene… did; the server's own inspection decides (the
-      // package window asks the same), so a renamed package is still one. Any other folder is read for DICOM: the server
-      // adds it to the database, or serves its files to look at when "Also add to" is unticked.
-      if ((await listDatabases()).features.includes("choose-folder")) {
-        try {
-          const c = await chooseFolder("Choose a folder: scans (a disc, a USB stick, an export), a packaged scene, or a database");
-          if (!c) return;
-          const kind = c.hasDatabase ? "database" : await fetch("/_db/_package/inspect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: c.token }) })
-            .then((r) => r.ok ? r.json() : null).then((j) => (j as { kind?: string } | null)?.kind).catch(() => undefined);
-          if (kind === "package" || kind === "database") {
-            await openPackageWindow({ token: c.token, name: c.name }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) });
-            return;
-          }
-          const target = addTarget();
-          if (target) { await reportImport(target, () => addFolderToDatabase(target.id, c.token, target.name, status)); return; }
-          showSeries(await indexFiles(await filesOfChosenFolder(c.token, status), indexProgress));
-        } catch (e) { status((e as Error).message); }
+    // A FOLDER CHOSEN: a packaged scene or a database folder goes to the package window, as Packaged scene… did; the server's
+    // own inspection decides (the package window asks the same), so a renamed package is still one. Any other folder is read
+    // for DICOM: the server adds it to the database, or serves its files to look at when "Also add to" is unticked.
+    const openChosenFolder = async (c: { token: string; name: string; hasDatabase?: boolean }) => {
+      const kind = c.hasDatabase ? "database" : await fetch("/_db/_package/inspect", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: c.token }) })
+        .then((r) => r.ok ? r.json() : null).then((j) => (j as { kind?: string } | null)?.kind).catch(() => undefined);
+      if (kind === "package" || kind === "database") {
+        await openPackageWindow({ token: c.token, name: c.name }, { notify: shell.notify, onChanged: (id) => void afterDatabasesChangedOutside?.(id) });
         return;
       }
-      const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
-      if (!picker) { status("This browser cannot choose a folder: use Files… and pick the files in it"); return; }
-      try { const dir = await picker({ id: "slicerlive-dicom" }); status("scanning folder…"); showSeries(await indexDirectory(dir, indexProgress)); }
-      catch (e) { if ((e as Error).name !== "AbortError") status((e as Error).message); }
+      const target = addTarget();
+      if (target) { await reportImport(target, () => addFolderToDatabase(target.id, c.token, target.name, status)); return; }
+      showSeries(await indexFiles(await filesOfChosenFolder(c.token, status), indexProgress));
+    };
+    // CHOOSE…: ONE BUTTON, FILES OR FOLDERS (Ron, 2026-11-07: "can we have one button for both? I can select a file or folder
+    // once a finder window comes up"; "yes, build it"). macOS's own open panel through the server (desktop/choose-folder.ts:
+    // the web view's chooser takes files only). Where the server does not offer it (the browser build; Windows or Linux, whose
+    // dialogs pick files OR a folder), the web view's file chooser: files; a folder can still be dropped on the views.
+    (el.querySelector('[data-act="choose"]') as HTMLButtonElement).addEventListener("click", async () => {
+      if (!(await listDatabases()).features.includes("choose")) { anyInput.click(); return; }
+      try {
+        const r = await fetch("/_db/_choose", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "Choose files or folders: scans (a disc, a USB stick, an export), NRRD or NIfTI files, a packaged scene, a database" }) })
+          .then((x) => x.json()) as { cancelled?: boolean; error?: string; folders?: { token: string; name: string; hasDatabase?: boolean }[]; files?: { token: string; names: string[] } | null };
+        if (r.error) { status(r.error); return; }
+        if (r.cancelled) return;
+        if (r.files?.names.length) {
+          status(`reading ${r.files.names.length} file${r.files.names.length === 1 ? "" : "s"}…`);
+          const set = r.files;
+          const files = await Promise.all(set.names.map((n, i) => fetch(`/_db/_files/${set.token}/${i}`, { cache: "no-store" })
+            .then(async (x) => { if (!x.ok) throw new Error(`${n}: ${x.status}`); return new File([await x.blob()], n); })));
+          await openChosenFiles(files);
+        }
+        for (const c of r.folders ?? []) await openChosenFolder(c);
+      } catch (e) { status((e as Error).message); }
     });
 
     // ---- DICOM database (an existing ctkDICOM.sql) ----
@@ -1828,6 +1858,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         const said = `deleted ${gone} series, ${files} files to the Trash${keptWords}${failures.length ? ` — ${failures[0]}` : ", and the database checks out"}`;
         status(said);
         setBusy(said);
+        // WHAT STAYED AND WHY, as a notice (critic 2026-11-08, step 1, finding 3: the refusal showed only on the status line, and
+        // the window reopens): a scan a saved scene version uses stays until that scene, or those versions, are deleted.
+        if (failures.length) shell.notify({ title: gone ? `${failures.length} of the series stayed` : "Nothing was deleted", body: failures.map((f) => esc(f)).join("<br>") });
         selected.clear();
         // REOPENED, not patched: the list, the tree and the derivation edges all come from one read
         // of the index, and re-deriving them in place after a delete is how a browser starts lying.
@@ -2183,6 +2216,9 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
                 const ans = await fetch(`/_db/${encodeURIComponent(dbId ?? "")}/_scene/${encodeURIComponent(sc.uid)}`, { method: "DELETE" }).then(async (x) => ({ ok: x.ok, j: await x.json().catch(() => ({})) as { removed?: boolean; error?: string } })).catch(() => ({ ok: false, j: {} as { removed?: boolean; error?: string } }));
                 const r = ans.ok && ans.j.removed !== false;
                 if (!r) { shell.notify({ title: "The scene was not deleted", body: ans.j.error ? `<p>${esc(ans.j.error)}</p>` : undefined }); throw new Error("not deleted"); }
+                // The open one: the next save is a new scene, and no state is sent for the deleted one (critic, step 1, finding 1).
+                const gg = globalThis as unknown as { __currentScene?: () => { uid: string } | null; __setCurrentScene?: (c: null) => void };
+                if (gg.__currentScene?.()?.uid === sc.uid) gg.__setCurrentScene?.(null);
                 setBusy(`Scene "${sc.name}" deleted`);
                 setTimeout(() => { scRow.el.remove(); rows.splice(rows.indexOf(scRow), 1); }, 1200);   // after the button has said so
               }, { busyLabel: "Deleting…", doneLabel: "Deleted ✓", failedLabel: "Not deleted" }).catch(() => {});
@@ -3171,15 +3207,21 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         await afterDatabasesChangedOutside?.(id);
       },
       /** Load a saved scene by its uid from the current database's store. */
-      __loadScene: async (uid: string) => {
+      // `version`: that saved version instead of the newest; `draft`: the unsaved work after the newest (the Scenes module's look:
+      // one load, not the newest first and the state on top of it; critic 2026-11-08, step 2, finding 13).
+      __loadScene: async (uid: string, o: { version?: number; draft?: boolean } = {}) => {
         await loadRegistered();   // the database open now, not the one listed when this window started
         // THE DEFAULT, OR NOTHING: a default that cannot be reached (a disk unplugged, a Mac asleep) is not silently replaced
         // by another database while the line still names it (the critic, 2026-10-26, remote database, finding 5).
         const cur = dbInUse(registered);
         if (!cur) return { ok: false, error: "no database" };
-        const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`, { cache: "no-store" });
+        const base = `/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`;
+        const res = await fetch(o.draft ? `${base}/_draft` : o.version ? `${base}/_version/${o.version}` : base, { cache: "no-store" });
         if (!res.ok) return { ok: false, error: `no such scene (HTTP ${res.status})` };
-        const loaded = await (globalThis as unknown as { __loadSceneDoc: (d: Record<string, unknown>) => Promise<Record<string, unknown>> }).__loadSceneDoc(await res.json());
+        const body = await res.json() as Record<string, unknown>;
+        const doc = o.draft ? (body.draft as { doc?: Record<string, unknown> } | null)?.doc : body;
+        if (!doc) return { ok: false, error: "the scene has no unsaved work" };
+        const loaded = await (globalThis as unknown as { __loadSceneDoc: (d: Record<string, unknown>) => Promise<Record<string, unknown>> }).__loadSceneDoc(doc);
         return { ...loaded, db: cur.id };   // which database the scene is in: its next save goes there (critic 2026-11-07, finding 1)
       },
     });
@@ -3288,6 +3330,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       const target = from && from !== "mixed" ? registered.find((d) => d.id === from) : from ? undefined : dbInUse(registered);
       const label = target ? `Save to ${dbName(target)}` : "Save";
       saveBtn.textContent = label;
+      decorate(saveBtn, "saveDatabase");   // the cylinder with an arrow in (v2), after the label is written
       saveBtn.dataset.slLabel = label;
       saveBtn.disabled = !anyLoaded() || (!target && from !== "mixed");
       const inUse = dbInUse(registered);
@@ -3352,10 +3395,11 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       addChosenByHand = false;   // "Also add to" follows the database at the top again (finding 5)
       await afterDatabasesChanged();
       const from = g3.__dataDb?.();
-      status(from && from !== "mixed" && from !== id
-        ? `Opens ${d ? dbName(d) : id} now. The scene on screen is still saved in ${nameOfId(from)}, where its scans are.`
-        : `Opens ${d ? dbName(d) : id} now`);
+      const still = from && from !== "mixed" && from !== id ? `The scene on screen is still saved in ${nameOfId(from)}, where its scans are.` : "";
+      status(`Opens ${d ? dbName(d) : id} now${still ? `. ${still}` : ""}`);
+      return still || undefined;
     };
+    chooseDbOutside = async (id) => { await loadRegistered(); return await chooseDb(id) ?? undefined; };
     // The list, in the page's top layer under the button, like the Scene menu (a list inside the column was cut off by it).
     const openDbPop = async () => {
       if (dbPop) return;
@@ -3476,6 +3520,7 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       showCurrentDb();   // the line naming the open database, said again (a database removed: finding 4)
       await fillAddWhich(madeId);
       if (!fromSection) await dbSection?.refresh();
+      scenesFaceRefresh?.();
     };
     afterDatabasesChangedOutside = afterDatabasesChanged;
     const fillAddWhich = async (select?: string) => {
@@ -3628,18 +3673,28 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
     // Moved with Segmentations on 2026-09-22 (the module list review); Ron may move it back.
     groups: ["Data"],
     order: 2,
-    tip: "What is loaded, and which view shows it; rename or remove",
-    help: `<p>Everything currently in the scene — volumes, segmentations, markups, transforms — as a
-      list (Slicer calls it the Subject Hierarchy), with what is shown in which view. Click a name to rename it; ⋯ at the
-      end of a row (or a right-click on it) offers Remove from scene.</p>
-      <p>This is the session, not the archive: what is listed here came from a file or from the
-      DICOM database, and closing the application ends it. Use Save to keep a result.</p>`,
+    tip: "Every scene in the database, one row each; the space bar shows its results and versions",
+    help: `<p>The database at the top chooses which scenes are listed; Save keeps what is on screen as a new version of its scene.</p>
+      <p>Every scene saved in the database in use, a row each: its picture (taken when it was saved), the scan it is built on
+      and its date, R Y G and 3D (on the open scene, marked at its left). A click or the arrow keys choose a row; <b>return</b> or a
+      double-click opens the scene; the <b>space bar</b> opens a look beside the panel: the results (for the open scene, everything
+      loaded, with what is shown in which view; drag a segmentation to change which is drawn on top; click a name to rename it, ⋯ to
+      remove it from the scene), then the versions (open one, delete one; the unsaved work, to continue or discard), then what the
+      scene was made from.</p>
+      <p>What is loaded and not yet a scene of this database (a new case, or a scene saved in another database) has the first row;
+      its look holds the list of what is loaded.</p>
+      <p>Saving adds a version and never overwrites; the work is also saved every minute while it changes, and offered when the
+      scene is opened again. The scenes are kept in the database, on disk.</p>`,
     mount(el) {
+    // ONE ROW PER SCENE (render/demos/scenes-face.ts; Ron, 2026-11-08): the face lists every scene in the database; the list
+    // of what is loaded below is the open scene's "results", shown in the look beside the panel (the space bar).
     el.innerHTML = `
-      <h2>Scenes</h2>
-      <div class="sl-scene-id sl-hint" title="The scene this window is in. Click its name to rename it."></div>
+      <h2>${iconHtml("scenes", "sl-pic-title")}Scenes</h2>
+      <div class="sl-scn-face"></div>
+      <div class="sl-scn-results-home" hidden><div class="sl-scn-results-box">
+      <div class="sl-scene-id sl-hint" title="The scene this window is in. Click its name to rename it." hidden></div>
       <div class="sl-row sl-sh-head"><h3>In this scene</h3><label class="sl-sh-link" title="Off: R/Y/G switch one view. On: all three together."><input type="checkbox" class="sl-sh-link-cb"> Link slice views</label><span class="sl-scene-slot"></span></div>
-      <div class="sl-sh"></div>`;
+      <div class="sl-sh"></div></div></div>`;
 
     // Subject Hierarchy: every data node (any type) unless hidden.
     //
@@ -3782,6 +3837,23 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         });
       });
     };
+    // ONE VIEW OF ONE SCAN ON OR OFF (the list's R Y G, and the Scenes rows' for the open scene). Linked: all three together.
+    const toggleView = (id: string, view: string) => {
+      const n = opts.live.nodes.get(id);
+      if (!n) return;
+      const targets = linkSlices ? SLICE_VIEWS.map((v) => v.name) : [view];
+      const showing = shownIn(n, view);
+      const role = roleOf(n);
+      const hidden = new Set((n.hiddenViews as string[] | undefined) ?? []);
+      for (const ln of targets) {
+        if (showing) { hidden.add(ln); continue; }        // it is on here: clear the view
+        hidden.delete(ln);                                 // it is off here: show it
+        const c = compFor(ln);
+        if (c && layerOf(ln, role) !== id) opts.live.write({ op: "patch", id: c.id, path: `#/refs/${role}`, value: [id] });
+      }
+      opts.live.write({ op: "patch", id, path: "#/hiddenViews", value: [...hidden] });
+      refresh();   // sliceComposite is not a DATA_TYPES node, so its change would not refresh the rows
+    };
     const refresh = () => keepScroll(shEl, () => {
       // A SEQUENCE IS ONE ROW: its frames are hidden image nodes, and the row stands for the frame on
       // screen -- the view buttons act on that frame, the name is the sequence's, so five phases do
@@ -3828,14 +3900,15 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
         } else if (n.type === "segmentation") {
           const visible2D = n.visible !== false;
           const visible3D = (n.visible3D as boolean | undefined) ?? visible2D;
-          controls = `<button class="sl-sh-order" data-up title="Draw this one under the one above it">▲</button>` +
-            `<button class="sl-sh-order" data-down title="Draw this one over the one below it">▼</button>` +
-            `<button class="sl-sh-view${visible2D ? "" : " sl-sh-view-off"}" data-vis2d title="2D (slices)">2D</button>` +
+          // DRAG TO CHANGE THE ORDER, no arrows (Ron, 2026-11-08: "How about just dragging without the arrows?").
+          controls = `<button class="sl-sh-view${visible2D ? "" : " sl-sh-view-off"}" data-vis2d title="2D (slices)">2D</button>` +
             `<button class="sl-sh-view sl-sh-view-3d${visible3D ? "" : " sl-sh-view-off"}" data-view3d title="3D">3D</button>`;
         } else {
           controls = `<button class="sl-sh-vis" data-vis="${n.id}" title="${n.visible === false ? "Hidden — click to show" : "Showing — click to hide"}">${eyeSvg(n.visible === false ? "hidden" : "shown")}</button>`;
         }
-        return `<div class="sl-sh-row${depth ? " sl-sh-child" : ""}" data-id="${n.id}"${(n as { sequence?: string }).sequence ? ` data-sequence="${(n as { sequence?: string }).sequence}"` : ""} title="${escapeHtml(title)}">` +
+        const drag = n.type === "segmentation" && depth === 1;
+        return `<div class="sl-sh-row${depth ? " sl-sh-child" : ""}" data-id="${n.id}"${drag ? ` draggable="true"` : ""}${(n as { sequence?: string }).sequence ? ` data-sequence="${(n as { sequence?: string }).sequence}"` : ""} title="${escapeHtml(drag ? `${title} — drag to change which is drawn on top` : title)}">` +
+          (drag ? `<span class="sl-sh-grip" aria-hidden="true">⠿</span>` : "") +
           `<span class="sl-sh-icon">${ICON[n.type as string] ?? "•"}</span>` +
           `<span class="sl-sh-name">${escapeHtml(n.name ?? n.id)}</span>` +
           `<span class="sl-sh-views">${controls}</span>` +
@@ -3894,44 +3967,31 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       }));
       shEl.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((b) => b.addEventListener("click", (e) => {
         e.stopPropagation();
-        const id = (b.closest(".sl-sh-row") as HTMLElement).dataset.id!;
-        const n = opts.live.nodes.get(id);
-        if (!n) return;
-        const view = b.dataset.view!;
-        // Linked: every slice view follows the clicked one together.
-        const targets = linkSlices ? SLICE_VIEWS.map((v) => v.name) : [view];
-        const showing = shownIn(n, view);
-        const role = roleOf(n);
-        const hidden = new Set((n.hiddenViews as string[] | undefined) ?? []);
-        for (const ln of targets) {
-          if (showing) { hidden.add(ln); continue; }        // it is on here: clear the view
-          hidden.delete(ln);                                 // it is off here: show it
-          const c = compFor(ln);
-          if (c && layerOf(ln, role) !== id) opts.live.write({ op: "patch", id: c.id, path: `#/refs/${role}`, value: [id] });
-        }
-        opts.live.write({ op: "patch", id, path: "#/hiddenViews", value: [...hidden] });
-        refresh();   // sliceComposite is not a DATA_TYPES node, so its change would not refresh the rows
+        toggleView((b.closest(".sl-sh-row") as HTMLElement).dataset.id!, b.dataset.view!);
       }));
-      // ▲▼: swap zOrder with the neighbor among this volume's segmentations. Both rows get an
-      // explicit zOrder, so the swap holds whatever the arrival order was.
-      shEl.querySelectorAll<HTMLButtonElement>("[data-up], [data-down]").forEach((b) => b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const id = (b.closest(".sl-sh-row") as HTMLElement).dataset.id!;
-        const rows = ordered([...opts.live.nodes.values()].filter((n) => DATA_TYPES.has(n.type as string) && !(n as { hidden?: boolean }).hidden));
-        const me = rows.findIndex((r) => r.node.id === id);
-        const other = me + (b.hasAttribute("data-up") ? -1 : 1);
-        if (me < 0 || other < 0 || other >= rows.length || rows[other].depth !== 1) return;   // the edge of this volume's list
-        const a = rows[me].node, o = rows[other].node;
-        const src = (n: MrsonNode) => ((n.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
-        if (src(a) !== src(o)) return;
-        // Positions within the siblings, made explicit, then swapped.
-        const sibs = rows.filter((r) => r.depth === 1 && src(r.node) === src(a)).map((r) => r.node);
-        sibs.forEach((n, i) => { if (typeof n.zOrder !== "number") opts.live.write({ op: "patch", id: n.id as string, path: "#/zOrder", value: i }); });
-        const za = sibs.indexOf(a), zo = sibs.indexOf(o);
-        opts.live.write({ op: "patch", id: a.id as string, path: "#/zOrder", value: zo });
-        opts.live.write({ op: "patch", id: o.id as string, path: "#/zOrder", value: za });
-        refresh();
-      }));
+      // DRAG: a segmentation dropped on another of the same volume takes its place in the drawing order; every sibling gets an
+      // explicit zOrder, so the order holds whatever the arrival order was (as the arrows did).
+      let dragged: string | null = null;
+      shEl.querySelectorAll<HTMLElement>(".sl-sh-row[draggable]").forEach((row) => {
+        row.addEventListener("dragstart", (e) => { dragged = row.dataset.id!; row.classList.add("sl-dragging"); e.dataTransfer?.setData("text/plain", dragged); });
+        row.addEventListener("dragend", () => { row.classList.remove("sl-dragging"); dragged = null; });
+        row.addEventListener("dragover", (e) => { if (dragged && dragged !== row.dataset.id) { e.preventDefault(); row.classList.add("sl-drop"); } });
+        row.addEventListener("dragleave", () => row.classList.remove("sl-drop"));
+        row.addEventListener("drop", (e) => {
+          e.preventDefault(); row.classList.remove("sl-drop");
+          const from = dragged, to = row.dataset.id!;
+          if (!from || from === to) return;
+          const rows = ordered([...opts.live.nodes.values()].filter((n) => DATA_TYPES.has(n.type as string) && !(n as { hidden?: boolean }).hidden));
+          const src = (n: MrsonNode) => ((n.refs as Record<string, string[]> | undefined)?.source ?? [])[0];
+          const a = rows.find((r) => r.node.id === from)?.node, o = rows.find((r) => r.node.id === to)?.node;
+          if (!a || !o || src(a) !== src(o)) return;   // only within one volume's segmentations
+          const sibs = rows.filter((r) => r.depth === 1 && src(r.node) === src(a)).map((r) => r.node);
+          const order = sibs.filter((n) => n !== a);
+          order.splice(order.indexOf(o) + (sibs.indexOf(a) < sibs.indexOf(o) ? 1 : 0), 0, a);
+          order.forEach((n, i) => { if (n.zOrder !== i) opts.live.write({ op: "patch", id: n.id as string, path: "#/zOrder", value: i }); });
+          refresh();
+        });
+      });
       shEl.querySelectorAll<HTMLButtonElement>("[data-view3d]").forEach((b) => b.addEventListener("click", (e) => {
         e.stopPropagation();
         const id = shownMember(opts.live, (b.closest(".sl-sh-row") as HTMLElement).dataset.id!);   // the phase on screen now
@@ -4018,6 +4078,31 @@ const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
       if (DATA_TYPES.has(c.type as string) || c.kind === "remove") refreshSoon();
     });
     refresh();
+    const face = mountScenesFace(el.querySelector(".sl-scn-face") as HTMLElement, {
+      shell, results: el.querySelector(".sl-scn-results-box") as HTMLElement,
+      viewOn: (id, view) => { const n = opts.live.nodes.get(id); return n ? shownIn(n, view) : false; },
+      toggleView,
+      look3D: (id) => looksOn(opts.live, id),
+      setLook3D: (id, look) => { if (look === "solid" && !segmentationsOf(opts.live, id).length) { status(NEEDS_SEG); return; } setLook3D(opts.live, id, look); refresh(); },
+      hasSegmentations: (id) => segmentationsOf(opts.live, id).length > 0,
+      imageFor: (uid) => [...opts.live.nodes.values()].find((n) => n.type === "image" && !(n as { labelmap?: boolean }).labelmap &&
+        ((n.origin as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID === uid || (n.dicom as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID === uid))?.id as string | undefined,
+      renameCurrent: (name) => renameCurrentScene(name),
+      loadedImages: () => [...opts.live.nodes.values()].filter((n) => n.type === "image" && !(n as { labelmap?: boolean }).labelmap).map((n) => ({
+        id: n.id as string, name: String(n.name ?? ""),
+        seriesUID: (n.origin as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID ?? (n.dicom as { seriesInstanceUID?: string } | undefined)?.seriesInstanceUID })),
+      // Through Load / Save's switch when that module has been built; else the server's switch alone (Load / Save reads it
+      // when it is shown).
+      chooseDatabase: async (id) => {
+        if (chooseDbOutside) return await chooseDbOutside(id);
+        const r = await fetch("/_db", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ current: id }) }).catch(() => null);
+        if (!r?.ok) { shell.notify({ title: "The database was not changed", body: esc(((await r?.json().catch(() => ({})))?.error) ?? "") }); }
+        return undefined;
+      },
+    });
+    scenesFaceRefresh = () => void face.refresh();
+    void face.refresh();
+    (globalThis as unknown as { __onSceneIdentity?: () => void }).__onSceneIdentity = () => { try { paintSceneId(); void face.refresh(); } catch { /* panel gone */ } };
   } });
 
   // drag-and-drop over the views

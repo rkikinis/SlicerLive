@@ -22,6 +22,7 @@
 // ACCESSIBILITY IS A CONSTRAINT, NOT A POLISH STEP. Ron: "the user interface be friendly for people
 // with poor fine motor control." So every move has a NON-DRAG path first: select rows, then choose
 // a destination from a menu. Drag, when it lands, is the fast path on top — never the only one.
+import { iconHtml } from "./icon-set.ts";
 import { shownMember } from "../../logic/sequences.ts";
 import { eyeSvg } from "./eye-icon.ts";
 import { afterPress, pressedIn } from "./press-guard.ts";
@@ -670,6 +671,7 @@ export function registerSegmentationsPanel(
         }, { busyLabel: "Saving…", doneLabel: "Saved", failedLabel: "Not saved" }).catch(() => {});
       });
       item.append(eye, ghost, nm, cnt, act);
+      nm.insertAdjacentHTML("beforebegin", iconHtml("segmentation"));   // her segmentation picture before the name (icon set v2)
       addRowMenu(item, () => [
         { label: "Rename", run: () => startEditing(nm, getName(), commitName) },
         { label: "Remove from scene", title: "Unloads it from this session. Anything saved to the DICOM database stays there.", run: () => void removeSegmentation(r.id) },

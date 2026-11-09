@@ -21,6 +21,7 @@ import { deleteSeriesBatchLocked, provenanceEdges, provenancePathFor, seriesAttr
 import { importFiles, type ImportProgress } from "./db-import.ts";
 import { archivedAmong } from "./archive.ts";
 import { deleteScene, importScene, listScenes, mergeProvenance, type SceneRow } from "./scenes.ts";
+import { carryVersions, hasUnsavedWork, seriesInUse, usedByWords } from "./scene-versions.ts";
 import { seriesNamed } from "../logic/scene/check.ts";
 
 import { sqliteScript } from "./sqlite.ts";
@@ -281,7 +282,12 @@ export async function transferSeries(from: TransferSide, to: TransferSide, uids:
         // or delete reaches the other's (finding 2).
         const r = await importScene(to.path, shared ? { ...doc, uid: newUid() } : doc);
         if ("error" in r) notes.push(`The scene “${row.name}” was not copied: ${r.error}.`);
-        else { scenes++; scenesThere.push(row.uid); }
+        else {
+          scenes++; scenesThere.push(row.uid);
+          // ITS VERSIONS WITH IT (critic 2026-11-08, step 1, finding 2); unsaved work is not carried, and that is said.
+          await carryVersions(from.path, row.uid, to.path, r.uid);
+          if (opts.move && await hasUnsavedWork(from.path, row.uid)) notes.push(`The unsaved work of the scene “${row.name}” was not carried; its saved versions were.`);
+        }
       }
     }
   } catch (e) {
@@ -347,7 +353,24 @@ export async function removeTransferred(from: TransferSide, to: TransferSide, re
       opts.onProgress?.({ ...prog });
     }
     if (!ok.length) return;
-    const r = await withIndexLock(from.path, () => deleteSeriesBatchLocked(from.path, ok));
+    // THE SCENES MOVING WITH THEM: a scene copied to the second database whose scans all leave the first does not hold them
+    // here (it goes below); one that stays, with a scan still here, does (the rule in deleteSeriesLocked, Ron 2026-11-08).
+    const okSet = new Set(ok), leaving: string[] = [];
+    for (const row of (await listScenes(from.path)).filter((x) => result.scenesThere.includes(x.uid))) {
+      const named = seriesNamed(JSON.parse(await Deno.readTextFile(`${from.path}/${row.path}`)) as Record<string, unknown>).map((x) => x.uid);
+      if (named.every((u) => okSet.has(u))) leaving.push(row.uid);
+    }
+    // ONE BY ONE, as the archive's rule (critic 2026-11-08, step 1, finding 4): a scan a scene staying here still uses stays,
+    // the others go; the move does not fail for all of them.
+    const used = await seriesInUse(from.path);
+    for (const u of [...ok]) {
+      const stay = (used.get(u) ?? []).filter((x) => !leaving.includes(x.scene));
+      if (!stay.length) continue;
+      ok.splice(ok.indexOf(u), 1);
+      kept.push({ uid: u, description: result.series.find((s) => s.uid === u)?.description ?? "", reason: `still used by ${usedByWords(stay)} in ${from.name}, so it stays there (the copy in ${to.name} stays too)` });
+    }
+    if (!ok.length) return;
+    const r = await withIndexLock(from.path, () => deleteSeriesBatchLocked(from.path, ok, { leaving }));
     out.series = r.series; out.files = r.files.length;
     for (const uid of ok) removed.push(result.series.find((x) => x.uid === uid)!);
     // Files outside the first database's folder were the person's own and stay where they are: said per scan.

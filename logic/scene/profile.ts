@@ -166,6 +166,7 @@ export const ENVELOPE: Record<string, FieldSpec> = {
   source: { kind: "object", required: true, from: "core", note: "producer (the build stamp), producedAt (ISO time), origin (the window)" },
   v: { kind: "int", required: true, from: "profile", note: "how many times this scene was saved" },
   name: { kind: "string", required: true, from: "profile" },
+  description: { kind: "string", from: "profile", note: "a line or two the person wrote at save (the save sheet), shown with the version" },
   study: { kind: "object", required: true, from: "profile", note: "{ studyInstanceUID } — the first study named; the browser lists the scene under every study in `studies`" },
   studies: { kind: "strings", from: "profile", note: "every StudyInstanceUID the scene names, one patient (a ReMIND case: pre-op MRI, intra-op MRI, intra-op US are three studies)" },
   nodes: { kind: "object", required: true, from: "core" },

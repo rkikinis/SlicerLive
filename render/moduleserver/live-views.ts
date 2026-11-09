@@ -7,6 +7,7 @@
 // Local interaction (slice scroll/pan/zoom, 3D orbit) is written back to LiveScene as ops so the
 // legacy app follows — the views are SlicerLive's, the state is shared.
 // Trimmed from render/demos/mirror-browser.ts (no replay/timeline). TODO(DRY): mirror-browser should mount this too.
+import { decorate, type IconName, iconsOn } from "../demos/icon-set.ts";
 import { onShadingVersion, SHADINGS, setShadingVersion, shadingVersion } from "../shading-versions.ts";
 import { escapeHtml } from "../demos/html.ts";
 import { DRAW_ERROR_VOXELS } from "../../logic/decimate.ts";
@@ -1795,20 +1796,15 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     cv.getContext("2d")!.drawImage(img, 0, 0, cv.width, cv.height);
     return cv;
   };
-  const savePicture = async (o: Partial<typeof pictureOpts> & { name?: string; width?: number; height?: number } = {}): Promise<{ path?: string; error?: string; note?: string }> => {
-    const opts = { ...pictureOpts, ...o };
-    const dpr = globalThis.devicePixelRatio || 1;
-    const px = dpr * (opts.scale || 1);
-    // Local time in the name, not UTC: a picture taken at 11:48 was called 09-48 (Ron, 2026-09-20).
-    const d = new Date(), two = (n: number) => String(n).padStart(2, "0");
-    const stamp = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}-${two(d.getMinutes())}-${two(d.getSeconds())}`;
-    const name = (o.name ?? `SlicerAlbula picture ${stamp}`).replace(/\.png$/, "") + ".png";
+  /** The picture as the 3D bar's Save… and the scene's save take it: the 3D view alone (`only3d`), or the views in their
+   *  layout, with the module panel when asked; `px` device pixels to a CSS pixel. */
+  const composePicture = async (opts: { only3d: boolean; panel: boolean; quiet?: boolean }, px: number, o: { width?: number; height?: number } = {}): Promise<{ out?: HTMLCanvasElement; note: string; error?: string }> => {
     let out: HTMLCanvasElement;
     let note = "";
     if (opts.only3d && (o.width || o.height)) {
       // A size given outright: the 3D view alone at exactly that size (the scripting call).
       const cv = await render3dTo(o.width ?? 1600, o.height ?? o.width ?? 1600);
-      if (!cv) return { error: "nothing is drawn in 3D" };
+      if (!cv) return { error: "nothing is drawn in 3D", note };
       out = cv;
     } else {
       const host = root.getBoundingClientRect();
@@ -1835,7 +1831,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         }
         ctx.drawImage(c.overlay, x, y, w, h);
       } });
-      if (!parts.length) { cfg.onNotify?.({ title: "Nothing to save", body: "No view is shown." }); return { error: "nothing is shown" }; }
+      // The 3D bar's Save… says so; a scene's save does not (its picture is a part of the save, not what was asked for).
+      if (!parts.length) { if (!opts.quiet) cfg.onNotify?.({ title: "Nothing to save", body: "No view is shown." }); return { error: "nothing is shown", note }; }
       // The picture's frame is the union of the views it holds, in the layout they have on screen.
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (const p of parts) { const r = p.el.getBoundingClientRect(); x0 = Math.min(x0, r.left); y0 = Math.min(y0, r.top); x1 = Math.max(x1, r.right); y1 = Math.max(y1, r.bottom); }
@@ -1863,6 +1860,31 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         } catch { note = " — without the module panel, which this window cannot export"; }
       }
     }
+    return { out, note };
+  };
+  // THE SCENE'S PICTURE (Ron, 2026-11-08: "By image, I meant the screenshot taken at the time the scene was saved"): the 3D view
+  // as it is now, or with the slice views the whole layout; the 3D view alone only when it is shown and has something in it.
+  // Small (480 pixels on its long side, JPEG): it is a row's picture, not a figure.
+  (globalThis as unknown as { __scenePicture?: (o?: { slices?: boolean }) => Promise<Blob | null> }).__scenePicture = async (o = {}) => {
+    const only3d = !o.slices && threeVisible && !nothingIn3D;
+    const c = await composePicture({ only3d, panel: false, quiet: true }, 1).catch(() => ({ out: undefined, note: "" }));
+    if (!c.out) return null;
+    const k = Math.min(1, 480 / Math.max(c.out.width, c.out.height));
+    const small = document.createElement("canvas"); small.width = Math.max(1, Math.round(c.out.width * k)); small.height = Math.max(1, Math.round(c.out.height * k));
+    const sctx = small.getContext("2d")!; sctx.imageSmoothingQuality = "high"; sctx.drawImage(c.out, 0, 0, small.width, small.height);
+    return await new Promise<Blob | null>((res) => small.toBlob(res, "image/jpeg", 0.85));
+  };
+  const savePicture = async (o: Partial<typeof pictureOpts> & { name?: string; width?: number; height?: number } = {}): Promise<{ path?: string; error?: string; note?: string }> => {
+    const opts = { ...pictureOpts, ...o };
+    const dpr = globalThis.devicePixelRatio || 1;
+    const px = dpr * (opts.scale || 1);
+    // Local time in the name, not UTC: a picture taken at 11:48 was called 09-48 (Ron, 2026-09-20).
+    const d = new Date(), two = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}-${two(d.getMinutes())}-${two(d.getSeconds())}`;
+    const name = (o.name ?? `SlicerAlbula picture ${stamp}`).replace(/\.png$/, "") + ".png";
+    const c = await composePicture(opts, px, o);
+    if (!c.out) return { error: c.error ?? "nothing is shown" };
+    const out = c.out, note = c.note;
     const blob = await new Promise<Blob | null>((res) => out.toBlob(res, "image/png"));
     if (!blob) return { error: "the picture could not be encoded" };
     const res = await fetch(`/_picture/${encodeURIComponent(name)}`, { method: "POST", body: blob });
@@ -1889,12 +1911,22 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // doing, the user has just asked for the default again.
     fit.addEventListener("click", () => { userMovedCamera = false; fittedBounds = sceneBounds(); fitCamera3D(); });
     bar.appendChild(fit);
-    for (const k of ["R", "A", "S", "L", "P", "I"]) { const b = document.createElement("button"); b.textContent = k; b.title = `Look from ${k}`; b.addEventListener("click", () => resetCamera3D(k)); bar.appendChild(b); }
+    // ICONS (render/demos/icon-set.ts, v2): Wendy Plesniak's pictures for fit, the six directions and orthographic (Ron,
+    // 2026-11-07: "2:wendy's"); the letters stay in the tooltips. Under v1 the letters and signs as before.
+    decorate(fit, "fit3d", { only: true });
+    const FROM: Record<string, [IconName, string]> = { R: ["fromR", "the right"], A: ["fromA", "the front (anterior)"], S: ["fromS", "above (superior)"],
+      L: ["fromL", "the left"], P: ["fromP", "behind (posterior)"], I: ["fromI", "below (inferior)"] };
+    for (const k of ["R", "A", "S", "L", "P", "I"]) {
+      const b = document.createElement("button"); b.textContent = k; b.title = `Look from ${k}`; b.addEventListener("click", () => resetCamera3D(k));
+      if (iconsOn()) { b.title = `Look from ${FROM[k][1]} (${k})`; decorate(b, FROM[k][0], { only: true }); }
+      bar.appendChild(b);
+    }
     // ORTHO STAYS, AND REJOINS THE GROUP. The stylesheet pushes the last button to the far right, so
     // this one sat alone in the corner reading as unrelated chrome -- Ron: "there is a small square at
     // the top right. Right now it seems to have no function." It has one, and it is Slicer's: the
     // projection toggle. The corner belongs to the panel instead, and this goes back with the rest.
     const ortho = document.createElement("button"); ortho.textContent = "⬚"; ortho.title = "Orthographic projection (Slicer's 3D view controller)";
+    if (iconsOn()) { ortho.title = "Orthographic: no perspective, sizes the same near and far"; decorate(ortho, "orthographic", { only: true }); }
     ortho.addEventListener("click", () => { const on = !camera.parallelProjection; setOrthographic(on); ortho.setAttribute("aria-pressed", String(on)); });
     bar.appendChild(ortho);
     // VR / AR (desktop/headset.ts; Ron, 2026-10-12: "Right now it would be confusing for our use case user. Multiple

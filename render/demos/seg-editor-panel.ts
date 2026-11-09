@@ -22,6 +22,7 @@
 // only the chosen tool's controls under the row; the structure list folded below. A tool that shows a preview
 // (Threshold) writes it into the segmentation through the EditSession here: not an undo step, not marked edited, put
 // back by Cancel, one undo step when written.
+import { decorate, iconHtml, type IconName, iconsOn } from "./icon-set.ts";
 import { escapeHtml } from "./html.ts";
 import { eyeSvg } from "./eye-icon.ts";
 import { layout as layoutOf } from "../../logic/layouts.ts";
@@ -843,6 +844,19 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <div class="sl-se-tool-area"></div>
       <div class="sl-row"><button class="sl-se-undo"${u || sess ? "" : " disabled"} title="Put back the segmentation as it was before the last change">↶ Undo</button><button class="sl-se-redo"${rd && !sess ? "" : " disabled"} title="Do the undone change again">↷ Redo</button><span class="sl-hint">${u ? `${u} change${u === 1 ? "" : "s"}` : ""}</span></div>`;
     const area = tl.querySelector<HTMLElement>(".sl-se-tool-area")!;
+    // PICTURES (render/demos/icon-set.ts, v2; Ron, 2026-11-07: "picture and words"): Wendy Plesniak's pictures in place of the
+    // signs above the tools' names, and before Undo and Redo. Outline has none in her set and keeps its sign.
+    if (iconsOn()) {
+      const TOOL_ICONS: Record<string, IconName> = { "": "pointer", paint: "paint", erase: "erase", draw: "draw", threshold: "threshold",
+        scissors: "scissors", grow: "grow", more: "more" };
+      for (const b of tl.querySelectorAll<HTMLButtonElement>(".sl-se-tool")) {
+        const name = TOOL_ICONS[b.dataset.tool ?? ""], sign = b.querySelector("b");
+        if (name && sign) sign.innerHTML = iconHtml(name);
+      }
+      for (const [q, name, word] of [[".sl-se-undo", "undo", "Undo"], [".sl-se-redo", "redo", "Redo"]] as const) {
+        const b = tl.querySelector<HTMLButtonElement>(q); if (b) { b.textContent = word; decorate(b, name); }
+      }
+    }
     const cheats = tool?.cheats?.(ctx) ?? [];
     if (cheats.length) area.insertAdjacentHTML("afterend", `<dl class="sl-se-cheats" aria-label="Mouse and keys">${cheats.map((c) => `<dt title="${escapeHtml(c.tip)}">${escapeHtml(c.keys)}</dt><dd title="${escapeHtml(c.tip)}">${escapeHtml(c.does)}</dd>`).join("")}</dl>`);
     syncPaintLimits();
@@ -852,6 +866,8 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <div class="sl-row sl-actions">${segId && o.editedCopy ? `<button class="sl-se-saveas" title="Keep the edited copy as it is and write these edits as another new series"${sess ? " disabled" : ""}>Save as a new series</button>` : ""}<button class="sl-se-save${edited && !sess ? " sl-primary" : ""}"${segId && !sess ? "" : " disabled"}>Save</button></div>`;
 
     const $ = <T extends HTMLElement>(q: string) => root!.querySelector(q) as T;
+    // Save writes into the database: the cylinder with an arrow in (icon set v2).
+    for (const q of [".sl-se-save", ".sl-se-saveas"]) { const b = root!.querySelector<HTMLButtonElement>(q); if (b) decorate(b, "saveDatabase"); }
 
     $<HTMLSelectElement>(".sl-seg-pick").addEventListener("change", async (e) => {
       const v = (e.target as HTMLSelectElement).value;

@@ -328,7 +328,11 @@ html, body { overscroll-behavior: none; }
   color: var(--sl-heading); cursor: pointer; list-style: none;
 }
 .sl-section > summary::-webkit-details-marker { display: none; }
-.sl-section > summary::before { content: "▸"; font-size: 9px; color: var(--sl-fg-muted); }
+/* EVERY FOLD AND PULL-DOWN TRIANGLE 15 px in the text color, as the database chooser's (critic 2026-11-07, finding 16): Ron, 2026-11-08, "the
+   triangles indicating pulldown have shrunk back to a size so small that they look like dots"; his rule of 2026-10-14, "easily recognizable
+   when my eyes are at arms length from the monitor". The glyph is narrow (▾ at 12 px draws 5.7 px wide), so its size is larger than the text's;
+   line-height 1 keeps the row's height. Here, the pickers on the bar, the Scene button, the Segment Editor's tasks, the probe, the markup cards. */
+.sl-section > summary::before { content: "▸"; font-size: 15px; line-height: 1; color: var(--sl-fg); }
 .sl-section[open] > summary::before { content: "▾"; }
 .sl-section > summary:hover { background: var(--sl-surface-3); }
 .sl-section:not([style*="--sl-band"]) > summary { color: var(--sl-fg-muted); }   /* a gray (unbanded) section's title is secondary: Advanced, This network */
@@ -366,7 +370,7 @@ html, body { overscroll-behavior: none; }
 .sl-picker-btn:hover { background: var(--sl-surface-3); border-color: var(--sl-fg-muted); }
 /* The pickers and .sl-tool had --sl-border, the separator color, invisible on the top bar: Ron, 2026-09-23,
    "no outline visible". Every control now carries --sl-control-edge (see its definition). */
-.sl-picker-btn::after { content: "▾"; float: right; color: var(--sl-fg-muted); }
+.sl-picker-btn::after { content: "▾"; float: right; font-size: 15px; line-height: 1; color: var(--sl-fg); }
 .sl-picker-pop {
   /* Twice the button's own width, not just matching it -- Ron: "the popup width should be wider."
      Anchored at the left edge rather than centered: this sits in the sidebar, and centering would
@@ -944,7 +948,7 @@ select.sl-slice-orient { background: var(--sl-surface-2); border: 1px solid var(
    is the only way to the Tumor task). */
 .sl-se-task > summary { list-style: none; }
 .sl-se-task > summary::-webkit-details-marker { display: none; }
-.sl-se-task > summary::before { content: "▸"; font-size: 13px; color: var(--sl-fg-muted); width: 12px; }
+.sl-se-task > summary::before { content: "▸"; font-size: 15px; line-height: 1; color: var(--sl-fg); width: 12px; }
 .sl-se-task[open] > summary::before { content: "▾"; }
 .sl-se-why { margin-left: auto; }
 .sl-se-task-body { padding: 2px 8px 8px; }
@@ -1421,7 +1425,8 @@ button.sl-danger.sl-hit.sl-hit { background: var(--sl-view-red); color: var(--sl
 .sl-mk-cardlist, .sl-mk-card { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 .sl-mk-cardlist .sl-mk-actions, .sl-mk-card .sl-mk-actions { display: flex; flex: none; gap: 3px; }
 .sl-mk-card .sl-mk-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sl-panel .sl-mk-fold { background: none; border: none; padding: 0 4px 0 0; margin: 0; min-height: 0; min-width: 0; width: auto; color: var(--sl-fg); font: inherit; cursor: pointer; }
+.sl-panel .sl-mk-fold { background: none; border: none; padding: 0 4px 0 0; margin: 0; min-height: 0; min-width: 0; width: auto; color: var(--sl-fg); font: inherit; font-size: 15px; line-height: 1; cursor: pointer; }
+.sl-caret { font-size: 15px; line-height: 1; }   /* the Scene button's triangle (scene-control.ts) */
 .sl-mk-cardsel label { display: block; margin-top: 4px; }
 .sl-mk-cardsel input, .sl-mk-cardsel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 2px; }
 .sl-card-edit { position: fixed; z-index: 9400; width: 290px; max-width: calc(100vw - 16px); background: var(--sl-surface-2); border: 1px solid var(--sl-line-strong);
@@ -1448,3 +1453,90 @@ html:not(.sl-dev) .sl-dev-step { display: none !important; }
    tool is; yellow stays the one thing to do in the section, Grow (critic 2026-11-01, nit b). */
 .sl-grow-pick { gap: 7px; }
 .sl-grow-pick button[aria-pressed=true] { outline: 2px solid var(--sl-accent); outline-offset: -1px; font-weight: 600; }
+
+/* ICONS (render/demos/icon-set.ts; Ron, 2026-11-08: Wendy Plesniak's icons). A picture carries her dark set's file and her
+   light set's: the dark one on the panels' dark ground, the light one (black lines, the most contrast) on a yellow button.
+   Beside a word 18 px; alone on the bar or a view's bar 22 px; in a menu 20 px. */
+.sl-pic { display: inline-block; flex: none; width: 18px; height: 18px; vertical-align: -4px; }
+.sl-pic img { width: 100%; height: 100%; display: block; }
+.sl-pic .sl-pic-l { display: none; }
+.sl-primary .sl-pic .sl-pic-d { display: none; }
+.sl-primary .sl-pic .sl-pic-l { display: block; }
+.sl-pic-btn > .sl-pic { margin-right: 5px; }
+.sl-pic-only .sl-pic-word { display: none; }
+.sl-pic-only > .sl-pic { width: 22px; height: 22px; vertical-align: middle; }
+.sl-pic-menu { width: 20px; height: 20px; margin-right: 8px; }
+.sl-pic-none { display: inline-block; width: 20px; height: 20px; margin-right: 8px; flex: none; }   /* a module with no picture: the names stay in line */
+.sl-se-tool > b > .sl-pic { width: 22px; height: 22px; vertical-align: middle; }   /* the editor's tools: the picture above the name */
+/* On a yellow (selected) row the pictures take her light set too, as the glyphs there are dark (the rule above, 2026-10-31). */
+.sl-seg-root-on.sl-seg-root-on .sl-pic .sl-pic-d, .sl-anat-sel.sl-anat-sel .sl-pic .sl-pic-d, .sl-seq-row-on.sl-seq-row-on .sl-pic .sl-pic-d { display: none; }
+.sl-seg-root-on.sl-seg-root-on .sl-pic .sl-pic-l, .sl-anat-sel.sl-anat-sel .sl-pic .sl-pic-l, .sl-seq-row-on.sl-seq-row-on .sl-pic .sl-pic-l { display: block; }
+.sl-more.sl-pic-only > .sl-pic { width: 18px; height: 18px; }
+/* The bar's module and layout buttons as pictures (icon set v2): as wide as the picture and its triangle, not the 180 px a
+   name needed; the list that opens keeps its width. */
+.sl-module-picker:has(.sl-picker-btn.sl-pic-only) { min-width: 0; }
+.sl-picker-btn.sl-pic-only { display: inline-flex; align-items: center; gap: 6px; width: auto; padding-left: 6px; padding-right: 6px; }
+.sl-picker-btn.sl-pic-only::after { float: none; }
+.sl-bar-ico.sl-pic-only { padding: 2px 5px; min-width: 0; }
+/* The views' bars with pictures: a button as large as a 20 px picture (the letters' buttons were 20 x 16), visible at arm's length. */
+.sl-3d-bar button.sl-pic-only, .sl-slice-bar button.sl-pic-only { width: 24px; height: 22px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.sl-3d-bar .sl-pic-only > .sl-pic, .sl-slice-bar .sl-pic-only > .sl-pic { width: 20px; height: 20px; }
+
+/* THE SCENES MODULE: ONE ROW PER SCENE, AND THE LOOK BESIDE THE PANEL (render/demos/scenes-face.ts; Ron, 2026-11-08,
+   mockups/scenes-module-2026-11-08.html). */
+.sl-pic-title { width: 22px; height: 22px; margin-right: 8px; vertical-align: -5px; }
+.sl-scn-head { margin: 0 0 6px; }
+.sl-scn-rows { max-height: 60vh; overflow: auto; border: 1px solid var(--sl-line-faint, var(--sl-control-edge)); border-radius: 6px; outline: none; }
+.sl-scn-rows:focus-visible { box-shadow: 0 0 0 2px var(--sl-accent); }
+.sl-scn-row { display: flex; align-items: center; gap: 7px; padding: 5px 6px; border-bottom: 1px solid var(--sl-line-faint, var(--sl-control-edge)); cursor: default; }
+.sl-scn-row:last-child { border-bottom: 0; }
+.sl-scn-row.sl-sel { background: rgba(233, 201, 90, .13); }
+.sl-scn-row.sl-open { box-shadow: inset 3px 0 0 var(--sl-accent); }
+.sl-scn-pic { width: 48px; height: 48px; flex: none; border-radius: 4px; object-fit: cover; border: 1px solid var(--sl-control-edge); background: #000; }
+.sl-scn-nopic { display: inline-flex; align-items: center; justify-content: center; text-align: center; font-size: 9.5px; line-height: 1.1; color: var(--sl-fg-dim); }
+.sl-scn-n { flex: 1; min-width: 0; }
+.sl-scn-n b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-scn-n small { display: block; color: var(--sl-fg-dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sl-panel .sl-scn-tg { min-width: 0; min-height: 0; padding: 1px 5px; font-size: 11.5px; border: 1px dashed var(--sl-control-edge); background: none; color: var(--sl-fg-dim); border-radius: 4px; }
+.sl-panel .sl-scn-tg.sl-on { border-style: solid; border-color: var(--sl-fg); color: var(--sl-fg); font-weight: 600; }
+.sl-panel .sl-scn-tg[disabled] { opacity: .5; }
+.sl-scn-keys { margin: 6px 2px 0; }
+.sl-scn-keys kbd, .sl-scn-look kbd { border: 1px solid var(--sl-control-edge); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; }
+.sl-scn-look { position: fixed; z-index: 60; width: 430px; max-width: calc(100vw - 24px); max-height: calc(100vh - 16px); overflow: auto; background: var(--sl-surface-3, #332e29);
+  border: 1px solid var(--sl-fg-muted); border-radius: 10px; box-shadow: 0 12px 34px rgba(0,0,0,.55); padding: 12px 14px; color: var(--sl-fg); font-size: 13px; }
+.sl-scn-look[hidden] { display: none; }
+.sl-scn-look-top { display: flex; gap: 12px; align-items: flex-start; }
+.sl-scn-look-pic { width: 110px; height: 110px; flex: none; border-radius: 6px; object-fit: cover; border: 1px solid var(--sl-control-edge); background: #000; font-size: 11px; padding: 4px; }
+.sl-scn-look h3 { margin: 0 0 4px; font-size: 15px; cursor: text; text-transform: none; letter-spacing: normal; color: var(--sl-fg); }
+.sl-scn-sub { color: var(--sl-accent); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin: 12px 0 5px; }
+.sl-scn-results .sl-sh { max-height: 320px; overflow: auto; }
+.sl-scn-res { display: flex; align-items: center; gap: 6px; padding: 3px 0; }
+.sl-scn-ver { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--sl-line-faint, var(--sl-control-edge)); }
+.sl-scn-ver:first-child { border-top: 0; }
+.sl-scn-ver-n { flex: 1; min-width: 0; }
+.sl-scn-ver-pic { width: 40px; height: 40px; flex: none; border-radius: 4px; object-fit: cover; background: #000; border: 1px solid var(--sl-control-edge); box-sizing: border-box; }
+span.sl-scn-ver-pic { background: transparent; border-style: dashed; }
+.sl-scn-head .sl-scn-db { margin-top: 4px; }
+.sl-scn-save-row { display: flex; gap: 6px; margin: 6px 0 8px; justify-content: flex-end; }   /* the yellow action at the right */
+.sl-scn-ver-n small { color: var(--sl-fg-dim); }
+.sl-scn-look .sl-scn-versions button { font-size: 12px; padding: 2px 8px; }
+.sl-scn-look-keys { margin-top: 10px; }
+.sl-sh-grip { color: var(--sl-fg-dim); cursor: grab; width: 12px; flex: none; visibility: hidden; }
+.sl-sh-row:hover .sl-sh-grip { visibility: visible; }
+.sl-sh-row.sl-dragging { opacity: .5; }
+.sl-sh-row.sl-drop { box-shadow: inset 0 2px 0 var(--sl-accent); }
+/* In the look, the list of what is loaded without its own heading and Scene menu (the look's header says which scene). */
+.sl-scn-results .sl-sh-head h3, .sl-scn-results .sl-scene-ctl, .sl-scn-results .sl-scene-id { display: none; }
+
+/* THE SAVE SHEET (render/demos/save-sheet.ts): name, description, the picture saved with the version. */
+.sl-save-sheet { width: min(520px, 90vw); }
+.sl-ss-l { display: block; margin: 10px 0 4px; font-size: 12px; color: var(--sl-fg-muted); }
+.sl-save-sheet .sl-modal-input, .sl-ss-desc { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 6px;
+  border: 1px solid var(--sl-control-edge); background: var(--sl-input-bg, var(--sl-surface-2, #2a2622)); color: var(--sl-fg); }
+.sl-ss-desc { resize: vertical; min-height: 44px; }
+.sl-ss-need { outline: 2px solid var(--sl-accent); outline-offset: -1px; }
+.sl-ss-prev { display: flex; gap: 12px; align-items: flex-start; }
+.sl-ss-pic { width: 200px; height: 200px; flex: none; display: flex; align-items: center; justify-content: center; text-align: center;
+  background: #000; border: 1px solid var(--sl-control-edge); border-radius: 6px; overflow: hidden; padding: 4px; box-sizing: border-box; }
+.sl-ss-pic img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.sl-ss-check { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--sl-fg); margin-bottom: 6px; }

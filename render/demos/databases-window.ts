@@ -889,7 +889,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
       const { ok, j } = await post("/_db/_create", { ...readForm(f), ...(folder ? { token: folder.token } : {}) });
       make.disabled = false;
       if (!ok) { err.textContent = String(j.error ?? "the database was not made"); return; }
-      say(`“${readForm(f).name}” is made. To add scans to it: Load / Save › From disk…, “Also add to” it, then Folder….`);
+      say(`“${readForm(f).name}” is made. To add scans to it: Load / Save › From disk…, “Also add to” it, then Choose….`);
       o.onChanged?.(String(j.id));
       await render();
       if (j.warning) { const w = document.createElement("p"); w.className = "sl-dbw-err"; w.textContent = String(j.warning); body.prepend(w); }
@@ -907,7 +907,7 @@ export function mountDatabases(host: HTMLElement, o: DatabasesOptions = {}): Dat
     try {
       const c = await chooseFolder("Choose a folder that holds a DICOM database (its index is ctkDICOM.sql)");
       if (!c) return;
-      if (!c.hasDatabase) { note.textContent = `“${c.name}” holds no DICOM database. To add scans from it, use Load / Save › From disk… › Folder… instead: it reads the scans.`; after.after(note); return; }
+      if (!c.hasDatabase) { note.textContent = `“${c.name}” holds no DICOM database. To add scans from it, use Load / Save › From disk… › Choose… instead: it reads the scans.`; after.after(note); return; }
       // MOVED (the default) OR COPIED INTO "SlicerAlbulaDatabases" first (Ron, 2026-10-13: "move or copy into the albula
       // databases folder. User decides, move is the default"); one already there is listed where it is.
       const { features } = await listDatabases();

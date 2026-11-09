@@ -23,6 +23,7 @@ import { COPY_FOLDER } from "./duckn-copy-code.ts";
 import { sqliteScript, writeUnderWay } from "./sqlite.ts";
 export { seriesFilePaths, seriesFileStamp } from "./series-files.ts";
 import { appendManifest, ArchiveRefusal, archivedAmong, toTrash } from "./archive.ts";
+import { seriesInUse, usedByWords } from "./scene-versions.ts";
 
 
 /** Where a page's uploads wait inside a database folder until desktop/db-import.ts adds them; the audit does not count them. */
@@ -732,7 +733,7 @@ export function insideDatabase(rel: string): boolean {
   return !rel.split(/[\\/]/).includes("..");
 }
 
-export interface DeleteOptions { replacingInArchive?: boolean; what?: string }
+export interface DeleteOptions { replacingInArchive?: boolean; what?: string; /** Scenes moving away with these series (a move): their uses do not hold them. */ leaving?: string[] }
 export async function deleteSeriesFromDatabase(dbDir: string, seriesUID: string, opts: DeleteOptions = {}): Promise<DeleteResult> {
   if (!UID.test(seriesUID)) throw new Error(`not a DICOM UID: ${seriesUID}`);
   return await withIndexLock(dbDir, () => deleteSeriesLocked(dbDir, [seriesUID], opts));
@@ -743,15 +744,28 @@ export async function deleteSeriesFromDatabase(dbDir: string, seriesUID: string,
  * time -- the backup and the whole-database audit each time -- and 100 small scans 168 s (critic, 2026-10-02, finding 11).
  * The caller holds the index lock (`withIndexLock`), so a check made just before stays true.
  */
-export async function deleteSeriesBatchLocked(dbDir: string, seriesUIDs: string[]): Promise<DeleteResult> {
+export async function deleteSeriesBatchLocked(dbDir: string, seriesUIDs: string[], opts: DeleteOptions = {}): Promise<DeleteResult> {
   for (const u of seriesUIDs) if (!UID.test(u)) throw new Error(`not a DICOM UID: ${u}`);
-  return await deleteSeriesLocked(dbDir, [...new Set(seriesUIDs)]);
+  return await deleteSeriesLocked(dbDir, [...new Set(seriesUIDs)], opts);
 }
 
 async function deleteSeriesLocked(dbDir: string, uids: string[], opts: DeleteOptions = {}): Promise<DeleteResult> {
   const dbPath = `${dbDir}/ctkDICOM.sql`;
   if (await busy(dbPath)) {
     throw new Error("the DICOM index is open by another program that is writing to it; try again when it has finished");
+  }
+  // A SERIES A SCENE USES STAYS (Ron, 2026-11-08, SCENE-SAVING-2026-11-08.md: kept "while a version uses it", "yes"): any saved
+  // version or continuous state of any scene in this database (scene-versions.ts). Every removal ends here -- Delete, a move's
+  // second step, the Segment Editor's earlier copy -- so each says by which scene and version, and nothing goes. Not a scene's
+  // own DICOM object being replaced (no version names it).
+  if (!opts.replacingInArchive) {
+    const used = await seriesInUse(dbDir);
+    const leaving = new Set(opts.leaving ?? []);
+    for (const [u, l] of used) { const stay = l.filter((x) => !leaving.has(x.scene)); if (stay.length) used.set(u, stay); else used.delete(u); }
+    const hit = uids.filter((u) => used.has(u));
+    if (hit.length) {
+      throw new Error(`still used by ${usedByWords(hit.flatMap((u) => used.get(u)!))}: ${hit.length === 1 ? "it stays" : `these ${hit.length} stay`} until that scene, or those versions of it, are deleted`);
+    }
   }
 
   // JSON, not tabs: sqlite3 3.54 (macOS's) QUOTES a value with a space in `.mode tabs`, so a file named

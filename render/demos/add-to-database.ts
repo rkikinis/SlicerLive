@@ -3,7 +3,7 @@
 // Ron, 2026-10-01: Load / Save › From disk gets "Also add to [database]", ticked by default, so a patient's scans
 // from a disc or a stick stay in the database after the stick is gone. Two ways in: a folder the person chose in
 // macOS's dialog (the server reads it from disk; nothing passes through the page), or files the page already holds
-// (Files…, a dropped folder), uploaded one by one into the database's staging folder and then added.
+// (files chosen with Choose…, a dropped folder), uploaded one by one into the database's staging folder and then added.
 
 import { startWork } from "../working.ts";
 

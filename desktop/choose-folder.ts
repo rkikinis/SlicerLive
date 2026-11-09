@@ -30,6 +30,46 @@ export async function chooseFolder(prompt: string): Promise<ChosenFolder | undef
   return remember(path);
 }
 
+// FILES OR FOLDERS IN ONE PANEL (Ron, 2026-11-07: "can we have one button for both? I can select a file or folder once a
+// finder window comes up"; tried with him the same day). macOS's own open panel (NSOpenPanel) takes files and folders
+// together, which neither AppleScript's "choose file" nor "choose folder" does; JavaScript for Automation reaches it. The
+// process must be a REGULAR app first: as a background process the panel closed at the first click on a file (Ron: "when I
+// try to click a file the panel closes"). Windows' and Linux's standard dialogs pick files OR a folder, never both
+// (FOS_PICKFOLDERS; GTK's SELECT_FOLDER; the portal's `directory`), so this is macOS only and the server offers it there only.
+const PANEL = `ObjC.import("AppKit");
+function run(argv) {
+  const app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  app.activateIgnoringOtherApps(true);
+  const p = $.NSOpenPanel.openPanel;
+  p.canChooseFiles = true; p.canChooseDirectories = true; p.allowsMultipleSelection = true;
+  p.message = argv[0] || ""; p.prompt = "Open";
+  if (p.runModal !== $.NSModalResponseOK) return "";
+  const urls = p.URLs, out = [];
+  for (let i = 0; i < urls.count; i++) out.push(ObjC.unwrap(urls.objectAtIndex(i).path));
+  return out.join("\\n");
+}`;
+
+/** Files the person chose, by token; only these are ever served (db-serve's GET /_db/_files/<token>/<n>). */
+export interface ChosenFiles { token: string; paths: string[]; names: string[] }
+const chosenFileSets = new Map<string, ChosenFiles>();
+export const chosenFiles = (token: string): ChosenFiles | undefined => chosenFileSets.get(token);
+
+/** The one panel: folders come back as chosen folders (the routes that read a folder take their tokens), files as one set. */
+export async function chooseFilesOrFolders(prompt: string): Promise<{ folders: ChosenFolder[]; files: ChosenFiles | null } | undefined> {
+  const { code, stdout, stderr } = await new Deno.Command("/usr/bin/osascript", {
+    args: ["-l", "JavaScript", "-e", PANEL, prompt.slice(0, 200)], stdout: "piped", stderr: "piped",
+  }).output();
+  if (code !== 0) throw new Error(`the open panel failed: ${new TextDecoder().decode(stderr).trim()}`);
+  const paths = new TextDecoder().decode(stdout).split("\n").map((p) => p.trim().replace(/\/+$/, "")).filter(Boolean);
+  if (!paths.length) return undefined;
+  const folders: ChosenFolder[] = [], files: string[] = [];
+  for (const p of paths) ((await Deno.stat(p).catch(() => null))?.isDirectory ? folders.push(remember(p)) : files.push(p));
+  let set: ChosenFiles | null = null;
+  if (files.length) { set = { token: crypto.randomUUID(), paths: files, names: files.map((f) => basename(f)) }; chosenFileSets.set(set.token, set); }
+  return { folders, files: set };
+}
+
 /** A folder the person chose by other means (a test, the desktop shell). */
 export function remember(path: string): ChosenFolder {
   for (const c of chosen.values()) if (c.path === path) return c;

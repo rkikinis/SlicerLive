@@ -16,16 +16,19 @@ import { writeScene } from "../../logic/scene/write.ts";
 import { collectExtensionState } from "../../logic/scene/extensions.ts";
 import { dbInUse } from "../../logic/db-in-use.ts";
 import type { LiveScene } from "../livescene.ts";
+import { openSaveSheet } from "./save-sheet.ts";
 
-type Cur = { uid: string; v: number; name: string } | null;
+type Cur = { uid: string; v: number; name: string; shown?: number } | null;
 type SaveResult = { uid?: string; v?: number; refused?: string[]; error?: string };
 type G = {
-  __saveScene?: (o?: { name?: string; asNew?: boolean; buttonSays?: boolean }) => Promise<SaveResult>;
+  __saveScene?: (o?: { name?: string; asNew?: boolean; buttonSays?: boolean; description?: string; picture?: Blob | null; slices?: boolean }) => Promise<SaveResult>;
+  /** The picture a save keeps (live-views.ts): the 3D view, or with `slices` the whole layout. */
+  __scenePicture?: (o?: { slices?: boolean }) => Promise<Blob | null>;
   __currentScene?: () => Cur;
   /** The database the scans on screen came from, or "mixed" (slicer-app.ts). */
   __dataDb?: () => string | null;
   __setCurrentScene?: (c: Cur) => void;
-  __openScene?: (uid: string) => Promise<{ ok: boolean; error?: string }>;
+  __openScene?: (uid: string, o?: { version?: number; draft?: boolean; newest?: number }) => Promise<{ ok: boolean; error?: string }>;
   __closeScene?: () => Promise<boolean>;
   __showScenesWindow?: () => Promise<void> | void;
   __proposedSceneName?: () => string;
@@ -99,8 +102,12 @@ async function check(): Promise<void> {
 }
 const schedule = () => { clearTimeout(timer); timer = setTimeout(() => void check(), 700) as unknown as number; };
 /** After a save or an open: what is on screen now is the saved scene. */
-export function markSceneClean(settleMs = 2500): void { baseline = null; settleUntil = performance.now() + settleMs; dirty = false; repaintAll(); schedule(); }
-export const sceneDirty = () => dirty;
+export function markSceneClean(settleMs = 2500): void { baseline = null; settleUntil = performance.now() + settleMs; dirty = false; forcedDirty = false; repaintAll(); schedule(); }
+export const sceneDirty = () => dirty || forcedDirty;
+/** A change no comparison can see yet (a draft continued inside the settle window): Save is offered until the next clean
+ *  (critic 2026-11-08, step 1, nit 5). */
+let forcedDirty = false;
+export function markSceneChanged(): void { forcedDirty = true; repaintAll(); }
 
 // ── the store ──
 async function currentDbOf(): Promise<{ id: string; name: string; nameOf: (id: string) => string } | null> {
@@ -130,9 +137,34 @@ export async function renameCurrentScene(name: string): Promise<boolean> {
 }
 
 // ── the actions, the same from every placement and from the keyboard ──
-async function doSave(btn: HTMLButtonElement | null, o: { name?: string; asNew?: boolean } = {}): Promise<void> {
+// THE SAVE SHEET (save-sheet.ts) on a scene's first save, on Save as…, and on Save with a description…; a plain Save keeps the
+// last version's name and description and takes a new picture (Contents/docs/SCENE-SAVING-2026-11-08.md, "By hand: Save").
+let lastSlices = false;
+async function doSave(btn: HTMLButtonElement | null, o: { name?: string; asNew?: boolean; sheet?: boolean } = {}): Promise<void> {
+  const cur = g.__currentScene?.();
+  let extra: { description?: string; picture?: Blob | null; slices?: boolean } = {};
+  if ((!cur || o.asNew || o.sheet) && loaded()) {
+    const home = g.__dataDb?.();
+    const db = await currentDbOf();
+    const dbName = home && home !== "mixed" && db ? db.nameOf(home) : db?.name ?? "the database";
+    let description = "";
+    if (cur && !o.asNew && home && home !== "mixed") {
+      const doc = await fetch(`/_db/${encodeURIComponent(home)}/_scene/${encodeURIComponent(cur.uid)}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { description?: string } | null;
+      description = doc?.description ?? "";
+    }
+    const a = await openSaveSheet({
+      dbName, description, slices: lastSlices,
+      name: o.name ?? (o.asNew && cur ? `${cur.name} — copy` : cur?.name ?? g.__proposedSceneName?.() ?? "Scene"),
+      picture: async (slices) => await g.__scenePicture?.({ slices }) ?? null,
+      root: (document.querySelector(".sl-app") as HTMLElement | null) ?? undefined,
+    });
+    if (!a) return;
+    lastSlices = a.slices;
+    o = { ...o, name: a.name };
+    extra = { description: a.description, picture: a.picture, slices: a.slices };
+  } else extra = { slices: lastSlices };
   const run = async () => {
-    const r = await g.__saveScene?.({ ...o, buttonSays: !!btn });
+    const r = await g.__saveScene?.({ ...o, ...extra, buttonSays: !!btn });
     if (!r || r.error || !r.uid) throw new Error(r?.error ?? "not saved");
     markSceneClean(800);
   };
@@ -140,15 +172,20 @@ async function doSave(btn: HTMLButtonElement | null, o: { name?: string; asNew?:
   else await run().catch(() => {});
   repaintAll();
 }
-async function doOpen(btn: HTMLButtonElement | null, uid: string): Promise<void> {
+/** Opens a scene (or one of its versions, or its unsaved work); says whether it opened (critic 2026-11-08, step 2, finding 1: a
+ *  version's Open went on after the person said Stop). */
+async function doOpen(btn: HTMLButtonElement | null, uid: string, o: { version?: number; draft?: boolean; newest?: number } = {}): Promise<boolean> {
+  let opened = false;
   const run = async () => {
-    const r = await g.__openScene?.(uid);
+    const r = await g.__openScene?.(uid, o);
     if (!r?.ok) { if (r?.error && r.error !== "stopped") shellRef?.notify({ title: "The scene did not open", body: esc(r.error) }); throw new Error(r?.error ?? "not opened"); }
-    markSceneClean();
+    if (!o.version && !o.draft) markSceneClean();   // an older version or the unsaved work is a change against the newest
+    opened = true;
   };
   if (btn) await runAction(btn, run, { busyLabel: "Opening…", doneLabel: "Opened", failedLabel: "Not opened" }).catch(() => {});
   else await run().catch(() => {});
   repaintAll();
+  return opened;
 }
 async function doClose(): Promise<void> {
   // ONE QUESTION (critic round 2, finding 7): __closeScene asks, naming what is not saved and whether the scene has changed.
@@ -159,7 +196,7 @@ async function doClose(): Promise<void> {
 async function showAll(): Promise<void> { await g.__showScenesWindow?.(); }
 /** For Load / Save (2026-11-07): its own Save button and scene list do what this menu does, with the same feedback. */
 export const saveSceneFrom = (btn: HTMLButtonElement) => doSave(btn);
-export const openSceneFrom = (btn: HTMLButtonElement | null, uid: string) => doOpen(btn, uid);
+export const openSceneFrom = (btn: HTMLButtonElement | null, uid: string, o: { version?: number; draft?: boolean; newest?: number } = {}) => doOpen(btn, uid, o);
 /** Called whenever the scene controls repaint (a save, an open, a change); the caller drops itself when it is gone. */
 export function watchScenes(fn: () => void): void { repaints.add(fn); }
 
@@ -177,7 +214,7 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "sl-tool sl-scene-btn";
-  btn.textContent = "Scene ▾";
+  btn.innerHTML = `Scene <span class="sl-caret">▾</span>`;   // the triangle 15 px (theme.css, .sl-caret)
   wrap.appendChild(btn);
   let pop: HTMLElement | null = null;
   let filter = "";
@@ -192,10 +229,10 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
   const paintButton = () => {
     if (btn.dataset.slBusy === "1") return;                 // runAction owns the word while it runs
     const cur = g.__currentScene?.();
-    const colored = dirty && !opts.neverColored;
+    const colored = sceneDirty() && !opts.neverColored;
     btn.classList.toggle("sl-primary", colored);
     btn.title = cur
-      ? `Scene: “${cur.name}”${dirty ? " — changed since the last save" : ` — saved (save ${cur.v})`}`
+      ? `Scene: “${cur.name}”${sceneDirty() ? " — changed since the last save" : ` — saved (save ${cur.v})`}`
       : loaded() ? "Not saved as a scene yet — open the menu to save it" : "Open a saved scene";
   };
   const close = () => { pop?.remove(); pop = null; naming = null; filter = ""; document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", onKey, true); removeEventListener("resize", close); };
@@ -222,9 +259,10 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
         : `<div class="sl-scene-name" title="Click to rename">${esc(cur.name)} <span class="sl-scene-pen">✎</span></div>`;
       const home = g.__dataDb?.();
       const where = home && home !== "mixed" ? ` in ${esc(nameOfDb(home))}` : "";
-      head += `<div class="sl-scene-sub">${dirty ? `Changed since the last save${where ? ` (saved${where})` : ""}` : `Saved${where} — save ${cur.v}`}</div>`;
+      head += `<div class="sl-scene-sub">${sceneDirty() ? `Changed since the last save${where ? ` (saved${where})` : ""}` : `Saved${where} — save ${cur.v}`}</div>`;
     } else if (any) {
-      head = `<div class="sl-scene-sub">Not saved yet — the name it will get:</div><input class="sl-scene-name-in" value="${esc(g.__proposedSceneName?.() ?? "Scene")}">`;
+      // The name is asked in the save sheet, with the description and the picture (not here as well).
+      head = `<div class="sl-scene-name">${esc(g.__proposedSceneName?.() ?? "Scene")}</div><div class="sl-scene-sub">Not saved yet: Save asks for its name and a description</div>`;
     } else {
       head = `<div class="sl-scene-name sl-scene-none">Nothing loaded</div><div class="sl-scene-sub">Open a scene, or load data</div>`;
     }
@@ -232,7 +270,8 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
     pop.innerHTML = `
       <div class="sl-scene-head">${head}</div>
       <button class="sl-scene-mi sl-scene-save" ${any ? "" : "disabled"}><span>${saveLabel}</span><span class="sl-scene-k">${naming === "saveas" ? "↩" : keyLabel("S")}</span></button>
-      ${cur && naming !== "saveas" ? `<button class="sl-scene-mi sl-scene-saveas"><span>Save as…</span><span class="sl-scene-k">a new scene; this one stays</span></button>` : ""}
+      ${cur ? `<button class="sl-scene-mi sl-scene-savedesc"><span>Save with a description…</span><span class="sl-scene-k">name, description, picture</span></button>` : ""}
+      ${cur ? `<button class="sl-scene-mi sl-scene-saveas"><span>Save as…</span><span class="sl-scene-k">a new scene; this one stays</span></button>` : ""}
       <div class="sl-scene-sep"></div>
       <div class="sl-scene-sec" title="The database the scenes are saved in; Another database… below chooses another">Scenes in ${dbLabel ? esc(dbLabel) : "this database"} · ${q ? `${shown.length} of ${rows.length}` : rows.length}</div>
       <input class="sl-scene-search" placeholder="Search scenes" value="${esc(filter)}">
@@ -251,7 +290,9 @@ export function sceneControl(opts: SceneControlOptions = {}): HTMLElement {
       else if (mode === "rename" && nm) void renameCurrentScene(nm).then(() => doSave(btn));
       else void doSave(btn, cur ? {} : { name: nm || undefined });
     });
-    pop.querySelector(".sl-scene-saveas")?.addEventListener("click", () => { naming = "saveas"; paintMenu(); });
+    // Save as… and Save with a description… open the save sheet (name, description, picture) rather than naming in the menu.
+    pop.querySelector(".sl-scene-saveas")?.addEventListener("click", () => { close(); void doSave(btn, { asNew: true }); });
+    pop.querySelector(".sl-scene-savedesc")?.addEventListener("click", () => { close(); void doSave(btn, { sheet: true }); });
     pop.querySelector(".sl-scene-all")?.addEventListener("click", () => { close(); void showAll(); });
     pop.querySelector(".sl-scene-otherdb")?.addEventListener("click", () => { close(); (globalThis as unknown as { __chooseDatabase?: () => void }).__chooseDatabase?.(); });
     pop.querySelector(".sl-scene-close")?.addEventListener("click", () => { close(); void doClose(); });

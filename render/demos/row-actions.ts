@@ -8,6 +8,7 @@
 //   - A right-click on the row opens the same menu.
 // In a row that a click SELECTS (Segmentations chooses the tree it shows), the first click selects and a click on the
 // name of the row already selected renames it -- as Finder does; the pencil shows only where a click would rename.
+import { decorate } from "./icon-set.ts";
 
 export interface RowAction { label: string; run: () => void; title?: string }
 
@@ -92,6 +93,7 @@ export function addRowMenu(row: HTMLElement, actions: () => RowAction[], what = 
   b.textContent = "⋯";
   b.title = `More for ${what}: rename, remove`;
   b.setAttribute("aria-haspopup", "menu");
+  decorate(b, "more", { only: true });   // Wendy Plesniak's "more" (icon set v2; the mockup's lists: "her ⋯")
   b.addEventListener("click", (e) => {
     e.stopPropagation();
     if (openMenu) { closeMenu(); return; }

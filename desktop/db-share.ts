@@ -101,6 +101,14 @@ const ALLOW: { method: string; rest: RegExp }[] = [
   { method: "DELETE", rest: /^_write\/[^/]+$/ },                      // a failed save takes its files back (this session's only)
   { method: "PUT", rest: /^_scene\/([0-9.]+|new)$/ },                  // a scene saved over, or a new one
   { method: "DELETE", rest: /^_scene\/[0-9.]+$/ },
+  // A scene's versions, its continuous states and draft (desktop/scene-versions.ts; critic 2026-11-08, step 1, finding 7).
+  { method: "GET", rest: /^_scene\/[0-9.]+\/(_versions|_version\/\d+|_draft)$/ },
+  { method: "DELETE", rest: /^_scene\/[0-9.]+\/(_version\/\d+|_draft)$/ },
+  { method: "PUT", rest: /^_scene\/[0-9.]+\/_work$/ },
+  { method: "POST", rest: /^_scene\/[0-9.]+\/_work$/ },
+  // A version's picture (critic 2026-11-08, step 2, finding 9): read, and kept at a save (a JPEG of at most 2 MB, putPicture checks).
+  { method: "GET", rest: /^_scene\/[0-9.]+\/_picture(\/\d+)?$/ },
+  { method: "PUT", rest: /^_scene\/[0-9.]+\/_picture\/\d+$/ },
   { method: "PUT", rest: /^_attribute$/ },                            // of one of the database's own series (checked below)
   // NOT: adding scans by upload and import (the critic 2026-10-28, round 2, R2-1: an import put a slice into an original
   // acquisition's series, around the rule a save keeps). Scans are added on the Mac that holds the database.
@@ -327,7 +335,9 @@ export function shareHandler(o: ShareOptions): ((req: Request) => Promise<Respon
         await keepWritten();
       }
     }
-    const sceneM = /^_scene\/([0-9.]+)$/.exec(ok.rest);
+    // A scene, or the picture of one of its versions: only one this Mac saved there (a picture of the other Mac's scene is not
+    // this Mac's to replace).
+    const sceneM = /^_scene\/([0-9.]+)(\/_picture\/\d+)?$/.exec(ok.rest);
     if (sceneM && (req.method === "PUT" || req.method === "DELETE") && !mine.scenes.has(sceneM[1])) return no(403, "only a scene this Mac saved there in this session can be changed or removed from here; save it as a new scene");
     if (req.method !== "GET") say(`${req.method} ${url.pathname} (${who.name})`);
     const res = await handleDbRequest(fwd, o.galleryRoot) ?? no(404, "not found");

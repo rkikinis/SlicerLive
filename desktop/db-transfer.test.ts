@@ -261,3 +261,23 @@ Deno.test("finding 16: a folder beside the database whose index cannot be read h
   assertEquals(await heldBySibling(`${parent}/Project`, ct.seriesInstanceUID), false);
   await Deno.chmod(`${parent}/Broken/ctkDICOM.sql`, 0o644);
 });
+
+// A SERIES A SCENE'S VERSION USES STAYS (Ron, 2026-11-08; db-index.ts deleteSeriesLocked): Delete is refused and says by which
+// scene and version; once the scene's versions no longer name it, it goes.
+Deno.test("a series an older version of a scene uses is not deleted, and the refusal says which", async () => {
+  const { deleteSeriesFromDatabase } = await import("./db-index.ts");
+  const a = `${await tmp("albula-use-")}/Project`;
+  const { ct, seg } = await project(a, "Project");
+  const both = { ...scene(ct.studyInstanceUID, ct.seriesInstanceUID), nodes: { ...scene(ct.studyInstanceUID, ct.seriesInstanceUID).nodes,
+    n3: { id: "n3", type: "image", dims: [2, 2, 2], ijkToRAS: Array(16).fill(0), dicom: { seriesInstanceUID: seg.seriesInstanceUID, studyInstanceUID: ct.studyInstanceUID, sopInstanceUIDs: ["1.2.3.9.2"], instanceCount: 2 } } } };
+  const put = await putScene(a, "new", both);
+  assert(!("error" in put));
+  // version 2 leaves the outline out; version 1 still names it
+  assert(!("error" in await putScene(a, put.uid, { ...scene(ct.studyInstanceUID, ct.seriesInstanceUID), v: 2, source: { producer: "test", producedAt: "2026-10-02T10:00:00Z", origin: "w1" } })));
+  const e = await assertRejects(() => deleteSeriesFromDatabase(a, seg.seriesInstanceUID));
+  assert(/the scene “planning” \(version 1\)/.test((e as Error).message), (e as Error).message);
+  // the scene deleted (its versions with it): the outline can go
+  assert(await deleteScene(a, put.uid));
+  const r = await deleteSeriesFromDatabase(a, seg.seriesInstanceUID);
+  assertEquals(r.series, 1);
+});

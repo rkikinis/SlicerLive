@@ -4,6 +4,10 @@
 // scene list, the AI module, and the diffusion extension through the SDK -- so they cannot drift apart. Drawn in the
 // text color (no emoji: an emoji's colors and size change with the system font), never faded: a hidden row is said by
 // the closed eye, not by fading it. "some": the open eye with an empty pupil, for a group in which only some are shown.
+// HIDDEN, CROSSED OUT (Ron, 2026-11-08, choosing between the closed eye and a crossed-out one, with Wendy Plesniak's icons:
+// "Albula shown and Albula crossed out"): under icon set v2 (render/demos/icon-set.ts) hidden is the same open eye with a
+// line through it, a gap cut around the line so it reads on any row color; under v1 the closed eye, as before.
+import { iconsOn } from "./icon-set.ts";
 export type EyeState = "shown" | "hidden" | "some";
 
 const OPEN = `<path d="M1.5 8C3.4 4.6 5.6 3.2 8 3.2S12.6 4.6 14.5 8C12.6 11.4 10.4 12.8 8 12.8S3.4 11.4 1.5 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>`;
@@ -11,6 +15,12 @@ const SVG = (body: string) => `<svg class="sl-eye" viewBox="0 0 16 16" width="16
 
 /** The eye as inline SVG markup, for a button's innerHTML. */
 export function eyeSvg(state: EyeState): string {
+  if (state === "hidden" && iconsOn()) {
+    return SVG(`<mask id="sl-eye-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/>` +
+      `<path d="M2.2 13.8L13.8 2.2" stroke="black" stroke-width="3.2" stroke-linecap="round"/></mask>` +
+      `<g mask="url(#sl-eye-cut)">${OPEN}<circle cx="8" cy="8" r="2.3" fill="currentColor"/></g>` +
+      `<path d="M2.2 13.8L13.8 2.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>`);
+  }
   if (state === "hidden") {
     return SVG(`<path d="M1.5 7C3.4 10 5.6 11.3 8 11.3S12.6 10 14.5 7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>` +
       `<path d="M3.6 9.2L2.6 11M6.2 10.9L5.8 12.9M9.8 10.9L10.2 12.9M12.4 9.2L13.4 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>`);

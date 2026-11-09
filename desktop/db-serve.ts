@@ -38,7 +38,7 @@ import { readSettings, resolveSettingsPath, withSettingsLock, writeSettings } fr
 import { cleanDescription, createDatabase, defaultDatabasesFolder, DESCRIPTION_FILE, icloudWarning, idFor, readDescription, writeDescription, type DbDescription } from "./db-create.ts";
 import { filesUnder, IMPORT_FOLDER, importFiles, type ImportProgress, type ImportResult } from "./db-import.ts";
 import { privateFieldsSummary } from "./private-fields.ts";
-import { chooseFolder, chosenFolder } from "./choose-folder.ts";
+import { chooseFilesOrFolders, chooseFolder, chosenFiles, chosenFolder } from "./choose-folder.ts";
 import { bringDatabase, carryRecords, inspectFolder, packageFacts } from "./package-open.ts";
 import { isInside, placeOf } from "./paths.ts";
 import { moveToTrash, otherItems, trashRefusal } from "./db-remove.ts";
@@ -181,7 +181,10 @@ const FEATURES = [
   "private-fields", // GET /_db/<id>/_private-fields -- vendor private fields held and read (private-fields.ts)
   "found",         // GET /_db answers {folder, found}: the databases in "SlicerAlbulaDatabases" not in the list; POST /_db/_register {path} lists one
   "reveal",        // POST /_db/_reveal {id} | {path}: Finder shows a database's folder, or the databases folder
-  "choose-folder", // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase} (macOS's own dialog)
+  // macOS's own dialogs, offered on macOS only (they run osascript; Ron, 2026-11-07: "Will we have the equivalent behavior if someone in the future tries on windows or linux?"):
+  // POST /_db/_choose-folder {prompt} -> {token, path, name, hasDatabase}; POST /_db/_choose {prompt} -> {folders, files}, files
+  // or folders in one panel, chosen files served by GET /_db/_files/<token>/<n> (choose-folder.ts).
+  ...(Deno.build.os === "darwin" ? ["choose-folder", "choose"] : []),
   "folder-view",   // GET /_db/_folder/<token>/_list and /_db/_folder/<token>/<rel>: the chosen folder's files, read only
   "import",        // POST /_db/<id>/_import {token, sub?, move?} | {upload}; POST /_db/<id>/_upload/<job>/<n>; GET /_db/_import/<job>
   "package",       // POST /_db/_package/inspect {token}; POST /_db/_adopt {token, move, name?} (desktop/package-open.ts)
@@ -321,6 +324,31 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
       return Response.json({ ...c, hasDatabase }, noStore);
     } catch (e) {
       return Response.json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+
+  // POST /_db/_choose {prompt} -- files or folders in one macOS panel (choose-folder.ts): each folder a token, as from
+  // _choose-folder (with hasDatabase), the files one token whose files only GET /_db/_files/<token>/<n> serves.
+  if (url.pathname === "/_db/_choose" && req.method === "POST") {
+    try {
+      const b = await jsonBody();
+      const r = await chooseFilesOrFolders(String(b.prompt ?? ""));
+      if (!r) return Response.json({ cancelled: true }, noStore);
+      const folders = await Promise.all(r.folders.map(async (c) => ({ ...c, hasDatabase: await Deno.stat(`${c.path}/ctkDICOM.sql`).then((x) => x.isFile, () => false) })));
+      return Response.json({ folders, files: r.files ? { token: r.files.token, names: r.files.names } : null }, noStore);
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 500 });
+    }
+  }
+  // GET /_db/_files/<token>/<n> -- the n-th file of a chosen set, read only; nothing else under its folder.
+  const cf = /^\/_db\/_files\/([0-9a-f-]{36})\/(\d+)$/.exec(url.pathname);
+  if (cf && req.method === "GET") {
+    const set = chosenFiles(cf[1]), path = set?.paths[Number(cf[2])];
+    if (!path) return Response.json({ error: "that file was not chosen in this session; choose it again" }, { status: 404 });
+    try {
+      return new Response(await Deno.readFile(path), { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: e instanceof Deno.errors.NotFound ? 404 : 400 });
     }
   }
 
@@ -893,7 +921,7 @@ export async function handleDbRequest(req: Request, galleryRoot?: string): Promi
     catch (e) { return Response.json({ error: (e as Error).message }, { status: 500 }); }
   }
 
-  // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (Files…, a drop), waiting in the staging folder.
+  // POST /_db/<id>/_upload/<job>/<n> -- one file a page holds (files chosen with Choose…, a drop), waiting in the staging folder.
   // POST /_db/<id>/_import {token} | {upload: <job>} -- add a chosen folder, or the uploads, to this database.
   // DELETE /_db/<id>/_upload/<job> -- the uploads of a copy the person stopped, before any import: dropped.
   const upDrop = /^\/_db\/([^/]+)\/_upload\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(url.pathname);

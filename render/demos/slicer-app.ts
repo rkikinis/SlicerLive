@@ -4,10 +4,11 @@
 // mrson channel + LiveSync (WS A). Query params: ?host=, ?gui=ws://..., ?ws=ws://..., ?http=...,
 // ?nativeMenus=1 (host provides menus; hide the streamed menubar).
 import { sizeClass, startWork } from "../working.ts";
-import { initSceneControl, keyLabel, markSceneClean, SHORTCUTS, sceneControl, sceneDirty, sceneIdentityChanged } from "./scene-control.ts";
+import { initSceneControl, keyLabel, markSceneChanged, markSceneClean, SHORTCUTS, sceneControl, sceneDirty, sceneIdentityChanged } from "./scene-control.ts";
 import { openFloatingWindow } from "./floating-window.ts";
 import { dbInUse } from "../../logic/db-in-use.ts";
 import { schemeAtStart, setPaletteVersion } from "../../logic/anatomy/palettes.ts";
+import { decorate, type IconName, iconsOn, layoutIconHtml, setIconSetVersion } from "./icon-set.ts";
 import { setShadingVersion, shadingVersion } from "../shading-versions.ts";
 import { initDevice } from "../device.ts";
 import { type AuditResult, auditWords } from "./audit-words.ts";
@@ -704,6 +705,8 @@ async function main() {
     setPaletteVersion(at.version);
   }
   setShadingVersion(appSettingsNow?.getNumber("View3D", "shading", SETTING_DEFAULTS.View3D.shading) ?? SETTING_DEFAULTS.View3D.shading);
+  // Settings › General › Icons (render/demos/icon-set.ts), before the shell builds the bar.
+  setIconSetVersion(appSettingsNow?.getNumber("Icons", "set", SETTING_DEFAULTS.Icons.set) ?? SETTING_DEFAULTS.Icons.set);
   // For the pane and the critic: set the shading version in this window, or ask it.
   (globalThis as unknown as { __shading?: (v?: number) => number }).__shading = (v?: number) => { if (typeof v === "number") setShadingVersion(v); return shadingVersion(); };
   // Settings › Loading › "Load images from their fast copy" (render/zarr-copy.ts), the same way.
@@ -738,6 +741,29 @@ async function main() {
     // THE SETTINGS STORE, opened once here so the shell's module restore, the 3D view's defaults
     // and the Settings dialog read the same one. `appSettings` resolves before anything asks.
     shell = mountAppShell(appEl, { title: "SlicerAlbula", restoreModule: () => appSettingsNow?.getBool("Launch", "restoreModule", SETTING_DEFAULTS.Launch.restoreModule) ?? true });
+
+    // THE BAR WITH PICTURES (Ron, 2026-11-07/08, mockups/albula-icons-whole-window-2026-11-07.html: "B", icons only as Slicer's
+    // toolbar; "Just a single load/save in the top menu bringing up the load save module"): Load / Save before the module button;
+    // find, before and after after it (the module history). Under icon set v1 (words) the bar stays as it was.
+    if (iconsOn()) {
+      const sh0 = shell;
+      const mods = sh0.root.querySelector(".sl-modules") as HTMLElement, picker = mods.querySelector(".sl-module-picker") as HTMLElement;
+      const barBtn = (name: IconName, word: string, tip: string, act: () => void) => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "sl-tool sl-bar-ico"; b.textContent = word; b.title = tip;
+        decorate(b, name, { only: true });
+        b.addEventListener("click", act);
+        return b;
+      };
+      mods.insertBefore(barBtn("loadSave", "Load / Save", "Load / Save: open scans and scenes, choose the database, save what is on screen",
+        () => void sh0.showPanel("add-data")), picker);
+      const find = barBtn("findModule", "Find a module", "Find a module by name", () => sh0.findModule());
+      const back = barBtn("moduleBack", "The module before", "The module before", () => sh0.moduleHistory.back());
+      const fwd = barBtn("moduleForward", "The module after", "The module after", () => sh0.moduleHistory.forward());
+      mods.append(find, back, fwd);
+      const paintHist = () => { const s = sh0.moduleHistory.state(); back.disabled = !s.back; fwd.disabled = !s.forward; };
+      sh0.moduleHistory.onChange(paintHist); paintHist();
+    }
 
     // SAY IT WHEN THE GPU STOPS. render/device.ts detects a lost device and an uncaptured error;
     // without this they reach only the console, and the console is not where someone whose images
@@ -1122,12 +1148,24 @@ async function main() {
     const layoutHost = document.createElement("div");
     layoutHost.className = "sl-module-picker";
     layoutHost.title = "Layout";
+    // THE PICTURE BUTTON (icon set v2; Slicer has one on its bar): the views as the 3D panel's Picture · Save… saves them,
+    // with its choices (Settings › Pictures), into Downloads; that function says where it went.
+    if (iconsOn()) {
+      const pic = document.createElement("button");
+      pic.type = "button"; pic.className = "sl-tool sl-bar-ico"; pic.textContent = "Picture";
+      pic.title = "A picture of the views, into your Downloads folder";
+      decorate(pic, "picture", { only: true });
+      pic.addEventListener("click", () => void (globalThis as unknown as { __savePicture?: () => Promise<unknown> }).__savePicture?.());
+      sh.toolbar.appendChild(pic);
+    }
     sh.toolbar.appendChild(layoutHost);
     let layoutOpen = false, layoutFilter = "";
     const drawLayoutPicker = () => {
       layoutHost.innerHTML = "";
       sh.searchablePicker(layoutHost, {
-        options: layoutList().map((l) => ({ value: String(l.id), label: l.name })),
+        options: layoutList().map((l) => ({ value: String(l.id), label: l.name,
+          icon: iconsOn() ? (layoutIconHtml(l.name, "sl-pic-menu") || `<span class="sl-pic-none"></span>`) : undefined })),
+        iconButton: iconsOn(),
         selected: String(layoutId),
         open: layoutOpen,
         filter: layoutFilter,
@@ -1525,18 +1563,11 @@ Object.assign(globalThis, {
         if (!fresh && original && dbId) void fetch(`/_db/${encodeURIComponent(dbId)}/_attribute`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ uid: newUid, key: "editedFrom", value: original, source: "albula" }) }).catch(() => {});
         let kept: string | undefined;
         if (priorCopy && !o.asNew && priorCopy !== newUid && dbId) {
-          // A saved scene that lists the older copy would lose it: keep it then, and say which scene.
-          const list = await fetch(`/_db/${encodeURIComponent(dbId)}/_scenes`, { cache: "no-store" }).then((r) => r.json()).catch(() => ({ scenes: [] })) as { scenes?: { uid: string; name: string }[] };
-          let usedBy = "";
-          for (const sc of list.scenes ?? []) {
-            const doc = await fetch(`/_db/${encodeURIComponent(dbId)}/_scene/${encodeURIComponent(sc.uid)}`, { cache: "no-store" }).then((r) => r.json()).catch(() => null) as { nodes?: Record<string, { dicom?: { seriesInstanceUID?: string } }> } | null;
-            if (Object.values(doc?.nodes ?? {}).some((x) => x.dicom?.seriesInstanceUID === priorCopy)) { usedBy = sc.name; break; }
-          }
-          if (usedBy) kept = `the earlier copy stays: the scene “${usedBy}” uses it`;
-          else {
-            await fetch(`/_db/${encodeURIComponent(dbId)}/_series/${encodeURIComponent(priorCopy)}`, { method: "DELETE" }).catch(() => {});
-            kept = "the earlier copy was replaced";
-          }
+          // A SCENE THAT USES THE OLDER COPY KEEPS IT: any saved version or continuous state of any scene (the server decides,
+          // desktop/db-index.ts deleteSeriesLocked; Ron, 2026-11-08). Its refusal says which scene and versions.
+          const r = await fetch(`/_db/${encodeURIComponent(dbId)}/_series/${encodeURIComponent(priorCopy)}`, { method: "DELETE" }).catch(() => null);
+          const why = r && !r.ok ? ((await r.json().catch(() => ({}))) as { error?: string }).error : undefined;
+          kept = !r ? "the earlier copy stays: the database could not be reached" : r.ok ? "the earlier copy was replaced" : `the earlier copy stays: ${why ?? "it is still used"}`;
           (globalThis as unknown as { __refreshDicomDb?: () => Promise<number | null> }).__refreshDicomDb?.();
         }
         return { ok: true, name, kept };
@@ -1719,7 +1750,9 @@ Object.assign(globalThis, {
     // (desktop/scenes.ts): a file beside the database and a row the browser lists. The window
     // remembers which scene it holds (uid, v, name) so a second save updates it; a save the store
     // refuses because another window saved since is said, not overwritten.
-    let currentScene_: { uid: string; v: number; name: string } | null = null;
+    // `shown`: the saved version on screen when it is not the newest (opened from the Scenes module's look); `v` stays the newest,
+    // so the next save adds on top (critic 2026-11-08, step 2, finding 4).
+    let currentScene_: { uid: string; v: number; name: string; shown?: number } | null = null;
     /**
      * WHICH SCENE THIS WINDOW IS IN, published for the modules.
      *
@@ -1755,7 +1788,7 @@ Object.assign(globalThis, {
       const task = ((seg?.origin as { task?: string } | undefined)?.task ?? "").split(":").pop()?.replace(/_/g, " ");
       return task ? `${base} — ${task}` : base;
     };
-    const saveScene = async (o: { name?: string; asNew?: boolean; withoutRefused?: boolean; buttonSays?: boolean } = {}): Promise<{ uid?: string; v?: number; refused?: string[]; error?: string }> => {
+    const saveScene = async (o: { name?: string; asNew?: boolean; withoutRefused?: boolean; buttonSays?: boolean; description?: string; picture?: Blob | null; slices?: boolean } = {}): Promise<{ uid?: string; v?: number; refused?: string[]; error?: string }> => {
       const dbs = await fetch("/_db", { cache: "no-store" }).then((r) => r.ok ? r.json() : null).catch(() => null) as { databases?: { id: string; current?: boolean; exists?: boolean; description?: { name?: string } }[]; features?: string[] } | null;
       const esc0 = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       // THE SCANS' OWN DATABASE FIRST, then the one in use (finding 1 above); never another one in its place (finding 2).
@@ -1825,14 +1858,26 @@ Object.assign(globalThis, {
       }
       if (w.problems.length) { shell?.notify({ title: "The scene did not pass its check", body: w.problems.slice(0, 6).map((p) => esc(`${p.where}: ${p.what}`)).join("<br>") }); return { error: "check failed" }; }
       const uid = o.asNew || !currentScene_ ? "new" : currentScene_.uid;
+      // THE DESCRIPTION (the save sheet's; a plain save keeps the last version's): one or two lines the person wrote.
+      let description = o.description;
+      if (description === undefined && uid !== "new") {
+        const last = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(uid)}`, { cache: "no-store" }).then((x) => x.ok ? x.json() : null).catch(() => null) as { description?: string } | null;
+        description = last?.description;
+      }
+      if (description) (w.doc as Record<string, unknown>).description = description;
+      // THE PICTURE, TAKEN NOW, at the press, not after the server answers (critic 2026-11-08, step 2, finding 8): the save sheet's
+      // when it showed one (what was seen is what is kept), else a new one as last chosen; sent once the version exists.
+      const picP: Promise<Blob | null> = o.picture !== undefined ? Promise.resolve(o.picture)
+        : ((globalThis as unknown as { __scenePicture?: (x?: { slices?: boolean }) => Promise<Blob | null> }).__scenePicture?.({ slices: o.slices }) ?? Promise.resolve(null)).catch(() => null);
       const res = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${uid}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(w.doc) });
       const r = await res.json().catch(() => ({ error: `HTTP ${res.status}` })) as { uid?: string; v?: number; bytes?: number; error?: string; rowV?: number; code?: string; dicom?: { error?: string } };
       if (res.status === 409) {
         // Overwrite saves as the row's v + 1 in ONE step; the 409 says what the row is at (critic, finding 6).
         const rowV = r.rowV ?? (currentScene_?.v ?? 0) + 1;
-        shell?.notify({ title: "Another window saved this scene since", body: esc(r.error ?? ""), actions: [
+        shell?.notify({ title: (r.error ?? "").startsWith("the newest version") ? "The newest version of this scene was deleted" : "Another window saved this scene since", body: esc(r.error ?? ""), actions: [
           { label: "Save as a new scene", primary: true, onClick: () => { void saveScene({ ...o, asNew: true }); } },
-          { label: "Overwrite", onClick: () => { currentScene_ = currentScene_ ? { ...currentScene_, v: rowV } : null; sceneChanged(); void saveScene(o); } },
+          // SAVE ADDS A VERSION: the other's save is kept as a version too, nothing is overwritten (critic, step 1, finding 12).
+          { label: "Save it as the newest version", onClick: () => { currentScene_ = currentScene_ ? { ...currentScene_, v: rowV } : null; sceneChanged(); void saveScene(o); } },
         ] });
         return { error: r.error };
       }
@@ -1840,6 +1885,15 @@ Object.assign(globalThis, {
       if (res.status === 400 && r.code === "gone" && !o.asNew) return await saveScene({ ...o, asNew: true, name });
       if (!res.ok || !r.uid) { shell?.notify({ title: "The scene was not saved", body: esc(r.error ?? `HTTP ${res.status}`) }); return { error: r.error }; }
       currentScene_ = { uid: r.uid, v: r.v ?? 1, name }; dataDb_ = cur.id; sceneChanged();
+      // ITS PICTURE, taken now and kept beside the version (desktop/scene-versions.ts, putPicture): the Scenes rows and the look
+      // show it (Ron, 2026-11-08: "If I had a way to save, I could add a picture to the scene"). Not awaited: the save is done.
+      const picV = r.v ?? 1, picUid = r.uid;
+      void (async () => {
+        const pic = await picP;
+        if (!pic) return;
+        const put = await fetch(`/_db/${encodeURIComponent(cur.id)}/_scene/${encodeURIComponent(picUid)}/_picture/${picV}`, { method: "PUT", body: pic }).catch(() => null);
+        if (put?.ok) sceneChanged();
+      })();
       markSceneClean(800);   // HERE, not in one caller: a save from a notice's button is a save too (critic round 2, finding 3)
       const nodesN = Object.keys(w.doc.nodes as object).length;
       // THE RESULT LANDS WHERE THE PERSON IS. Saving the scene is done from Load / Save or from the
@@ -1863,17 +1917,60 @@ Object.assign(globalThis, {
     };
     // LOADING a scene lives in the Load Data panel (it owns the open database); that panel mounts
     // when first shown, so the hook is not there until then. Show it once, then call.
-    const loadScene = async (uid: string) => {
-      const g = globalThis as unknown as { __loadScene?: (uid: string) => Promise<{ ok: boolean; error?: string; v?: number; name?: string; db?: string }> };
+    const loadScene = async (uid: string, o: { version?: number; draft?: boolean; newest?: number } = {}) => {
+      const g = globalThis as unknown as { __loadScene?: (uid: string, o?: { version?: number; draft?: boolean }) => Promise<{ ok: boolean; error?: string; v?: number; name?: string; db?: string }> };
       if (!g.__loadScene) { await shell?.showPanel("add-data"); await new Promise((r) => setTimeout(r, 50)); }
       if (!g.__loadScene) return { ok: false, error: "the Load Data panel did not mount" };
-      const r = await g.__loadScene(uid);
+      const r = await g.__loadScene(uid, { version: o.version, draft: o.draft });
       // The loaded scene is now the current one: the next save is its v + 1 under its name. A load
       // that failed is not (a save after it would replace the file with an empty scene; critic, finding 2).
       // Clean HERE, for every way in -- Load / Save's scene rows, All scenes, a notice's "Open it" (critic round 2, finding 3).
-      if (r.ok) { currentScene_ = { uid, v: r.v ?? 1, name: r.name ?? "Scene" }; dataDb_ = r.db ?? dataDb_; sceneChanged(); markSceneClean(); }
+      if (r.ok) { currentScene_ = { uid, v: o.newest ?? r.v ?? 1, name: r.name ?? "Scene", shown: o.version }; dataDb_ = r.db ?? dataDb_; sceneChanged(); markSceneClean(); }
+      // An older version or the unsaved work on screen is a change against the newest version: Save is offered, and adds on top.
+      if (r.ok && (o.version || o.draft)) { markSceneChanged(); workSent = 0; return r; }
+      // THE DRAFT (desktop/scene-versions.ts; Ron, 2026-11-08: "keep as draft"): work left unsaved after the newest version is
+      // offered once the version is open; continuing loads it on top, and the next save makes it a version.
+      if (r.ok && r.db) {
+        const d = await fetch(`/_db/${encodeURIComponent(r.db)}/_scene/${encodeURIComponent(uid)}/_draft`, { cache: "no-store" }).then((x) => x.ok ? x.json() : null).catch(() => null) as { draft?: { at: string; doc: Record<string, unknown> } | null } | null;
+        if (d?.draft) {
+          const when = new Date(d.draft.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+          const scene = currentScene_;
+          shell?.notify({ title: `“${(r.name ?? "The scene").replace(/</g, "&lt;")}” has unsaved work`, body: `From ${when}, after the last version. It holds what was shown and how; a segmentation being edited and not yet saved to the database is not in it.`, actions: [
+            { label: "Continue where I left off", primary: true, onClick: () => { void (async () => {
+              const g = globalThis as unknown as { __loadSceneDoc?: (doc: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }> };
+              const l = await g.__loadSceneDoc?.(d.draft!.doc);
+              // Not marked clean: the tracker still holds the version's state, so the draft on top reads as changes and Save is offered.
+              if (l?.ok) { currentScene_ = scene; sceneChanged(); markSceneChanged(); workSent = 0; }
+              else shell?.notify({ title: "The unsaved work could not be opened", body: (l?.error ?? "").replace(/</g, "&lt;") });
+            })(); } },
+            { label: "Open the last version", onClick: () => {} },
+            { label: "Discard it", onClick: () => { void fetch(`/_db/${encodeURIComponent(r.db!)}/_scene/${encodeURIComponent(uid)}/_draft`, { method: "DELETE" }).catch(() => {}); } },
+          ] });
+        }
+      }
       return r;
     };
+    // CONTINUOUS SAVING (desktop/scene-versions.ts; Ron, 2026-11-08: "continous sving until the user saves a view"): while the
+    // open scene has changes since its newest version, its state is sent at most once a minute, as a continuous state (the
+    // "nightlies"); the server keeps them one step behind and as the draft. A scene never saved has no place yet: nothing is
+    // sent until its first save. What only a segmentation edited and not saved to DICOM holds is not in a state (the scene
+    // file lists what is in the database), a limit said in Contents/docs/SCENE-SAVING-2026-11-08.md.
+    let workSent = 0;
+    // `capturedAt`: when the state was taken, so one taken before a save is not kept as newer than it (critic, step 1, finding
+    // 11); the server skips one identical to the last (finding 6) and refuses one for a scene it no longer holds (finding 1).
+    const sendWork = async () => {
+      const sc = currentScene_, db = dataDb_;
+      if (!sc || !db || db === "mixed" || !sceneDirty()) return;
+      const capturedAt = new Date().toISOString();
+      const w = await writeScene(views.live.nodes.values(), {
+        producer: `SlicerAlbula ${BUILD_ID}`, origin: views.live.origin, name: sc.name, previousV: sc.v,
+        layout: { arrangement: (globalThis as unknown as { __layoutId?: number }).__layoutId ?? 0 }, extensions: collectExtensionState(),
+      });
+      if (w.empty || w.problems.length || currentScene_?.uid !== sc.uid) return;
+      const r = await fetch(`/_db/${encodeURIComponent(db)}/_scene/${encodeURIComponent(sc.uid)}/_work`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...w.doc, capturedAt }) }).catch(() => null);
+      if (r?.status === 404 && currentScene_?.uid === sc.uid) { currentScene_ = null; sceneChanged(); }   // deleted elsewhere: the next save is a new scene
+    };
+    setInterval(() => { if (performance.now() - workSent >= 60_000) { workSent = performance.now(); void sendWork(); } }, 15_000);
     // CLOSE THE SCENE. Asks first when something loaded is not saved anywhere; then the data goes
     // and no scene is current, so the next save is a new one.
     const closeScene = async (): Promise<boolean> => {
@@ -1884,6 +1981,8 @@ Object.assign(globalThis, {
       const loaded = [...views.live.nodes.values()].some((n) => ["image", "segmentation", "sequence", "markup", "model", "transform"].includes(n.type as string));
       if (!loaded) { shell?.notify({ title: "Nothing is loaded" }); return false; }
       const changed = !!currentScene_ && sceneDirty();
+      // THE LAST STATE BEFORE CLOSING (critic, step 1, finding 9): the draft holds what was on screen up to this moment.
+      if (changed) await sendWork().catch(() => {});
       if (unsaved.length || changed) {
         const ok = await shell?.confirm({
           title: "Close the scene?",

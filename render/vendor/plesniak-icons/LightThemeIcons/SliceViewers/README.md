@@ -1,0 +1,1 @@
+../../DarkThemeIcons/SliceViewerIcons/README.md

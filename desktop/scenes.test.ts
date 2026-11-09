@@ -89,3 +89,75 @@ Deno.test("the transport folder: package on one side, import on the other", asyn
   assertEquals(row.bytes, new TextEncoder().encode(await Deno.readTextFile(`${other}/SlicerAlbula-Scenes/${put.uid}.mrson.json`)).byteLength);
   assertEquals(row.series, 2);
 });
+
+// SAVE ADDS A VERSION (scene-versions.ts; Ron, 2026-11-08): both kept, the newest deleted by hand brings back the one before it,
+// the only one is refused (that is deleting the scene).
+Deno.test("save adds a version; deleting the newest version brings back the one before it", async () => {
+  const { deleteVersion } = await import("./scenes.ts");
+  const { listVersions } = await import("./scene-versions.ts");
+  const root = await Deno.makeTempDir();
+  const dbDir = `${root}/db`; await Deno.mkdir(dbDir);
+  const first = await putScene(dbDir, "new", doc(1, "first"));
+  assert(!("error" in first));
+  assert(!("error" in await putScene(dbDir, first.uid, doc(2, "second"))));
+  assertEquals((await listVersions(dbDir, first.uid)).map((x) => x.v), [1, 2]);
+  const only = await deleteVersion(dbDir, first.uid, 9);
+  assert("error" in only && only.status === 404);
+  const r = await deleteVersion(dbDir, first.uid, 2);
+  assert(!("error" in r) && r.newest === 1, JSON.stringify(r));
+  assertEquals((await listScenes(dbDir))[0].name, "first");
+  assertEquals((await readScene(dbDir, first.uid) as { v: number }).v, 1);
+  const last = await deleteVersion(dbDir, first.uid, 1);
+  assert("error" in last && last.status === 409, "the only version is the scene");
+  // the next save after going back is version 2 again
+  assert(!("error" in await putScene(dbDir, first.uid, doc(2, "again"))));
+  assertEquals((await listVersions(dbDir, first.uid)).map((x) => x.v), [1, 2]);
+});
+
+// THE ROUTES, as the server answers them (handleSceneRoutes): versions, one version, a continuous state, the draft, a delete.
+Deno.test("the version and draft routes answer through the scene routes", async () => {
+  const { handleSceneRoutes } = await import("./scenes.ts");
+  const root = await Deno.makeTempDir();
+  const dbDir = `${root}/db`; await Deno.mkdir(dbDir);
+  const first = await putScene(dbDir, "new", doc(1, "first"));
+  assert(!("error" in first));
+  const call = async (path: string, init?: RequestInit) => {
+    const url = new URL(`http://x/_db/t${path}`);
+    const r = await handleSceneRoutes(new Request(url, init), url, "t", dbDir);
+    assert(r, `no route for ${path}`);
+    return { status: r.status, body: await r.json() };
+  };
+  assertEquals((await call(`/_scene/${first.uid}/_versions`)).body.versions.map((x: { v: number }) => x.v), [1]);
+  assertEquals((await call(`/_scene/${first.uid}/_version/1`)).body.name, "first");
+  assertEquals((await call(`/_scene/${first.uid}/_draft`)).body.draft, null);
+  const w = await call(`/_scene/${first.uid}/_work`, { method: "PUT", body: JSON.stringify(doc(1, "working")) });
+  assertEquals(w.status, 200);
+  assertEquals((await call(`/_scene/${first.uid}/_draft`)).body.draft.doc.name, "working");
+  assertEquals((await call(`/_scene/${first.uid}/_version/1`, { method: "DELETE" })).status, 409);   // the only one
+});
+
+// A VERSION'S PICTURE through the routes: PUT .../_picture/<v> (a JPEG), GET it back, the newest's without a number, and the
+// scene list saying which scenes have one (the Scenes module's rows).
+Deno.test("the picture routes keep a version's picture and the list says which scenes have one", async () => {
+  const { handleSceneRoutes } = await import("./scenes.ts");
+  const root = await Deno.makeTempDir();
+  const dbDir = `${root}/db`; await Deno.mkdir(dbDir);
+  const first = await putScene(dbDir, "new", doc(1, "first"));
+  assert(!("error" in first));
+  const call = async (path: string, init?: RequestInit) => {
+    const url = new URL(`http://x/_db/t${path}`);
+    const r = await handleSceneRoutes(new Request(url, init), url, "t", dbDir);
+    assert(r, `no route for ${path}`);
+    return r;
+  };
+  assertEquals((await call(`/_scene/${first.uid}/_picture`)).status, 404);
+  assertEquals((await (await call(`/_scenes`)).json()).scenes[0].picture, false);
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 7, 7]);
+  assertEquals((await call(`/_scene/${first.uid}/_picture/1`, { method: "PUT", body: jpeg })).status, 200);
+  assertEquals((await call(`/_scene/${first.uid}/_picture/2`, { method: "PUT", body: jpeg })).status, 404, "no version 2");
+  const got = await call(`/_scene/${first.uid}/_picture`);
+  assertEquals(got.headers.get("content-type"), "image/jpeg");
+  assertEquals([...new Uint8Array(await got.arrayBuffer())], [...jpeg]);
+  assertEquals((await (await call(`/_scenes`)).json()).scenes[0].picture, true);
+  assertEquals((await (await call(`/_scene/${first.uid}/_versions`)).json()).versions[0].picture, true);
+});

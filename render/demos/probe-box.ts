@@ -38,7 +38,7 @@ const CSS = `
 .sl-probe.sl-probe-closed > :not(.sl-probe-h) { display: none; }
 .sl-probe-h { font: 600 10px -apple-system, system-ui, sans-serif; letter-spacing: .06em;
   text-transform: uppercase; opacity: .6; margin-bottom: 6px; cursor: pointer; user-select: none; }
-.sl-probe-h::before { content: "▾ "; }
+.sl-probe-h::before { content: "▾ "; font-size: 15px; line-height: 1; }
 .sl-probe-closed .sl-probe-h::before { content: "▸ "; }
 .sl-probe-closed .sl-probe-h { margin-bottom: 0; }
 .sl-probe-pos { color: var(--sl-fg); }

@@ -78,6 +78,10 @@ export interface AppShell {
   statusEl: HTMLElement;
   registerPanel(spec: PanelSpec): void;
   showPanel(id: string): Promise<void>;
+  /** The modules shown, in order, for the bar's before and after buttons (as Slicer's module history). */
+  moduleHistory: { back(): void; forward(): void; state(): { back: boolean; forward: boolean }; onChange(fn: () => void): void };
+  /** Open the module list with its search field ready (the bar's find button). */
+  findModule(): void;
   /** Mount a panel without showing it (its mount sets up what other code uses); nothing when mounted already. */
   mountPanel(id: string): Promise<void>;
   activePanel(): string | null;
@@ -154,7 +158,10 @@ export interface AppShell {
      * modules it is the Help & Acknowledgment prose, so "nnU-Net" finds AI segmentations without
      * anyone maintaining a keyword list (Slicer's `FullTextSearchRole`, same idea).
      */
-    options: { value: string; label: string; group?: string; search?: string; tip?: string }[];
+    options: { value: string; label: string; group?: string; search?: string; tip?: string; icon?: string }[];
+    /** ICONS (Albula, 2026-11-08): an option's `icon` is a picture's HTML, drawn before its label in the list; with
+     *  `iconButton`, the closed picker is the chosen option's picture and a triangle, its name the tooltip. */
+    iconButton?: boolean;
     /** Heading order. Anything not named here follows, alphabetically. */
     groupOrder?: string[];
     selected?: string;
@@ -206,10 +213,13 @@ export async function runAction<T>(
   const wasDisabled = btn.disabled;
   let done = false, failed = false;
   btn.dataset.slBusy = "1";
+  // THE BUTTON'S PICTURE STAYS (render/demos/icon-set.ts): its words change, the picture before them does not.
+  const ico = btn.querySelector(":scope > .sl-pic");
+  const say = (t: string) => { btn.textContent = t; if (ico) btn.prepend(ico); };
   btn.classList.remove("sl-action-done", "sl-action-failed");
   btn.classList.add("sl-action-busy");
   btn.disabled = true;
-  btn.textContent = opts.busyLabel ?? `${label}…`;
+  say(opts.busyLabel ?? `${label}…`);
   // Two frames: one to lay the change out, one to be sure it has been presented. A hidden tab never
   // animates, so the timeout is the escape hatch -- without it a background export would hang here.
   await new Promise<void>((resolve) => {
@@ -237,14 +247,14 @@ export async function runAction<T>(
     // The word stays a beat longer than the color, because the word is the message -- and a
     // failure says so in the same place ("Not saved"), for as long as a success would have said
     // "Saved" (critic 2026-09-22, 2.1: a swallowed error read "Saved ✓").
-    btn.textContent = failed ? (opts.failedLabel ?? label) : done && opts.doneLabel ? opts.doneLabel : label;
+    say(failed ? (opts.failedLabel ?? label) : done && opts.doneLabel ? opts.doneLabel : label);
     delete btn.dataset.slBusy;
     setTimeout(() => {
       btn.classList.remove("sl-action-done", "sl-action-failed");
       // Whatever it said -- the done word or the failure word -- the button goes back to being a
       // button that offers to do the thing. A failure word left standing is a lie about the NEXT
       // press as much as about this one.
-      if (btn.textContent === opts.doneLabel || btn.textContent === opts.failedLabel) btn.textContent = label;
+      if (btn.textContent === opts.doneLabel || btn.textContent === opts.failedLabel) say(label);
     }, done && opts.doneLabel ? 4000 : 2600);
   }
 }
@@ -280,6 +290,7 @@ export function fourUpCells(rect: DOMRect): { id: string; kind: "slice" | "3d"; 
  */
 // The build stamp and versioned worker URLs live in render/build-id.ts, which has no DOM in it.
 export { BUILD_ID, workerUrl } from "../build-id.ts";
+import { iconsOn, moduleIconHtml } from "./icon-set.ts";
 import { startWork } from "../working.ts";
 import { BUILD_ID } from "../build-id.ts";
 
@@ -471,6 +482,8 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
   }, true);
 
   const modulePicker = $(".sl-module-picker");
+  // With pictures the module button is the module's picture (Ron, 2026-11-07, the bar as Slicer's: "B"); the word goes.
+  if (iconsOn()) ($(".sl-modules-label")).hidden = true;
   // THE MODULE LIST IS THE SAME SEARCHABLE PICKER as the AI panel's network list.
   //
   // It was a native <select>, whose popup macOS places OVER the current item -- so it opened
@@ -488,6 +501,20 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
   const els = new Map<string, HTMLElement>();
   const mounted = new Set<string>();
   let active: string | null = null;
+  // THE MODULE HISTORY (the bar's before and after buttons): every module shown, in order; going back and forward walks it
+  // without adding to it, and showing a module after going back drops what lay ahead, as a browser's history does.
+  let hist: string[] = [], at = -1, walking = false;
+  const histFns = new Set<() => void>();
+  const noteShown = (id: string) => {
+    if (!walking && hist[at] !== id) { hist = hist.slice(0, at + 1); hist.push(id); at = hist.length - 1; }
+    for (const f of histFns) f();
+  };
+  const walk = (step: number) => {
+    const to = at + step;
+    if (to < 0 || to >= hist.length) return;
+    at = to; walking = true;
+    void showPanel(hist[at]).finally(() => { walking = false; for (const f of histFns) f(); });
+  };
 
   const rebuildSelect = () => {
     // One entry per (module, group) pair, so a module in two groups appears in both without being
@@ -504,7 +531,10 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
     modulePicker.innerHTML = "";
     shell.searchablePicker(modulePicker, {
       groupOrder: GROUP_ORDER,
+      // ICONS (render/demos/icon-set.ts): a picture beside each module's name, and the bar's button the module's picture.
+      iconButton: iconsOn(),
       options: entries.map(({ s, g }) => ({
+        icon: iconsOn() ? (moduleIconHtml(s.id, "sl-pic-menu") || `<span class="sl-pic-none"></span>`) : undefined,
         value: s.id,
         label: s.title,
         group: g || undefined,
@@ -563,6 +593,8 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
        <a href="https://github.com/pieper/SlicerLive"><b>SlicerLive</b></a>,
        <a href="https://github.com/Slicer/Slicer"><b>3D Slicer</b></a>, and
        <a href="https://github.com/mhalle/haversack"><b>haversack</b></a>.</p>
+      <p>Icons designed by Wendy Plesniak in collaboration with the 3D Slicer developer team. Style is based on and incorporates some
+       of Google's Material Symbols (Apache License Version 2.0).</p>
        <p>Ron Kikinis. Written with AI assistance (Claude, Anthropic) under human direction and
        review.</p>
        <p class="sl-hint">Build <b>${BUILD_ID}</b></p>`;
@@ -615,7 +647,7 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
     if (!spec) return;
     const el = containerFor(id, spec);
     for (const [pid, sec] of sections) sec.hidden = pid !== id;
-    active = id; rebuildSelect();
+    active = id; rebuildSelect(); noteShown(id);
     if (!mounted.has(id)) { mounted.add(id); await spec.mount(el, shell); }
     spec.onShow?.(el);
     try { localStorage.setItem("sl.activePanel", id); } catch { /* private mode */ }
@@ -715,6 +747,12 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
   const restoreModule = () => opts.restoreModule?.() ?? true;
   const shell: AppShell = {
     root, sidebar, toolbar, main, statusEl,
+    moduleHistory: {
+      back: () => walk(-1), forward: () => walk(1),
+      state: () => ({ back: at > 0, forward: at < hist.length - 1 }),
+      onChange: (fn) => { histFns.add(fn); },
+    },
+    findModule() { modulePickerOpen = true; moduleFilter = ""; rebuildSelect(); (modulePicker.querySelector(".sl-picker-filter") as HTMLInputElement | null)?.focus(); },
     registerPanel(spec) {
       if (specs.some((s) => s.id === spec.id)) throw new Error(`panel ${spec.id} already registered`);
       specs.push(spec); rebuildSelect();
@@ -946,6 +984,14 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
       btn.type = "button";
       btn.className = "sl-picker-btn";
       btn.textContent = current?.label ?? o.selected ?? "—";
+      if (o.iconButton && current?.icon) {
+        const word = btn.textContent;
+        btn.innerHTML = `${current.icon}<span class="sl-pic-word"></span>`;
+        (btn.lastElementChild as HTMLElement).textContent = word;
+        btn.classList.add("sl-pic-only");
+        btn.title = current.tip ? `${word}: ${current.tip}` : word;
+        btn.setAttribute("aria-label", word);
+      }
       wrap.appendChild(btn);
       parent.appendChild(wrap);
 
@@ -996,7 +1042,9 @@ export function mountAppShell(root: HTMLElement, opts: ShellOptions = {}): AppSh
         check.textContent = selected ? "✓" : "";
         const label = document.createElement("span");
         label.textContent = x.label;
-        row.append(check, label);
+        row.append(check);
+        if (x.icon !== undefined) row.insertAdjacentHTML("beforeend", x.icon);
+        row.append(label);
         // While filtering the headings are gone, so the group travels with the row instead -- a
         // grouped list that stays grouped under a filter makes you read five headings to find two
         // matches.

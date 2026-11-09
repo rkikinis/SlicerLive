@@ -18,6 +18,7 @@
 // tooltip says so. Every control has a one-sentence tooltip: the label is for the person who does
 // not read, the tooltip for the one who hovers.
 import { LATEST_PALETTE, PALETTES, setPaletteVersion } from "../../logic/anatomy/palettes.ts";
+import { ICON_SETS, LATEST_ICON_SET } from "./icon-set.ts";
 import { LATEST_SHADING, SHADINGS, setShadingVersion } from "../shading-versions.ts";
 import type { SettingsStore } from "../../logic/settings.ts";
 import { openFloatingWindow } from "./floating-window.ts";
@@ -43,6 +44,7 @@ export const SETTING_DEFAULTS = {
   Pictures: { folder: "downloads", only3d: false, panel: false, scale: 1 },
   View3D: { drawing: true, lighting: LIGHT_PRESETS[DEFAULT_LIGHT].name, shading: LATEST_SHADING },
   Colors: { scheme: LATEST_PALETTE },
+  Icons: { set: LATEST_ICON_SET },
   Developer: { steps: false },
 } as const;
 
@@ -175,6 +177,15 @@ export function openSettingsDialog(deps: SettingsDeps): void {
           () => String(st.getNumber("Colors", "scheme", SETTING_DEFAULTS.Colors.scheme)),
           (v) => { st.set("Colors", "scheme", Number(v)); setPaletteVersion(Number(v)); })));
       into.appendChild(hint("Saved segmentations and scenes keep the colors they were saved with."));
+
+      // THE ICONS, BY VERSION (render/demos/icon-set.ts), as the colors are. The bar is built once, at start, so a change
+      // applies when the window is opened again.
+      into.appendChild(h2("Icons"));
+      into.appendChild(row("Icons", "Pictures on the bar, on the views' bars and beside the words in the modules, or words as before. Earlier versions stay available.",
+        select(ICON_SETS.map((s) => [String(s.version), `v${s.version} — ${s.name} (${s.date})`] as [string, string]).reverse(),
+          () => String(st.getNumber("Icons", "set", SETTING_DEFAULTS.Icons.set)),
+          (v) => st.set("Icons", "set", Number(v)))));
+      into.appendChild(hint("Applies the next time the window opens. Icons designed by Wendy Plesniak in collaboration with the 3D Slicer developer team. Style is based on and incorporates some of Google's Material Symbols (Apache License Version 2.0)."));
 
       into.appendChild(h2("At launch"));
       into.appendChild(row("Open the module I was in", "Start in the module that was open when the window closed, instead of Welcome.",

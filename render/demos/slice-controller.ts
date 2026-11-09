@@ -2,6 +2,7 @@
 // an offset slider (mm along the normal, from vtkMRMLSliceLogic::GetSliceOffsetRangeResolution), and a fit
 // button. Plain DOM in the theme; a pure adapter supplies the data so it works over native sliceView nodes
 // and over a Slicer peer's slice nodes alike. Reuses the app theme tokens (--sl-view-* per cell colour).
+import { decorate, iconsOn } from "./icon-set.ts";
 import { LINE_VIEWS, lineOrientation } from "../../logic/line-axes.ts";
 import { GEAR_SVG } from "./gear-icon.ts";
 
@@ -60,6 +61,12 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
   const value = bar.querySelector(".sl-slice-value") as HTMLElement;
   const fit = bar.querySelector(".sl-slice-fit") as HTMLButtonElement;
   const btn3d = bar.querySelector(".sl-slice-3d") as HTMLButtonElement | null;
+  // ICONS (render/demos/icon-set.ts, v2; Ron, 2026-11-08, the slice bars: "hers"): Wendy Plesniak's pictures for "show in 3D"
+  // and the view's settings. Under v1 the word 3D and Albula's gear, as before.
+  if (iconsOn()) {
+    if (btn3d) decorate(btn3d, "sliceIn3d", { only: true });
+    fit.innerHTML = ""; fit.textContent = "View settings"; decorate(fit, "sliceSettings", { only: true });
+  }
 
   let editing = false;
   const refresh = () => {
